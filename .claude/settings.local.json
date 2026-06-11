@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh api *)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(dir C:\\\\starpets)",
+      "Bash(git -C \"C:\\\\starpets\" status)",
+      "Bash(git -C \"C:\\\\starpets\" remote -v)",
+      "Bash(git -C \"C:\\\\starpets\" init)",
+      "Bash(git -C \"C:\\\\starpets\" remote add origin https://github.com/bebr2014/starpets.git)",
+      "Bash(git -C \"C:\\\\starpets\" add .)",
+      "Bash(git -C \"C:\\\\starpets\" commit -m \"initial structure\")"
+    ]
+  }
+}
