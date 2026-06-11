@@ -25,7 +25,7 @@ class StarPetsClient:
             if isinstance(params[key], (dict, list)):
                 continue
             parts.append(f"{key}={params[key]}")
-        message = "; ".join(parts)
+        message = ";".join(parts)
         return hmac.new(
             settings.starpets_secret.encode(),
             message.encode(),

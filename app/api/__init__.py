@@ -24,7 +24,7 @@ async def myip():
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
-    sign_input = "; ".join(
+    sign_input = ";".join(
         f"{k}={params[k]}" for k in sorted(params.keys())
         if not isinstance(params[k], (dict, list))
     )
