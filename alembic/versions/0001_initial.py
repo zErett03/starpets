@@ -15,8 +15,36 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+offerstatus = sa.Enum(
+    "pending_create", "draft", "active", "paused", "error",
+    name="offerstatus",
+)
+deliverystatus = sa.Enum(
+    "pending", "dispatched", "done", "finalized", "failed", "needs_attention",
+    name="deliverystatus",
+)
+taskkind = sa.Enum(
+    "CREATE_OFFER", "UPDATE_PRICE_BATCH", "TOGGLE_STATUS_BATCH",
+    "DELIVER", "MONITOR_DELIVERY", "MARK_DELIVERED", "TRADE_WATCH",
+    name="taskkind",
+)
+taskstatus = sa.Enum(
+    "pending", "processing", "done", "failed",
+    name="taskstatus",
+)
+webhookkind = sa.Enum(
+    "precheck", "notification",
+    name="webhookkind",
+)
+
 
 def upgrade() -> None:
+    offerstatus.create(op.get_bind(), checkfirst=True)
+    deliverystatus.create(op.get_bind(), checkfirst=True)
+    taskkind.create(op.get_bind(), checkfirst=True)
+    taskstatus.create(op.get_bind(), checkfirst=True)
+    webhookkind.create(op.get_bind(), checkfirst=True)
+
     op.create_table(
         "offers",
         sa.Column("id", sa.Integer, primary_key=True),
@@ -29,7 +57,7 @@ def upgrade() -> None:
         sa.Column("ggsel_offer_id", sa.Integer, unique=True, nullable=True),
         sa.Column("ggsel_id_goods", sa.Integer, unique=True, nullable=True),
         sa.Column("ggsel_option_id", sa.Integer, nullable=True),
-        sa.Column("status", sa.String, nullable=False, server_default="pending_create"),
+        sa.Column("status", offerstatus, nullable=False, server_default="pending_create"),
         sa.Column("price_usd", sa.Numeric(10, 3), nullable=True),
         sa.Column("price_rub", sa.Numeric(10, 2), nullable=True),
         sa.Column("starpets_qty", sa.Integer, default=0),
@@ -57,7 +85,7 @@ def upgrade() -> None:
         sa.Column("starpets_status", sa.String, nullable=True),
         sa.Column("starpets_error_code", sa.String, nullable=True),
         sa.Column("exec_price_usd", sa.Numeric(10, 3), nullable=True),
-        sa.Column("delivery_status", sa.String, nullable=False, server_default="pending"),
+        sa.Column("delivery_status", deliverystatus, nullable=False, server_default="pending"),
         sa.Column("ggsel_marked_delivered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("paid_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=True),
@@ -69,9 +97,9 @@ def upgrade() -> None:
     op.create_table(
         "tasks",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("kind", sa.String, nullable=False),
+        sa.Column("kind", taskkind, nullable=False),
         sa.Column("priority", sa.SmallInteger, default=10),
-        sa.Column("status", sa.String, nullable=False, server_default="pending"),
+        sa.Column("status", taskstatus, nullable=False, server_default="pending"),
         sa.Column("payload", sa.JSON, nullable=True),
         sa.Column("attempts", sa.Integer, default=0),
         sa.Column("max_attempts", sa.Integer, default=5),
@@ -86,7 +114,7 @@ def upgrade() -> None:
     op.create_table(
         "webhook_events",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("kind", sa.String, nullable=False),
+        sa.Column("kind", webhookkind, nullable=False),
         sa.Column("external_id", sa.String, unique=True, nullable=False),
         sa.Column("payload", sa.JSON, nullable=True),
         sa.Column("response_code", sa.Integer, nullable=True),
@@ -111,3 +139,8 @@ def downgrade() -> None:
     op.drop_table("tasks")
     op.drop_table("orders")
     op.drop_table("offers")
+    offerstatus.drop(op.get_bind(), checkfirst=True)
+    deliverystatus.drop(op.get_bind(), checkfirst=True)
+    taskkind.drop(op.get_bind(), checkfirst=True)
+    taskstatus.drop(op.get_bind(), checkfirst=True)
+    webhookkind.drop(op.get_bind(), checkfirst=True)
