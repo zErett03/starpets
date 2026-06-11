@@ -45,21 +45,23 @@ def upgrade() -> None:
         EXCEPTION WHEN duplicate_object THEN NULL; END $$;
     """))
 
-    conn.execute(sa.text(
-        "ALTER TABLE offers ALTER COLUMN status TYPE offerstatus USING status::offerstatus"
-    ))
-    conn.execute(sa.text(
-        "ALTER TABLE orders ALTER COLUMN delivery_status TYPE deliverystatus USING delivery_status::deliverystatus"
-    ))
-    conn.execute(sa.text(
-        "ALTER TABLE tasks ALTER COLUMN kind TYPE taskkind USING kind::taskkind"
-    ))
-    conn.execute(sa.text(
-        "ALTER TABLE tasks ALTER COLUMN status TYPE taskstatus USING status::taskstatus"
-    ))
-    conn.execute(sa.text(
-        "ALTER TABLE webhook_events ALTER COLUMN kind TYPE webhookkind USING kind::webhookkind"
-    ))
+    conn.execute(sa.text("ALTER TABLE offers ALTER COLUMN status DROP DEFAULT"))
+    conn.execute(sa.text("ALTER TABLE offers ALTER COLUMN status TYPE offerstatus USING status::offerstatus"))
+    conn.execute(sa.text("ALTER TABLE offers ALTER COLUMN status SET DEFAULT 'pending_create'"))
+
+    conn.execute(sa.text("ALTER TABLE orders ALTER COLUMN delivery_status DROP DEFAULT"))
+    conn.execute(sa.text("ALTER TABLE orders ALTER COLUMN delivery_status TYPE deliverystatus USING delivery_status::deliverystatus"))
+    conn.execute(sa.text("ALTER TABLE orders ALTER COLUMN delivery_status SET DEFAULT 'pending'"))
+
+    conn.execute(sa.text("ALTER TABLE tasks ALTER COLUMN kind DROP DEFAULT"))
+    conn.execute(sa.text("ALTER TABLE tasks ALTER COLUMN kind TYPE taskkind USING kind::taskkind"))
+
+    conn.execute(sa.text("ALTER TABLE tasks ALTER COLUMN status DROP DEFAULT"))
+    conn.execute(sa.text("ALTER TABLE tasks ALTER COLUMN status TYPE taskstatus USING status::taskstatus"))
+    conn.execute(sa.text("ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'pending'"))
+
+    conn.execute(sa.text("ALTER TABLE webhook_events ALTER COLUMN kind DROP DEFAULT"))
+    conn.execute(sa.text("ALTER TABLE webhook_events ALTER COLUMN kind TYPE webhookkind USING kind::webhookkind"))
 
 
 def downgrade() -> None:
