@@ -21,6 +21,23 @@ async def myip():
         return resp.json()
 
 
+@app.get("/test-products")
+async def test_products():
+    params = {
+        **starpets._base_params(),
+        "limit": 5,
+    }
+    async with httpx.AsyncClient(headers=starpets._headers(starpets._sign(params)), timeout=10) as client:
+        resp = await client.get(
+            f"{starpets.base_url}/products/ex-buyers/all-by-cursor",
+            params=params,
+        )
+        return {
+            "status_code": resp.status_code,
+            "body": resp.json(),
+        }
+
+
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
