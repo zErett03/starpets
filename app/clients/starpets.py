@@ -39,6 +39,28 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_all_products(self) -> list:
+        all_items = []
+        cursor = None
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                params = {**self._base_params(), "limit": 500}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await client.get(
+                    f"{self.base_url}/products/ex-buyers/all-by-cursor",
+                    headers=self._headers(self._sign(params)),
+                    params=params,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("items") or data.get("data") or []
+                all_items.extend(items)
+                cursor = data.get("cursor") or data.get("next_cursor")
+                if not cursor or not items:
+                    break
+        return all_items
+
     async def get_products(self) -> dict:
         params = self._base_params()
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
