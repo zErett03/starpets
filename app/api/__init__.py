@@ -24,12 +24,9 @@ async def myip():
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
-    sign_input = ";".join(
-        f"{k}={params[k]}" for k in sorted(params.keys())
-        if not isinstance(params[k], (dict, list))
-    )
-    params["sign"] = starpets._sign(params)
-    async with httpx.AsyncClient(headers=starpets._headers(), timeout=10) as client:
+    sign_input = ";".join(f"{k}:{v}" for k, v in params.items()) + ";"
+    sig = starpets._sign(params)
+    async with httpx.AsyncClient(headers=starpets._headers(sig), timeout=10) as client:
         resp = await client.get(
             f"{starpets.base_url}/ex-buyers/info/me",
             params=params,
@@ -37,5 +34,6 @@ async def test_starpets():
         return {
             "status_code": resp.status_code,
             "sign_input": sign_input,
+            "signature": sig,
             "body": resp.json(),
         }
