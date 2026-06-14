@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     starpets_api_key: str
     starpets_secret: str
+    starpets_shared_key: str
+    starpets_account_id: str
     starpets_base_url: str = "https://market.neuralgeneration.com/api"
 
     ggsel_api_key: str

@@ -10,27 +10,21 @@ class StarPetsClient:
     def __init__(self):
         self.base_url = settings.starpets_base_url
 
-    def _headers(self) -> dict:
-        return {
-            "Api_Key": settings.starpets_api_key,
-            "X-Api-Key": settings.starpets_api_key,
-            "Content-Type": "application/json",
-        }
-
     def _sign(self, params: dict) -> str:
-        parts = []
-        for key in sorted(params.keys()):
-            if key == "sign":
-                continue
-            if isinstance(params[key], (dict, list)):
-                continue
-            parts.append(f"{key}:{params[key]}")
-        message = ";".join(parts) + ";"
+        qs = ";".join(f"{k}:{v}" for k, v in params.items()) + ";"
         return hmac.new(
             settings.starpets_secret.encode(),
-            message.encode(),
+            qs.encode(),
             hashlib.sha512,
         ).hexdigest()
+
+    def _headers(self, signature: str) -> dict:
+        return {
+            "Api_Key": settings.starpets_shared_key,
+            "X-Api-Key": settings.starpets_account_id,
+            "Signature": signature,
+            "Content-Type": "application/json",
+        }
 
     def _base_params(self) -> dict:
         return {
@@ -40,16 +34,14 @@ class StarPetsClient:
 
     async def get_info(self) -> dict:
         params = self._base_params()
-        params["sign"] = self._sign(params)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=10) as client:
             resp = await client.get(f"{self.base_url}/info", params=params)
             resp.raise_for_status()
             return resp.json()
 
     async def get_products(self) -> dict:
         params = self._base_params()
-        params["sign"] = self._sign(params)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
             resp = await client.get(f"{self.base_url}/products", params=params)
             resp.raise_for_status()
             return resp.json()
@@ -58,8 +50,7 @@ class StarPetsClient:
         params = self._base_params()
         if item_ids:
             params["item_ids"] = ",".join(item_ids)
-        params["sign"] = self._sign(params)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
             resp = await client.get(f"{self.base_url}/items", params=params)
             resp.raise_for_status()
             return resp.json()
@@ -76,9 +67,8 @@ class StarPetsClient:
             "max_price_usd": max_price_usd,
             "custom_id": custom_id,
         }
-        payload["sign"] = self._sign(payload)
         print(f"[buy_items] payload: {payload}", flush=True)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
             resp = await client.post(f"{self.base_url}/buy", json=payload)
             print(f"[buy_items] status={resp.status_code} response={resp.text[:500]}", flush=True)
             resp.raise_for_status()
@@ -94,9 +84,8 @@ class StarPetsClient:
             "purchase_id": purchase_id,
             "roblox_username": roblox_username,
         }
-        payload["sign"] = self._sign(payload)
         print(f"[create_trade] payload: {payload}", flush=True)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
             resp = await client.post(f"{self.base_url}/trade", json=payload)
             print(f"[create_trade] status={resp.status_code} response={resp.text[:500]}", flush=True)
             resp.raise_for_status()
@@ -107,8 +96,7 @@ class StarPetsClient:
             **self._base_params(),
             "custom_id": custom_id,
         }
-        params["sign"] = self._sign(params)
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=10) as client:
             resp = await client.get(f"{self.base_url}/trade/status", params=params)
             resp.raise_for_status()
             return resp.json()
