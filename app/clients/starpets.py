@@ -54,11 +54,11 @@ class StarPetsClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                items = data.get("items") or data.get("data") or []
+                items = data.get("products") or []
                 all_items.extend(items)
-                cursor = data.get("cursor") or data.get("next_cursor")
-                if not cursor or not items:
+                if len(items) < 500:
                     break
+                cursor = items[-1]["id"]
         return all_items
 
     async def get_products(self) -> dict:
