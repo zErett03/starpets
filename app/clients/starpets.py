@@ -67,10 +67,8 @@ class StarPetsClient:
             "max_price_usd": max_price_usd,
             "custom_id": custom_id,
         }
-        print(f"[buy_items] payload: {payload}", flush=True)
         async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
             resp = await client.post(f"{self.base_url}/buy", json=payload)
-            print(f"[buy_items] status={resp.status_code} response={resp.text[:500]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
@@ -84,10 +82,8 @@ class StarPetsClient:
             "purchase_id": purchase_id,
             "roblox_username": roblox_username,
         }
-        print(f"[create_trade] payload: {payload}", flush=True)
         async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
             resp = await client.post(f"{self.base_url}/trade", json=payload)
-            print(f"[create_trade] status={resp.status_code} response={resp.text[:500]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
