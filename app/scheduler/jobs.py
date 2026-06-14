@@ -1,11 +1,14 @@
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.db import AsyncSessionLocal
 from app.db.models import Offer, OfferStatus, Task, TaskKind
+
+UPSERT_BATCH = 500
 
 
 async def starpets_sync():
@@ -14,7 +17,6 @@ async def starpets_sync():
     try:
         from app.fx import get_usd_rub
         fx_rate = await get_usd_rub()
-        print(f"[Scheduler] FX rate: {fx_rate}")
     except Exception as e:
         from app.alerts import warn
         await warn(f"fx_rate_stale: {e}")
@@ -24,63 +26,59 @@ async def starpets_sync():
     from app.config import settings
 
     try:
-        snapshot = await starpets.get_items()
-        items = snapshot.get("items") or snapshot.get("data") or []
-        print(f"[Scheduler] Got {len(items)} items from StarPets")
-        print(f"[DEBUG] first item: {items[0] if items else 'empty'}")
+        products = await starpets.get_all_products()
+        print(f"[Scheduler] Got {len(products)} products from StarPets")
     except Exception as e:
         from app.alerts import warn
         await warn(f"starpets_sync_failed: {e}")
         return
 
+    rows = []
+    now = datetime.utcnow()
+    for p in products:
+        name = p.get("name")
+        price_usd = float(p.get("price_usd") or p.get("price") or 0)
+        if not name or not price_usd:
+            continue
+        price_rub = round(price_usd * fx_rate * settings.markup, 2)
+        if price_rub < settings.min_price_rub:
+            continue
+        rows.append({
+            "name": name,
+            "item_type": p.get("type") or p.get("item_type"),
+            "rare": p.get("rare") or p.get("rarity"),
+            "flyable": bool(p.get("flyable", False)),
+            "rideable": bool(p.get("rideable", False)),
+            "age": p.get("age"),
+            "price_usd": price_usd,
+            "price_rub": price_rub,
+            "starpets_qty": p.get("qty") or p.get("quantity") or 0,
+            "last_synced_at": now,
+            "status": OfferStatus.pending_create,
+        })
+
     async with AsyncSessionLocal() as db:
-        updated = 0
-        created = 0
-
-        for item in items:
-            name = item.get("name")
-            price_usd = float(item.get("price_usd") or item.get("price") or 0)
-            qty = item.get("qty") or item.get("quantity") or 0
-
-            if not name or not price_usd:
-                continue
-
-            price_rub = round(price_usd * fx_rate * settings.markup, 2)
-            if price_rub < settings.min_price_rub:
-                continue
-
-            result = await db.execute(select(Offer).where(Offer.name == name))
-            offer = result.scalar_one_or_none()
-
-            if offer:
-                offer.price_usd = price_usd
-                offer.price_rub = price_rub
-                offer.starpets_qty = qty
-                offer.item_type = item.get("type") or item.get("item_type")
-                offer.rare = item.get("rare") or item.get("rarity")
-                offer.flyable = bool(item.get("flyable", False))
-                offer.rideable = bool(item.get("rideable", False))
-                offer.age = item.get("age")
-                offer.last_synced_at = datetime.utcnow()
-                updated += 1
-            else:
-                offer = Offer(
-                    name=name,
-                    item_type=item.get("type") or item.get("item_type"),
-                    rare=item.get("rare") or item.get("rarity"),
-                    flyable=bool(item.get("flyable", False)),
-                    rideable=bool(item.get("rideable", False)),
-                    age=item.get("age"),
-                    price_usd=price_usd,
-                    price_rub=price_rub,
-                    starpets_qty=qty,
-                    last_synced_at=datetime.utcnow(),
-                )
-                db.add(offer)
-                created += 1
-
+        for i in range(0, len(rows), UPSERT_BATCH):
+            batch = rows[i:i + UPSERT_BATCH]
+            stmt = pg_insert(Offer).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["name"],
+                set_={
+                    "price_usd": stmt.excluded.price_usd,
+                    "price_rub": stmt.excluded.price_rub,
+                    "starpets_qty": stmt.excluded.starpets_qty,
+                    "item_type": stmt.excluded.item_type,
+                    "rare": stmt.excluded.rare,
+                    "flyable": stmt.excluded.flyable,
+                    "rideable": stmt.excluded.rideable,
+                    "age": stmt.excluded.age,
+                    "last_synced_at": stmt.excluded.last_synced_at,
+                },
+            )
+            await db.execute(stmt)
         await db.commit()
-        print(f"[Scheduler] starpets_sync done: {created} created, {updated} updated")
+
+    print(f"[Scheduler] starpets_sync done: {len(rows)} rows upserted")
 
 
 async def reconcile():
