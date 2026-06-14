@@ -14,24 +14,14 @@ UPSERT_BATCH = 500
 async def starpets_sync():
     print(f"[Scheduler] starpets_sync started at {datetime.utcnow()}")
 
-    try:
-        from app.fx import get_usd_rub
-        fx_rate = await get_usd_rub()
-    except Exception as e:
-        from app.alerts import warn
-        await warn(f"fx_rate_stale: {e}")
-        return
+    from app.fx import get_usd_rub
+    fx_rate = await get_usd_rub()
 
     from app.clients.starpets import starpets
     from app.config import settings
 
-    try:
-        products = await starpets.get_all_products()
-        print(f"[Scheduler] Got {len(products)} products from StarPets")
-    except Exception as e:
-        from app.alerts import warn
-        await warn(f"starpets_sync_failed: {e}")
-        return
+    products = await starpets.get_all_products()
+    print(f"[Scheduler] Got {len(products)} products from StarPets")
 
     rows = []
     now = datetime.utcnow()
@@ -57,6 +47,8 @@ async def starpets_sync():
             "status": OfferStatus.pending_create,
         })
 
+    print(f"[Scheduler] Prepared {len(rows)} rows for upsert")
+
     async with AsyncSessionLocal() as db:
         for i in range(0, len(rows), UPSERT_BATCH):
             batch = rows[i:i + UPSERT_BATCH]
@@ -81,6 +73,15 @@ async def starpets_sync():
     print(f"[Scheduler] starpets_sync done: {len(rows)} rows upserted")
 
 
+async def starpets_sync_safe():
+    try:
+        await starpets_sync()
+    except Exception as e:
+        print(f"[Scheduler] starpets_sync error: {e}", flush=True)
+        from app.alerts import warn
+        await warn(f"starpets_sync_failed: {e}")
+
+
 async def reconcile():
     print(f"[Scheduler] reconcile started at {datetime.utcnow()}")
     from app.workers.reconciler import reconcile as do_reconcile
@@ -99,7 +100,7 @@ async def trade_protection():
 
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(starpets_sync, "interval", minutes=10, id="starpets_sync")
+    scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
     scheduler.add_job(reconcile, "interval", hours=1, id="reconcile")
     scheduler.add_job(trade_protection, "interval", hours=1, id="trade_protection")
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")

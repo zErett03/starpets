@@ -35,10 +35,13 @@ async def db_stats():
 @app.get("/test-sync")
 async def test_sync():
     from app.scheduler.jobs import starpets_sync
-    await starpets_sync()
     from sqlalchemy import func, select
     from app.db import AsyncSessionLocal
     from app.db.models import Offer
+    try:
+        await starpets_sync()
+    except Exception as e:
+        return {"error": str(e)}
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(func.count()).select_from(Offer))
         count = result.scalar()
