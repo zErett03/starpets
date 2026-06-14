@@ -21,6 +21,17 @@ async def myip():
         return resp.json()
 
 
+@app.get("/db-stats")
+async def db_stats():
+    from sqlalchemy import func, select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(func.count()).select_from(Offer))
+        count = result.scalar()
+    return {"offers": count}
+
+
 @app.get("/test-sync")
 async def test_sync():
     params = {**starpets._base_params(), "limit": 1}
