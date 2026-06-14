@@ -34,20 +34,15 @@ async def db_stats():
 
 @app.get("/test-sync")
 async def test_sync():
-    params = {**starpets._base_params(), "limit": 1}
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{starpets.base_url}/products/ex-buyers/all-by-cursor",
-            headers=starpets._headers(starpets._sign(params)),
-            params=params,
-        )
-        first_page = resp.json()
-
-    all_items = await starpets.get_all_products()
-    return {
-        "total": len(all_items),
-        "first_page_raw": first_page,
-    }
+    from app.scheduler.jobs import starpets_sync
+    await starpets_sync()
+    from sqlalchemy import func, select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(func.count()).select_from(Offer))
+        count = result.scalar()
+    return {"offers_in_db": count}
 
 
 @app.get("/test-products")
