@@ -23,6 +23,21 @@ async def starpets_sync() -> dict:
     products = await starpets.get_all_products()
     print(f"[Scheduler] Got {len(products)} products from StarPets")
 
+    items = await starpets.get_all_items()
+    print(f"[Scheduler] Got {len(items)} items (with prices) from StarPets")
+
+    # Build price lookup by productId; keep cheapest if duplicates
+    price_map: dict[str, dict] = {}
+    for item in items:
+        pid = item.get("productId")
+        if not pid:
+            continue
+        price_usd = float(item.get("price_usd") or 0)
+        if not price_usd:
+            continue
+        if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
+            price_map[pid] = item
+
     rows = []
     skipped_no_name = 0
     skipped_no_price = 0
@@ -30,13 +45,16 @@ async def starpets_sync() -> dict:
     now = datetime.utcnow()
     for p in products:
         name = p.get("name")
-        price_usd = float(p.get("price_usd") or p.get("price") or 0)
         if not name:
             skipped_no_name += 1
             continue
-        if not price_usd:
+        product_id = p.get("id")
+        priced_item = price_map.get(product_id)
+        if not priced_item:
             skipped_no_price += 1
             continue
+        price_usd = float(priced_item.get("price_usd") or 0)
+        price_rub_api = float(priced_item.get("price_rub") or 0)
         price_rub = round(price_usd * fx_rate * settings.markup, 2)
         if price_rub < settings.min_price_rub:
             skipped_min_price += 1
@@ -57,6 +75,8 @@ async def starpets_sync() -> dict:
 
     diag = {
         "products_fetched": len(products),
+        "items_fetched": len(items),
+        "items_with_price": len(price_map),
         "rows_prepared": len(rows),
         "skipped_no_name": skipped_no_name,
         "skipped_no_price": skipped_no_price,
@@ -65,6 +85,7 @@ async def starpets_sync() -> dict:
         "markup": settings.markup,
         "min_price_rub": settings.min_price_rub,
         "sample_product": products[0] if products else None,
+        "sample_item": items[0] if items else None,
     }
     print(f"[Scheduler] Prepared {len(rows)} rows for upsert, diag={diag}")
 

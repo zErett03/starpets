@@ -68,6 +68,28 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_all_items(self) -> list:
+        all_items = []
+        cursor = None
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                params = {**self._base_params(), "limit": 500}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await client.get(
+                    f"{self.base_url}/store/ex-buyers/items/all",
+                    headers=self._headers(self._sign(params)),
+                    params=params,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("items") or []
+                all_items.extend(items)
+                if len(items) < 500:
+                    break
+                cursor = items[-1]["id"]
+        return all_items
+
     async def get_items(self, item_ids: list[str] = None) -> dict:
         params = self._base_params()
         if item_ids:
