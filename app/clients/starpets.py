@@ -70,18 +70,19 @@ class StarPetsClient:
 
     async def get_all_items(self) -> list:
         all_items = []
-        cursor = None
+        cursor = 0
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
-                params = {**self._base_params(), "limit": 500}
-                if cursor:
-                    params["cursor"] = cursor
+                params = {**self._base_params(), "limit": 500, "cursor": cursor}
                 resp = await client.get(
                     f"{self.base_url}/store/ex-buyers/items/all",
                     headers=self._headers(self._sign(params)),
                     params=params,
                 )
-                resp.raise_for_status()
+                if not resp.is_success:
+                    raise RuntimeError(
+                        f"get_all_items {resp.status_code}: {resp.text}"
+                    )
                 data = resp.json()
                 items = data.get("items") or []
                 all_items.extend(items)
