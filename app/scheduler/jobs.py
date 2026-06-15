@@ -11,7 +11,7 @@ from app.db.models import Offer, OfferStatus, Task, TaskKind
 UPSERT_BATCH = 500
 
 
-async def starpets_sync():
+async def starpets_sync() -> dict:
     print(f"[Scheduler] starpets_sync started at {datetime.utcnow()}")
 
     from app.fx import get_usd_rub
@@ -24,14 +24,22 @@ async def starpets_sync():
     print(f"[Scheduler] Got {len(products)} products from StarPets")
 
     rows = []
+    skipped_no_name = 0
+    skipped_no_price = 0
+    skipped_min_price = 0
     now = datetime.utcnow()
     for p in products:
         name = p.get("name")
         price_usd = float(p.get("price_usd") or p.get("price") or 0)
-        if not name or not price_usd:
+        if not name:
+            skipped_no_name += 1
+            continue
+        if not price_usd:
+            skipped_no_price += 1
             continue
         price_rub = round(price_usd * fx_rate * settings.markup, 2)
         if price_rub < settings.min_price_rub:
+            skipped_min_price += 1
             continue
         rows.append({
             "name": name,
@@ -47,30 +55,49 @@ async def starpets_sync():
             "status": OfferStatus.pending_create,
         })
 
-    print(f"[Scheduler] Prepared {len(rows)} rows for upsert")
+    diag = {
+        "products_fetched": len(products),
+        "rows_prepared": len(rows),
+        "skipped_no_name": skipped_no_name,
+        "skipped_no_price": skipped_no_price,
+        "skipped_min_price": skipped_min_price,
+        "fx_rate": fx_rate,
+        "markup": settings.markup,
+        "min_price_rub": settings.min_price_rub,
+        "sample_product": products[0] if products else None,
+    }
+    print(f"[Scheduler] Prepared {len(rows)} rows for upsert, diag={diag}")
 
-    async with AsyncSessionLocal() as db:
-        for i in range(0, len(rows), UPSERT_BATCH):
-            batch = rows[i:i + UPSERT_BATCH]
-            stmt = pg_insert(Offer).values(batch)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["name"],
-                set_={
-                    "price_usd": stmt.excluded.price_usd,
-                    "price_rub": stmt.excluded.price_rub,
-                    "starpets_qty": stmt.excluded.starpets_qty,
-                    "item_type": stmt.excluded.item_type,
-                    "rare": stmt.excluded.rare,
-                    "flyable": stmt.excluded.flyable,
-                    "rideable": stmt.excluded.rideable,
-                    "age": stmt.excluded.age,
-                    "last_synced_at": stmt.excluded.last_synced_at,
-                },
-            )
-            await db.execute(stmt)
-        await db.commit()
+    try:
+        async with AsyncSessionLocal() as db:
+            for i in range(0, len(rows), UPSERT_BATCH):
+                batch = rows[i:i + UPSERT_BATCH]
+                stmt = pg_insert(Offer).values(batch)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["name"],
+                    set_={
+                        "price_usd": stmt.excluded.price_usd,
+                        "price_rub": stmt.excluded.price_rub,
+                        "starpets_qty": stmt.excluded.starpets_qty,
+                        "item_type": stmt.excluded.item_type,
+                        "rare": stmt.excluded.rare,
+                        "flyable": stmt.excluded.flyable,
+                        "rideable": stmt.excluded.rideable,
+                        "age": stmt.excluded.age,
+                        "last_synced_at": stmt.excluded.last_synced_at,
+                    },
+                )
+                await db.execute(stmt)
+            await db.commit()
+        print(f"[Scheduler] starpets_sync done: {len(rows)} rows upserted")
+    except Exception as e:
+        import traceback
+        diag["db_error"] = str(e)
+        diag["db_traceback"] = traceback.format_exc()
+        print(f"[Scheduler] starpets_sync DB error: {e}\n{diag['db_traceback']}")
+        return diag
 
-    print(f"[Scheduler] starpets_sync done: {len(rows)} rows upserted")
+    return diag
 
 
 async def starpets_sync_safe():

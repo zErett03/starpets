@@ -39,13 +39,14 @@ async def test_sync():
     from app.db import AsyncSessionLocal
     from app.db.models import Offer
     try:
-        await starpets_sync()
+        diag = await starpets_sync()
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(func.count()).select_from(Offer))
         count = result.scalar()
-    return {"offers_in_db": count}
+    return {"offers_in_db": count, **diag}
 
 
 @app.get("/test-products")
