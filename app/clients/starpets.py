@@ -73,7 +73,7 @@ class StarPetsClient:
         cursor = 0
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
-                params = {**self._base_params(), "limit": 500, "cursor": cursor}
+                params = {**self._base_params(), "limit": 1000, "cursor": cursor}
                 resp = await client.get(
                     f"{self.base_url}/store/ex-buyers/items/all",
                     headers=self._headers(self._sign(params)),

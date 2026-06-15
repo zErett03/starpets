@@ -34,19 +34,10 @@ async def db_stats():
 
 @app.get("/test-sync")
 async def test_sync():
-    from app.scheduler.jobs import starpets_sync
-    from sqlalchemy import func, select
-    from app.db import AsyncSessionLocal
-    from app.db.models import Offer
-    try:
-        diag = await starpets_sync()
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()}
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(func.count()).select_from(Offer))
-        count = result.scalar()
-    return {"offers_in_db": count, **diag}
+    import asyncio
+    from app.scheduler.jobs import starpets_sync_safe
+    asyncio.create_task(starpets_sync_safe())
+    return {"started": True}
 
 
 @app.get("/test-products")

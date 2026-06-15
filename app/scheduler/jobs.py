@@ -110,7 +110,10 @@ async def starpets_sync() -> dict:
                 )
                 await db.execute(stmt)
             await db.commit()
-        print(f"[Scheduler] starpets_sync done: {len(rows)} rows upserted")
+        print(
+        f"[Scheduler] starpets_sync done: products={len(products)} "
+        f"items={len(items)} price_map={len(price_map)} upserted={len(rows)}"
+    )
     except Exception as e:
         import traceback
         diag["db_error"] = str(e)
