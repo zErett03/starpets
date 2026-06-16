@@ -23,20 +23,24 @@ async def starpets_sync() -> dict:
     products = await starpets.get_all_products()
     print(f"[Scheduler] Got {len(products)} products from StarPets")
 
-    items = await starpets.get_all_items()
-    print(f"[Scheduler] Got {len(items)} items (with prices) from StarPets")
-
-    # Build price lookup by productId; keep cheapest if duplicates
+    # Build price lookup by productId page-by-page to avoid loading all items into memory
     price_map: dict[str, dict] = {}
-    for item in items:
-        pid = item.get("productId")
-        if not pid:
-            continue
-        price_usd = float(item.get("price_usd") or 0)
-        if not price_usd:
-            continue
-        if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
-            price_map[pid] = item
+    items_fetched = 0
+    sample_item = None
+    async for page in starpets.iter_items():
+        for item in page:
+            if sample_item is None:
+                sample_item = item
+            items_fetched += 1
+            pid = item.get("productId")
+            if not pid:
+                continue
+            price_usd = float(item.get("price_usd") or 0)
+            if not price_usd:
+                continue
+            if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
+                price_map[pid] = item
+    print(f"[Scheduler] Got {items_fetched} items (with prices) from StarPets")
 
     rows = []
     skipped_no_name = 0
@@ -75,7 +79,7 @@ async def starpets_sync() -> dict:
 
     diag = {
         "products_fetched": len(products),
-        "items_fetched": len(items),
+        "items_fetched": items_fetched,
         "items_with_price": len(price_map),
         "rows_prepared": len(rows),
         "skipped_no_name": skipped_no_name,
@@ -85,7 +89,7 @@ async def starpets_sync() -> dict:
         "markup": settings.markup,
         "min_price_rub": settings.min_price_rub,
         "sample_product": products[0] if products else None,
-        "sample_item": items[0] if items else None,
+        "sample_item": sample_item,
     }
     print(f"[Scheduler] Prepared {len(rows)} rows for upsert, diag={diag}")
 
@@ -95,7 +99,7 @@ async def starpets_sync() -> dict:
                 batch = rows[i:i + UPSERT_BATCH]
                 stmt = pg_insert(Offer).values(batch)
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=["name"],
+                    constraint="uq_offers_composite",
                     set_={
                         "price_usd": stmt.excluded.price_usd,
                         "price_rub": stmt.excluded.price_rub,

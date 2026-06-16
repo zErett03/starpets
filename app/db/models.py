@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column, Integer, String, Numeric, Text, DateTime,
-    ForeignKey, SmallInteger, Enum as SAEnum, JSON, Boolean,
+    ForeignKey, SmallInteger, Enum as SAEnum, JSON, Boolean, UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -52,11 +52,17 @@ class WebhookKind(str, enum.Enum):
 
 class Offer(Base):
     __tablename__ = "offers"
+    __table_args__ = (
+        UniqueConstraint(
+            "name", "item_type", "rare", "flyable", "rideable", "age",
+            name="uq_offers_composite",
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
 
     # StarPets item identity
-    name = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
     item_type = Column(String, nullable=True)
     rare = Column(String, nullable=True)
     flyable = Column(Boolean, default=False)

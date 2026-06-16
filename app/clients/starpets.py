@@ -68,8 +68,8 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def get_all_items(self) -> list:
-        all_items = []
+    async def iter_items(self):
+        """Async generator yielding pages of 1000 items without accumulating all in memory."""
         cursor = 0
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
@@ -81,14 +81,20 @@ class StarPetsClient:
                 )
                 if not resp.is_success:
                     raise RuntimeError(
-                        f"get_all_items {resp.status_code}: {resp.text}"
+                        f"iter_items {resp.status_code}: {resp.text}"
                     )
                 data = resp.json()
                 items = data.get("items") or []
-                all_items.extend(items)
+                if items:
+                    yield items
                 if len(items) < 500:
                     break
                 cursor = items[-1]["id"]
+
+    async def get_all_items(self) -> list:
+        all_items = []
+        async for page in self.iter_items():
+            all_items.extend(page)
         return all_items
 
     async def get_items(self, item_ids: list[str] = None) -> dict:
