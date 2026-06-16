@@ -220,6 +220,22 @@ async def create_offers():
     from app.db.models import Offer, OfferStatus
     from app.workers.offer_creator import create_offer as _create_offer
 
+    # Capture actual headers httpx sends on a real POST to /offers
+    captured_request_headers: dict = {}
+
+    async def _capture(request: httpx.Request) -> None:
+        captured_request_headers.update(dict(request.headers))
+
+    async with httpx.AsyncClient(
+        headers=ggsel_office._headers(),
+        event_hooks={"request": [_capture]},
+        timeout=5,
+    ) as probe:
+        try:
+            await probe.post(f"{SELLER_OFFICE_V2_URL}/offers", json={"_probe": True})
+        except Exception:
+            pass
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Offer)
@@ -240,7 +256,7 @@ async def create_offers():
     return {
         "processed": len(results),
         "ok": sum(1 for r in results if r["status"] == "ok"),
-        "request_headers": ggsel_office._headers(),
+        "request_headers": captured_request_headers,
         "results": results,
     }
 
