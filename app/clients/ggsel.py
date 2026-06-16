@@ -20,6 +20,8 @@ class GgselSellerOfficeClient:
         title_en: str,
         description_ru: str,
         description_en: str,
+        instructions_ru: str,
+        instructions_en: str,
         category_id: int,
         cover_base64: str,
         price: float,
@@ -29,7 +31,9 @@ class GgselSellerOfficeClient:
             "title_en": title_en,
             "description_ru": description_ru,
             "description_en": description_en,
-            "cover_image_ru": f"data:image/png;base64,{cover_base64}",
+            "instructions_ru": instructions_ru,
+            "instructions_en": instructions_en,
+            "cover_image_ru": f"data:image/png;base64,{cover_base64}" if cover_base64 else None,
             "price": price,
             "currency": "RUB",
             "is_autoselling": False,
@@ -44,7 +48,12 @@ class GgselSellerOfficeClient:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await client.post(f"{SELLER_OFFICE_V2_URL}/offers", json=body)
             print(f"[create_offer] status={resp.status_code} response={resp.text[:500]}", flush=True)
-            resp.raise_for_status()
+            if not resp.is_success:
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code} {resp.text}",
+                    request=resp.request,
+                    response=resp,
+                )
             return resp.json()
 
     async def patch_offer(self, offer_id: int, precheck_url: str, notification_url: str) -> dict:

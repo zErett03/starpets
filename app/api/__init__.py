@@ -250,8 +250,16 @@ async def create_offers():
         try:
             await _create_offer(oid)
             results.append({"offer_id": oid, "name": name, "status": "ok"})
+        except httpx.HTTPStatusError as e:
+            results.append({
+                "offer_id": oid, "name": name, "status": "error",
+                "http_status": e.response.status_code,
+                "ggsel_response": e.response.text[:1000],
+            })
+            break
         except Exception as e:
             results.append({"offer_id": oid, "name": name, "status": "error", "error": str(e)})
+            break
 
     return {
         "processed": len(results),

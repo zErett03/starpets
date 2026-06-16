@@ -1,5 +1,6 @@
 import traceback
 
+import httpx
 from sqlalchemy import select
 
 from app.db import AsyncSessionLocal
@@ -9,7 +10,7 @@ from app.clients.ggsel import ggsel_office
 GGSEL_CATEGORY_ID = 122916
 
 
-def _build_description(offer: Offer) -> tuple[str, str]:
+def _build_description(offer: Offer) -> tuple[str, str, str, str]:
     parts_ru = [f"Питомец: {offer.name}"]
     parts_en = [f"Pet: {offer.name}"]
 
@@ -29,7 +30,11 @@ def _build_description(offer: Offer) -> tuple[str, str]:
         parts_ru.append(f"Возраст: {offer.age}")
         parts_en.append(f"Age: {offer.age}")
 
-    return "\n".join(parts_ru), "\n".join(parts_en)
+    desc_ru = "\n".join(parts_ru)
+    desc_en = "\n".join(parts_en)
+    instructions_ru = "После оплаты укажите ваш Roblox Username. Питомец будет отправлен через трейд в течение 24 часов."
+    instructions_en = "After payment, provide your Roblox Username. The pet will be sent via trade within 24 hours."
+    return desc_ru, desc_en, instructions_ru, instructions_en
 
 
 async def create_offer(offer_id: int) -> None:
@@ -39,7 +44,7 @@ async def create_offer(offer_id: int) -> None:
         if not offer:
             raise ValueError(f"Offer {offer_id} not found")
 
-        desc_ru, desc_en = _build_description(offer)
+        desc_ru, desc_en, instructions_ru, instructions_en = _build_description(offer)
         price = float(offer.price_rub or 0)
 
         try:
@@ -49,6 +54,8 @@ async def create_offer(offer_id: int) -> None:
                 title_en=offer.name,
                 description_ru=desc_ru,
                 description_en=desc_en,
+                instructions_ru=instructions_ru,
+                instructions_en=instructions_en,
                 category_id=GGSEL_CATEGORY_ID,
                 cover_base64="",
                 price=price,
