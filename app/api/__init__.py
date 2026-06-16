@@ -190,10 +190,12 @@ async def test_sync_small():
 
 @app.get("/test-top-item")
 async def test_top_item():
+    products = await starpets.get_all_products()
+    product_id = products[0]["id"] if products else 1
     params = starpets._base_params()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
-            f"{starpets.base_url}/store/ex-buyers/items/top/1",
+            f"{starpets.base_url}/store/ex-buyers/items/top/{product_id}",
             headers=starpets._headers(starpets._sign(params)),
             params=params,
         )
@@ -201,7 +203,7 @@ async def test_top_item():
             body = resp.json()
         except Exception:
             body = resp.text
-        return {"status_code": resp.status_code, "body": body}
+        return {"product_id": product_id, "status_code": resp.status_code, "body": body}
 
 
 @app.get("/test-starpets")

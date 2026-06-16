@@ -106,8 +106,8 @@ class StarPetsClient:
         )
         if not resp.is_success:
             return None
-        data = resp.json()
-        return data.get("item") or (data if isinstance(data, dict) and data.get("price_usd") else None)
+        items = resp.json().get("items") or []
+        return items[0] if items else None
 
     async def get_items(self, item_ids: list[str] = None) -> dict:
         params = self._base_params()
