@@ -1,9 +1,12 @@
+import traceback
+
 from sqlalchemy import select
 
 from app.db import AsyncSessionLocal
 from app.db.models import Offer, OfferStatus
 from app.clients.ggsel import ggsel_office
-from app.config import settings
+
+GGSEL_CATEGORY_ID = 122916
 
 
 def _build_description(offer: Offer) -> tuple[str, str]:
@@ -37,17 +40,41 @@ async def create_offer(offer_id: int) -> None:
             raise ValueError(f"Offer {offer_id} not found")
 
         desc_ru, desc_en = _build_description(offer)
+        price = float(offer.price_rub or 0)
 
-        resp = await ggsel_office.create_offer(
-            title_ru=offer.name,
-            title_en=offer.name,
-            description_ru=desc_ru,
-            description_en=desc_en,
-            category_id=settings.starpets_category_id,
-            cover_base64="",
-            price=float(offer.price_rub or 0),
-        )
+        try:
+            # 1. Create offer on ggsel
+            resp = await ggsel_office.create_offer(
+                title_ru=offer.name,
+                title_en=offer.name,
+                description_ru=desc_ru,
+                description_en=desc_en,
+                category_id=GGSEL_CATEGORY_ID,
+                cover_base64="",
+                price=price,
+            )
+            ggsel_offer_id = resp.get("id") or resp.get("offer_id")
+            if not ggsel_offer_id:
+                raise ValueError(f"No offer id in response: {resp}")
 
-        offer.ggsel_offer_id = resp.get("id") or resp.get("offer_id")
-        offer.status = OfferStatus.draft
+            # 2. PATCH price
+            await ggsel_office.update_price(ggsel_offer_id, price)
+
+            # 3. Add Roblox Username option
+            await ggsel_office.create_option(ggsel_offer_id)
+
+            # 4. Activate
+            await ggsel_office.activate_offer(ggsel_offer_id)
+
+            offer.ggsel_offer_id = ggsel_offer_id
+            offer.status = OfferStatus.active
+            offer.last_error = None
+            print(f"[OfferCreator] offer_id={offer_id} ggsel_offer_id={ggsel_offer_id} activated", flush=True)
+
+        except Exception as e:
+            offer.status = OfferStatus.error
+            offer.last_error = f"{e}\n{traceback.format_exc()}"
+            await db.commit()
+            raise
+
         await db.commit()

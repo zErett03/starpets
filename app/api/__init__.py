@@ -213,6 +213,37 @@ async def test_top_item():
         return {"product_id": product_id, "status_code": resp.status_code, "body": body}
 
 
+@app.get("/create-offers")
+async def create_offers():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.workers.offer_creator import create_offer as _create_offer
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer)
+            .where(Offer.status == OfferStatus.pending_create)
+            .limit(5)
+        )
+        offers = result.scalars().all()
+        offer_ids = [(o.id, o.name) for o in offers]
+
+    results = []
+    for oid, name in offer_ids:
+        try:
+            await _create_offer(oid)
+            results.append({"offer_id": oid, "name": name, "status": "ok"})
+        except Exception as e:
+            results.append({"offer_id": oid, "name": name, "status": "error", "error": str(e)})
+
+    return {
+        "processed": len(results),
+        "ok": sum(1 for r in results if r["status"] == "ok"),
+        "results": results,
+    }
+
+
 @app.get("/test-categories")
 async def test_categories():
     headers = {"Authorization": ggsel_office._headers()["Authorization"]}

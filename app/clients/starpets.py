@@ -131,7 +131,9 @@ class StarPetsClient:
             "custom_id": custom_id,
         }
         async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
-            resp = await client.post(f"{self.base_url}/buy", json=payload)
+            resp = await client.post(
+                f"{self.base_url}/store/ex-buyers/products/buy", json=payload
+            )
             resp.raise_for_status()
             return resp.json()
 
@@ -146,7 +148,9 @@ class StarPetsClient:
             "roblox_username": roblox_username,
         }
         async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
-            resp = await client.post(f"{self.base_url}/trade", json=payload)
+            resp = await client.post(
+                f"{self.base_url}/trades/ex-buyers/withdrawal", json=payload
+            )
             resp.raise_for_status()
             return resp.json()
 
