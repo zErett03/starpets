@@ -296,8 +296,8 @@ async def test_categories():
     headers = {"Authorization": ggsel_office._headers()["Authorization"]}
     async with httpx.AsyncClient(headers=headers, timeout=15) as client:
         resp = await client.get(
-            f"{SELLER_OFFICE_V2_URL}/categories/search",
-            params={"q": "Adopt Me"},
+            f"{SELLER_OFFICE_V2_URL}/categories",
+            params={"parent_id": 122916},
         )
         try:
             body = resp.json()
