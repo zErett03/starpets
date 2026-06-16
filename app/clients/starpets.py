@@ -97,6 +97,18 @@ class StarPetsClient:
             all_items.extend(page)
         return all_items
 
+    async def get_top_item(self, client: httpx.AsyncClient, product_id: str) -> dict | None:
+        params = self._base_params()
+        resp = await client.get(
+            f"{self.base_url}/store/ex-buyers/items/top/{product_id}",
+            headers=self._headers(self._sign(params)),
+            params=params,
+        )
+        if not resp.is_success:
+            return None
+        data = resp.json()
+        return data.get("item") or (data if isinstance(data, dict) and data.get("price_usd") else None)
+
     async def get_items(self, item_ids: list[str] = None) -> dict:
         params = self._base_params()
         if item_ids:

@@ -82,6 +82,7 @@ async def test_items():
 
 @app.get("/test-sync-small")
 async def test_sync_small():
+    import asyncio
     from datetime import datetime
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from app.db import AsyncSessionLocal
@@ -91,23 +92,28 @@ async def test_sync_small():
 
     fx_rate = await get_usd_rub()
 
-    # First 100 products
     all_products = await starpets.get_all_products()
     products = all_products[:100]
 
-    # First 1000 items (one page)
+    # Fetch cheapest item per product directly via /items/top/{product_id}
+    async with httpx.AsyncClient(timeout=15) as client:
+        top_items = await asyncio.gather(
+            *[starpets.get_top_item(client, p["id"]) for p in products if p.get("id")],
+            return_exceptions=True,
+        )
+
     price_map: dict[str, dict] = {}
-    async for page in starpets.iter_items():
-        for item in page:
-            pid = item.get("productId")
-            if not pid:
-                continue
-            price_usd = float(item.get("price_usd") or 0)
-            if not price_usd:
-                continue
-            if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
-                price_map[pid] = item
-        break  # only first page
+    for item in top_items:
+        if not item or isinstance(item, Exception):
+            continue
+        pid = item.get("productId")
+        if not pid:
+            continue
+        price_usd = float(item.get("price_usd") or 0)
+        if not price_usd:
+            continue
+        if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
+            price_map[pid] = item
 
     rows = []
     skipped_no_name = 0
@@ -170,7 +176,7 @@ async def test_sync_small():
     return {
         "products_fetched": len(all_products),
         "products_used": len(products),
-        "items_in_price_map": len(price_map),
+        "top_items_fetched": len(price_map),
         "rows_prepared": len(rows),
         "skipped_no_name": skipped_no_name,
         "skipped_no_price": skipped_no_price,
