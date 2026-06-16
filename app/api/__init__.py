@@ -240,6 +240,7 @@ async def create_offers():
     return {
         "processed": len(results),
         "ok": sum(1 for r in results if r["status"] == "ok"),
+        "request_headers": ggsel_office._headers(),
         "results": results,
     }
 
