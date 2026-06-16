@@ -2,6 +2,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.api.webhooks import router as webhooks_router
+from app.clients.ggsel import SELLER_OFFICE_V2_URL, ggsel_office
 from app.clients.starpets import starpets
 
 app = FastAPI(title="starpets-layer")
@@ -210,6 +211,20 @@ async def test_top_item():
         except Exception:
             body = resp.text
         return {"product_id": product_id, "status_code": resp.status_code, "body": body}
+
+
+@app.get("/test-categories")
+async def test_categories():
+    async with httpx.AsyncClient(headers=ggsel_office._headers(), timeout=15) as client:
+        resp = await client.get(
+            f"{SELLER_OFFICE_V2_URL}/categories/search",
+            params={"query": "Adopt Me"},
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        return {"status_code": resp.status_code, "body": body}
 
 
 @app.get("/test-starpets")
