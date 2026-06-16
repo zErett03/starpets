@@ -190,8 +190,19 @@ async def test_sync_small():
 
 @app.get("/test-top-item")
 async def test_top_item():
-    products = await starpets.get_all_products()
-    product_id = products[0]["id"] if products else 1
+    # Find a productId that actually has items by peeking at the first items page
+    product_id = None
+    async for page in starpets.iter_items():
+        for item in page:
+            pid = item.get("productId")
+            if pid:
+                product_id = pid
+                break
+        break
+
+    if not product_id:
+        return {"error": "no items found in first page"}
+
     params = starpets._base_params()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
