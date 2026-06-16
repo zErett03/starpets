@@ -215,16 +215,17 @@ async def test_top_item():
 
 @app.get("/test-categories")
 async def test_categories():
-    async with httpx.AsyncClient(headers=ggsel_office._headers(), timeout=15) as client:
+    headers = {"Authorization": ggsel_office._headers()["Authorization"]}
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
         resp = await client.get(
             f"{SELLER_OFFICE_V2_URL}/categories/search",
-            params={"query": "Adopt Me"},
+            params={"q": "Adopt Me"},
         )
         try:
             body = resp.json()
         except Exception:
             body = resp.text
-        return {"status_code": resp.status_code, "body": body}
+        return {"status_code": resp.status_code, "body": body, "raw": resp.text[:500]}
 
 
 @app.get("/test-starpets")
