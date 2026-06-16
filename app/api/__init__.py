@@ -245,6 +245,28 @@ async def create_offers():
     }
 
 
+@app.get("/ggsel-auth-probe")
+async def ggsel_auth_probe():
+    from app.config import settings
+    key = settings.ggsel_api_key
+    probe_url = f"{SELLER_OFFICE_V2_URL}/offers"
+    schemes = [
+        ("raw", {"Authorization": key, "Content-Type": "application/json"}),
+        ("bearer", {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}),
+        ("x-api-key", {"X-Api-Key": key, "Content-Type": "application/json"}),
+        ("api-key-header", {"Api-Key": key, "Content-Type": "application/json"}),
+    ]
+    results = []
+    async with httpx.AsyncClient(timeout=10) as client:
+        for name, headers in schemes:
+            try:
+                resp = await client.get(probe_url, headers=headers, params={"limit": 1})
+                results.append({"scheme": name, "status": resp.status_code, "body": resp.text[:200]})
+            except Exception as e:
+                results.append({"scheme": name, "error": str(e)})
+    return results
+
+
 @app.get("/test-categories")
 async def test_categories():
     headers = {"Authorization": ggsel_office._headers()["Authorization"]}

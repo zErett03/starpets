@@ -11,7 +11,7 @@ class GgselSellerOfficeClient:
     def _headers(self) -> dict:
         return {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.ggsel_api_key}",
+            "Authorization": settings.ggsel_api_key,
         }
 
     async def create_offer(
