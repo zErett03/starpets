@@ -188,6 +188,22 @@ async def test_sync_small():
     }
 
 
+@app.get("/test-top-item")
+async def test_top_item():
+    params = starpets._base_params()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{starpets.base_url}/store/ex-buyers/items/top/1",
+            headers=starpets._headers(starpets._sign(params)),
+            params=params,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        return {"status_code": resp.status_code, "body": body}
+
+
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
