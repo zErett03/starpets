@@ -306,6 +306,34 @@ async def test_categories():
         return {"status_code": resp.status_code, "body": body, "raw": resp.text[:500]}
 
 
+@app.get("/test-categories-tree")
+async def test_categories_tree():
+    headers = {"Authorization": ggsel_office._headers()["Authorization"]}
+    leaves = []
+
+    async def fetch_children(parent_id: int, tree: list[str]) -> None:
+        async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+            resp = await client.get(
+                f"{SELLER_OFFICE_V2_URL}/categories",
+                params={"parent_id": parent_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        cats = data if isinstance(data, list) else (data.get("data") or data.get("categories") or [])
+        for cat in cats:
+            cat_id = cat.get("id")
+            title = cat.get("title") or cat.get("title_ru") or cat.get("name") or str(cat_id)
+            current_tree = tree + [title]
+            if cat.get("has_children"):
+                await fetch_children(cat_id, current_tree)
+            else:
+                leaves.append({"id": cat_id, "title": title, "tree": current_tree})
+
+    await fetch_children(122916, ["Adopt Me"])
+    return {"total": len(leaves), "leaves": leaves}
+
+
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
