@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json as _json
 import time
 import httpx
 
@@ -11,7 +12,13 @@ class StarPetsClient:
         self.base_url = settings.starpets_base_url
 
     def _sign(self, params: dict) -> str:
-        qs = ";".join(f"{k}:{v}" for k, v in params.items()) + ";"
+        parts = []
+        for k, v in params.items():
+            if isinstance(v, (list, dict)):
+                parts.append(f"{k}:{_json.dumps(v, separators=(',', ':'))}")
+            else:
+                parts.append(f"{k}:{v}")
+        qs = ";".join(parts) + ";"
         return hmac.new(
             settings.starpets_secret.encode(),
             qs.encode(),
@@ -118,19 +125,33 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def buy_items(
-        self,
-        item_id: str,
-        max_price_usd: float,
-        custom_id: str,
-    ) -> dict:
-        payload = {
-            **self._base_params(),
-            "item_id": item_id,
-            "max_price_usd": max_price_usd,
-            "custom_id": custom_id,
-        }
-        async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
+    async def buy_by_items(self, items: list[dict]) -> dict:
+        """POST /store/ex-buyers/items/buy — buy specific items by ID at known price.
+
+        items: [{"id": <item_id>, "price": <price_usd>}, ...]
+        Response items[].id are the purchased item IDs to use in create_trade.
+        """
+        base = self._base_params()
+        payload = {**base, "items": items}
+        async with httpx.AsyncClient(
+            headers=self._headers(self._sign(payload)), timeout=15
+        ) as client:
+            resp = await client.post(
+                f"{self.base_url}/store/ex-buyers/items/buy", json=payload
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def buy_by_product(self, product_id: int, max_price_usd: float) -> dict:
+        """POST /store/ex-buyers/products/buy — buy cheapest item for a product up to max price.
+
+        Response items[].id are the purchased item IDs to use in create_trade.
+        """
+        base = self._base_params()
+        payload = {**base, "products": [{"id": product_id, "maxPrice": max_price_usd}]}
+        async with httpx.AsyncClient(
+            headers=self._headers(self._sign(payload)), timeout=15
+        ) as client:
             resp = await client.post(
                 f"{self.base_url}/store/ex-buyers/products/buy", json=payload
             )
@@ -139,15 +160,22 @@ class StarPetsClient:
 
     async def create_trade(
         self,
-        purchase_id: str,
+        purchased_item_ids: list[str],
         roblox_username: str,
     ) -> dict:
+        """POST /trades/ex-buyers/withdrawal — send purchased items to Roblox user.
+
+        purchased_item_ids: list of string IDs from buy response items[].id
+        """
+        base = self._base_params()
         payload = {
-            **self._base_params(),
-            "purchase_id": purchase_id,
-            "roblox_username": roblox_username,
+            **base,
+            "username": roblox_username,
+            "items": purchased_item_ids,
         }
-        async with httpx.AsyncClient(headers=self._headers(self._sign(payload)), timeout=10) as client:
+        async with httpx.AsyncClient(
+            headers=self._headers(self._sign(payload)), timeout=15
+        ) as client:
             resp = await client.post(
                 f"{self.base_url}/trades/ex-buyers/withdrawal", json=payload
             )

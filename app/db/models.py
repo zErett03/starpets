@@ -79,6 +79,7 @@ class Offer(Base):
     price_rub = Column(Numeric(10, 2), nullable=True)
     starpets_qty = Column(Integer, default=0)
     image_uri = Column(String, nullable=True)
+    starpets_product_id = Column(Integer, nullable=True)
     price_hash = Column(String(16), nullable=True)
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
 

@@ -141,6 +141,7 @@ async def test_sync_small():
             "price_rub": price_rub,
             "starpets_qty": p.get("qty") or p.get("quantity") or 0,
             "image_uri": p.get("imageUri") or p.get("image_uri") or p.get("image"),
+            "starpets_product_id": p.get("id"),
             "last_synced_at": now,
             "status": OfferStatus.pending_create,
         })
@@ -162,6 +163,7 @@ async def test_sync_small():
                         "rideable": stmt.excluded.rideable,
                         "age": stmt.excluded.age,
                         "image_uri": stmt.excluded.image_uri,
+                        "starpets_product_id": stmt.excluded.starpets_product_id,
                         "last_synced_at": stmt.excluded.last_synced_at,
                     },
                 )
@@ -429,8 +431,6 @@ async def test_categories_tree():
 
 @app.get("/test-buy")
 async def test_buy():
-    import time
-
     cheapest = None
     async for page in starpets.iter_items():
         for item in page:
@@ -447,20 +447,16 @@ async def test_buy():
 
     item_id = cheapest.get("id")
     price_usd = float(cheapest.get("price_usd") or 0)
-    custom_id = f"test-{int(time.time())}"
 
-    payload = {
-        **starpets._base_params(),
-        "item_id": item_id,
-        "max_price_usd": round(price_usd * 1.05, 4),
-        "custom_id": custom_id,
-    }
+    # POST /store/ex-buyers/items/buy — buy by specific item ID at known price
+    base = starpets._base_params()
+    payload = {**base, "items": [{"id": item_id, "price": price_usd}]}
 
     async with httpx.AsyncClient(
         headers=starpets._headers(starpets._sign(payload)), timeout=15
     ) as client:
         resp = await client.post(
-            f"{starpets.base_url}/store/ex-buyers/products/buy",
+            f"{starpets.base_url}/store/ex-buyers/items/buy",
             json=payload,
         )
         try:
@@ -475,7 +471,7 @@ async def test_buy():
             "name": cheapest.get("name") or cheapest.get("productName"),
             "price_usd": price_usd,
         },
-        "custom_id": custom_id,
+        "payload_sent": payload,
         "status_code": resp.status_code,
         "response": body,
     }

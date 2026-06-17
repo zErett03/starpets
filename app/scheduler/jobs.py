@@ -71,6 +71,7 @@ async def starpets_sync() -> dict:
             "rideable": bool(p.get("rideable", False)),
             "age": p.get("age"),
             "image_uri": p.get("imageUri") or p.get("image_uri") or p.get("image"),
+            "starpets_product_id": product_id,
             "price_usd": price_usd,
             "price_rub": price_rub,
             "starpets_qty": p.get("qty") or p.get("quantity") or 0,
@@ -111,15 +112,16 @@ async def starpets_sync() -> dict:
                         "rideable": stmt.excluded.rideable,
                         "age": stmt.excluded.age,
                         "image_uri": stmt.excluded.image_uri,
+                        "starpets_product_id": stmt.excluded.starpets_product_id,
                         "last_synced_at": stmt.excluded.last_synced_at,
                     },
                 )
                 await db.execute(stmt)
             await db.commit()
         print(
-        f"[Scheduler] starpets_sync done: products={len(products)} "
-        f"items={len(items)} price_map={len(price_map)} upserted={len(rows)}"
-    )
+            f"[Scheduler] starpets_sync done: products={len(products)} "
+            f"items_fetched={items_fetched} price_map={len(price_map)} upserted={len(rows)}"
+        )
     except Exception as e:
         import traceback
         diag["db_error"] = str(e)
