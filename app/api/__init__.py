@@ -140,6 +140,7 @@ async def test_sync_small():
             "price_usd": price_usd,
             "price_rub": price_rub,
             "starpets_qty": p.get("qty") or p.get("quantity") or 0,
+            "image_uri": p.get("imageUri") or p.get("image_uri") or p.get("image"),
             "last_synced_at": now,
             "status": OfferStatus.pending_create,
         })
@@ -160,6 +161,7 @@ async def test_sync_small():
                         "flyable": stmt.excluded.flyable,
                         "rideable": stmt.excluded.rideable,
                         "age": stmt.excluded.age,
+                        "image_uri": stmt.excluded.image_uri,
                         "last_synced_at": stmt.excluded.last_synced_at,
                     },
                 )

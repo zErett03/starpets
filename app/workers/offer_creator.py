@@ -1,3 +1,4 @@
+import base64
 import traceback
 
 import httpx
@@ -7,7 +8,36 @@ from app.db import AsyncSessionLocal
 from app.db.models import Offer, OfferStatus
 from app.clients.ggsel import ggsel_office
 
-GGSEL_CATEGORY_ID = 122916
+# Rarity → ggsel category id (for Pets)
+_PET_CATEGORY: dict[str, int] = {
+    "common":     122921,
+    "uncommon":   122930,
+    "rare":       122934,
+    "ultra_rare": 122935,
+    "legendary":  122939,
+}
+
+# item_type → ggsel category id (non-pet types)
+_TYPE_CATEGORY: dict[str, int] = {
+    "egg":       131181,
+    "potion":    187200,
+    "transport": 127105,
+    "vehicle":   127105,
+}
+
+
+def _normalize(value: str | None) -> str:
+    return (value or "").lower().replace("-", "_").replace(" ", "_").strip()
+
+
+def _resolve_category(item_type: str | None, rare: str | None) -> int | None:
+    t = _normalize(item_type)
+    r = _normalize(rare)
+
+    if t in ("pet", ""):
+        return _PET_CATEGORY.get(r)
+
+    return _TYPE_CATEGORY.get(t)
 
 
 def _build_description(offer: Offer) -> tuple[str, str, str, str]:
@@ -37,6 +67,13 @@ def _build_description(offer: Offer) -> tuple[str, str, str, str]:
     return desc_ru, desc_en, instructions_ru, instructions_en
 
 
+async def _download_image_b64(url: str) -> str:
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return base64.b64encode(resp.content).decode()
+
+
 async def create_offer(offer_id: int) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Offer).where(Offer.id == offer_id))
@@ -44,8 +81,23 @@ async def create_offer(offer_id: int) -> None:
         if not offer:
             raise ValueError(f"Offer {offer_id} not found")
 
+        category_id = _resolve_category(offer.item_type, offer.rare)
+        if category_id is None:
+            offer.status = OfferStatus.error
+            offer.last_error = f"no_category: type={offer.item_type!r} rare={offer.rare!r}"
+            await db.commit()
+            print(f"[OfferCreator] offer_id={offer_id} skipped — {offer.last_error}", flush=True)
+            return
+
         desc_ru, desc_en, instructions_ru, instructions_en = _build_description(offer)
         price = float(offer.price_rub or 0)
+
+        cover_b64 = ""
+        if offer.image_uri:
+            try:
+                cover_b64 = await _download_image_b64(offer.image_uri)
+            except Exception as e:
+                print(f"[OfferCreator] offer_id={offer_id} cover download failed: {e}", flush=True)
 
         try:
             # 1. Create offer on ggsel
@@ -56,8 +108,8 @@ async def create_offer(offer_id: int) -> None:
                 description_en=desc_en,
                 instructions_ru=instructions_ru,
                 instructions_en=instructions_en,
-                category_id=GGSEL_CATEGORY_ID,
-                cover_base64="",
+                category_id=category_id,
+                cover_base64=cover_b64,
                 price=price,
             )
             ggsel_offer_id = resp.get("id") or resp.get("offer_id")
@@ -76,7 +128,11 @@ async def create_offer(offer_id: int) -> None:
             offer.ggsel_offer_id = ggsel_offer_id
             offer.status = OfferStatus.active
             offer.last_error = None
-            print(f"[OfferCreator] offer_id={offer_id} ggsel_offer_id={ggsel_offer_id} activated", flush=True)
+            print(
+                f"[OfferCreator] offer_id={offer_id} ggsel_offer_id={ggsel_offer_id} "
+                f"category={category_id} activated",
+                flush=True,
+            )
 
         except Exception as e:
             offer.status = OfferStatus.error

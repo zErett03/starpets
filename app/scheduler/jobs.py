@@ -70,6 +70,7 @@ async def starpets_sync() -> dict:
             "flyable": bool(p.get("flyable", False)),
             "rideable": bool(p.get("rideable", False)),
             "age": p.get("age"),
+            "image_uri": p.get("imageUri") or p.get("image_uri") or p.get("image"),
             "price_usd": price_usd,
             "price_rub": price_rub,
             "starpets_qty": p.get("qty") or p.get("quantity") or 0,
@@ -109,6 +110,7 @@ async def starpets_sync() -> dict:
                         "flyable": stmt.excluded.flyable,
                         "rideable": stmt.excluded.rideable,
                         "age": stmt.excluded.age,
+                        "image_uri": stmt.excluded.image_uri,
                         "last_synced_at": stmt.excluded.last_synced_at,
                     },
                 )
