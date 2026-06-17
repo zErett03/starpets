@@ -2,7 +2,7 @@ import httpx
 
 from app.config import settings
 
-SELLER_OFFICE_V2_URL = "https://back-office.ggselstg.org/api_sellers/v2"
+SELLER_OFFICE_V2_URL = settings.ggsel_base_url
 
 
 class GgselSellerOfficeClient:

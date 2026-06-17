@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     starpets_base_url: str = "https://market.neuralgeneration.com/api"
 
     ggsel_api_key: str
+    ggsel_base_url: str = "https://seller.ggsel.com/api_sellers/v2"
     ggsel_access_token: str = ""
     ggsel_qrator: str = ""
 
