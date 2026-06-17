@@ -63,7 +63,7 @@ class GgselSellerOfficeClient:
             "pre_payment_settings": {
                 "is_enabled": True,
                 "url": precheck_url,
-                "allow_payment": False,
+                "allow_payment": True,
             },
             "notification_settings": {
                 "type": "url",

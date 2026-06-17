@@ -215,6 +215,38 @@ async def test_top_item():
         return {"product_id": product_id, "status_code": resp.status_code, "body": body}
 
 
+@app.get("/fix-webhooks")
+async def fix_webhooks():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.config import settings
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer).where(
+                Offer.status == OfferStatus.active,
+                Offer.ggsel_offer_id.isnot(None),
+            )
+        )
+        offers = result.scalars().all()
+
+    updated, errors = [], []
+    for offer in offers:
+        gid = offer.ggsel_offer_id
+        try:
+            await ggsel_office.patch_offer(
+                offer_id=gid,
+                precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}",
+                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}",
+            )
+            updated.append(gid)
+        except Exception as e:
+            errors.append({"ggsel_offer_id": gid, "error": str(e)})
+
+    return {"updated": len(updated), "offer_ids": updated, "errors": errors}
+
+
 @app.get("/create-offers")
 async def create_offers():
     from sqlalchemy import select

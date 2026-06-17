@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     telegram_chat_id_critical: str = ""
     telegram_chat_id_warn: str = ""
 
+    public_url: str = "https://starpets-production.up.railway.app"
+
     markup: float = 1.20
     min_price_rub: float = 100.0
     starpets_category_id: int = 0

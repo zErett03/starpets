@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.db import AsyncSessionLocal
 from app.db.models import Offer, OfferStatus
 from app.clients.ggsel import ggsel_office
+from app.config import settings
 
 # Rarity → ggsel category id (for Pets)
 _PET_CATEGORY: dict[str, int] = {
@@ -131,6 +132,13 @@ async def create_offer(offer_id: int) -> None:
 
             # 4. Activate
             await ggsel_office.activate_offer(ggsel_offer_id)
+
+            # 5. Set webhook URLs
+            await ggsel_office.patch_offer(
+                offer_id=ggsel_offer_id,
+                precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{ggsel_offer_id}",
+                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{ggsel_offer_id}",
+            )
 
             offer.ggsel_offer_id = ggsel_offer_id
             offer.status = OfferStatus.active
