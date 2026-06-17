@@ -491,7 +491,7 @@ async def test_buy():
 
 
 @app.get("/test-friendship")
-async def test_friendship(trade_id: int):
+async def test_friendship(trade_id: int = 57393365):
     params = {**starpets._base_params(), "tradeId": trade_id}
 
     async with httpx.AsyncClient(
