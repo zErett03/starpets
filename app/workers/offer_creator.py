@@ -130,10 +130,7 @@ async def create_offer(offer_id: int) -> None:
             # 3. Add Roblox Username option
             await ggsel_office.create_option(ggsel_offer_id)
 
-            # 4. Activate
-            await ggsel_office.activate_offer(ggsel_offer_id)
-
-            # 5. Set webhook URLs
+            # 4. Set webhook URLs
             await ggsel_office.patch_offer(
                 offer_id=ggsel_offer_id,
                 precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{ggsel_offer_id}",
@@ -141,11 +138,11 @@ async def create_offer(offer_id: int) -> None:
             )
 
             offer.ggsel_offer_id = ggsel_offer_id
-            offer.status = OfferStatus.active
+            offer.status = OfferStatus.draft
             offer.last_error = None
             print(
                 f"[OfferCreator] offer_id={offer_id} ggsel_offer_id={ggsel_offer_id} "
-                f"category={category_id} activated",
+                f"category={category_id} draft",
                 flush=True,
             )
 
