@@ -539,9 +539,9 @@ async def test_trade_status():
 
 
 @app.get("/test-trade")
-async def test_trade():
+async def test_trade(item_id: str, username: str):
     base = starpets._base_params()
-    payload = {**base, "username": "withouq", "items": ["72341315"]}
+    payload = {**base, "username": username, "items": [item_id]}
 
     async with httpx.AsyncClient(
         headers=starpets._headers(starpets._sign(payload)), timeout=15
