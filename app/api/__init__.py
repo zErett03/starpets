@@ -490,6 +490,30 @@ async def test_buy():
     }
 
 
+@app.get("/test-trade")
+async def test_trade():
+    base = starpets._base_params()
+    payload = {**base, "username": "withouq", "items": ["72309679"]}
+
+    async with httpx.AsyncClient(
+        headers=starpets._headers(starpets._sign(payload)), timeout=15
+    ) as client:
+        resp = await client.post(
+            f"{starpets.base_url}/trades/ex-buyers/withdrawal",
+            json=payload,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+
+    return {
+        "payload_sent": payload,
+        "status_code": resp.status_code,
+        "response": body,
+    }
+
+
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
