@@ -427,6 +427,60 @@ async def test_categories_tree():
     return {"total": len(leaves), "leaves": leaves}
 
 
+@app.get("/test-buy")
+async def test_buy():
+    import time
+
+    cheapest = None
+    async for page in starpets.iter_items():
+        for item in page:
+            price = float(item.get("price_usd") or 0)
+            if price <= 0 or price >= 3.0:
+                continue
+            if cheapest is None or price < float(cheapest.get("price_usd") or 0):
+                cheapest = item
+        if cheapest is not None:
+            break
+
+    if not cheapest:
+        return {"error": "no item found under $3"}
+
+    item_id = cheapest.get("id")
+    price_usd = float(cheapest.get("price_usd") or 0)
+    custom_id = f"test-{int(time.time())}"
+
+    payload = {
+        **starpets._base_params(),
+        "item_id": item_id,
+        "max_price_usd": round(price_usd * 1.05, 4),
+        "custom_id": custom_id,
+    }
+
+    async with httpx.AsyncClient(
+        headers=starpets._headers(starpets._sign(payload)), timeout=15
+    ) as client:
+        resp = await client.post(
+            f"{starpets.base_url}/store/ex-buyers/products/buy",
+            json=payload,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+
+    return {
+        "item": {
+            "id": item_id,
+            "productId": cheapest.get("productId"),
+            "name": cheapest.get("name") or cheapest.get("productName"),
+            "price_usd": price_usd,
+        },
+        "custom_id": custom_id,
+        "status_code": resp.status_code,
+        "response": body,
+    }
+
+
 @app.get("/test-starpets")
 async def test_starpets():
     params = starpets._base_params()
