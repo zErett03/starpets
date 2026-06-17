@@ -25,7 +25,9 @@ class GgselSellerOfficeClient:
         category_id: int,
         cover_base64: str,
         price: float,
+        cover_mime: str = "image/jpeg",
     ) -> dict:
+        cover_data_uri = f"data:{cover_mime};base64,{cover_base64}" if cover_base64 else None
         body = {
             "title_ru": title_ru,
             "title_en": title_en,
@@ -33,7 +35,7 @@ class GgselSellerOfficeClient:
             "description_en": description_en,
             "instructions_ru": instructions_ru,
             "instructions_en": instructions_en,
-            "cover_image_ru": f"data:image/png;base64,{cover_base64}" if cover_base64 else None,
+            "cover_image_ru": cover_data_uri,
             "price": price,
             "currency": "RUB",
             "is_autoselling": False,

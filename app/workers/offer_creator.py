@@ -67,11 +67,13 @@ def _build_description(offer: Offer) -> tuple[str, str, str, str]:
     return desc_ru, desc_en, instructions_ru, instructions_en
 
 
-async def _download_image_b64(url: str) -> str:
-    async with httpx.AsyncClient(timeout=15) as client:
+async def _download_image_b64(url: str) -> tuple[str, str]:
+    """Returns (base64_data, mime_type)."""
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         resp = await client.get(url)
         resp.raise_for_status()
-        return base64.b64encode(resp.content).decode()
+        content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+        return base64.b64encode(resp.content).decode(), content_type
 
 
 async def create_offer(offer_id: int) -> None:
@@ -93,11 +95,15 @@ async def create_offer(offer_id: int) -> None:
         price = float(offer.price_rub or 0)
 
         cover_b64 = ""
+        cover_mime = "image/jpeg"
         if offer.image_uri:
             try:
-                cover_b64 = await _download_image_b64(offer.image_uri)
+                cover_b64, cover_mime = await _download_image_b64(offer.image_uri)
+                print(f"[OfferCreator] offer_id={offer_id} cover downloaded mime={cover_mime} size={len(cover_b64)}", flush=True)
             except Exception as e:
-                print(f"[OfferCreator] offer_id={offer_id} cover download failed: {e}", flush=True)
+                print(f"[OfferCreator] offer_id={offer_id} cover download failed url={offer.image_uri!r}: {e}", flush=True)
+        else:
+            print(f"[OfferCreator] offer_id={offer_id} image_uri is empty", flush=True)
 
         try:
             # 1. Create offer on ggsel
@@ -110,9 +116,10 @@ async def create_offer(offer_id: int) -> None:
                 instructions_en=instructions_en,
                 category_id=category_id,
                 cover_base64=cover_b64,
+                cover_mime=cover_mime,
                 price=price,
             )
-            ggsel_offer_id = resp.get("id") or resp.get("offer_id")
+            ggsel_offer_id = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
             if not ggsel_offer_id:
                 raise ValueError(f"No offer id in response: {resp}")
 
