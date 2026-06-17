@@ -494,7 +494,7 @@ async def test_buy():
 async def test_trade_status():
     from datetime import datetime, timezone
     today_ms = int(datetime(2026, 6, 17, tzinfo=timezone.utc).timestamp() * 1000)
-    params = {**starpets._base_params(), "date": today_ms}
+    params = {**starpets._base_params(), "date": today_ms, "limit": 50}
 
     async with httpx.AsyncClient(
         headers=starpets._headers(starpets._sign(params)), timeout=15
