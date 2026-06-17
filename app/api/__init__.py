@@ -492,7 +492,7 @@ async def test_buy():
 
 @app.get("/test-trade-status")
 async def test_trade_status():
-    params = {**starpets._base_params(), "tradeId": 57369867}
+    params = {**starpets._base_params(), "date": "2026-06-17"}
 
     async with httpx.AsyncClient(
         headers=starpets._headers(starpets._sign(params)), timeout=15
