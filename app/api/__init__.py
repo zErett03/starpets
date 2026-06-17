@@ -215,6 +215,65 @@ async def test_top_item():
         return {"product_id": product_id, "status_code": resp.status_code, "body": body}
 
 
+@app.post("/test-webhook")
+async def test_webhook(body: dict):
+    from datetime import datetime
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, Order, DeliveryStatus
+
+    ggsel_offer_id = body.get("ggsel_offer_id")
+    roblox_username = body.get("roblox_username", "")
+
+    if not ggsel_offer_id:
+        return {"error": "ggsel_offer_id is required"}
+
+    fake_order_id = int(datetime.utcnow().timestamp())
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Offer).where(Offer.ggsel_offer_id == ggsel_offer_id))
+        offer = result.scalar_one_or_none()
+        if not offer:
+            return {"error": f"Offer with ggsel_offer_id={ggsel_offer_id} not found"}
+
+        order = Order(
+            ggsel_order_id=fake_order_id,
+            offer_id=offer.id,
+            item_name=offer.name,
+            amount_rub=offer.price_rub,
+            roblox_username=roblox_username,
+            buyer_email="test@test.com",
+            buyer_ip="127.0.0.1",
+            starpets_custom_id=str(fake_order_id),
+            delivery_status=DeliveryStatus.pending,
+            paid_at=datetime.utcnow(),
+        )
+        db.add(order)
+        await db.flush()
+        order_id = order.id
+        await db.commit()
+
+    print(
+        f"[test-webhook] order created: order_id={order_id} ggsel_order_id={fake_order_id} "
+        f"offer={offer.name} roblox={roblox_username} — DELIVER task NOT queued (test mode)",
+        flush=True,
+    )
+
+    return {
+        "order_id": order_id,
+        "ggsel_order_id": fake_order_id,
+        "offer_id": offer.id,
+        "offer_name": offer.name,
+        "roblox_username": roblox_username,
+        "delivery_status": "pending",
+        "would_deliver": {
+            "buy": f"POST /store/ex-buyers/products/buy item={offer.name}",
+            "trade": f"POST /trades/ex-buyers/withdrawal roblox_username={roblox_username}",
+        },
+        "note": "DELIVER task NOT queued — test mode only",
+    }
+
+
 @app.get("/fix-webhooks")
 async def fix_webhooks():
     from sqlalchemy import select
