@@ -490,6 +490,29 @@ async def test_buy():
     }
 
 
+@app.get("/test-friendship")
+async def test_friendship(trade_id: int):
+    params = {**starpets._base_params(), "tradeId": trade_id}
+
+    async with httpx.AsyncClient(
+        headers=starpets._headers(starpets._sign(params)), timeout=15
+    ) as client:
+        resp = await client.put(
+            f"{starpets.base_url}/trades/ex-buyers/friendship",
+            params=params,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+
+    return {
+        "trade_id": trade_id,
+        "status_code": resp.status_code,
+        "response": body,
+    }
+
+
 @app.get("/test-trade-status")
 async def test_trade_status():
     from datetime import datetime, timezone
