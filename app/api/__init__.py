@@ -431,24 +431,41 @@ async def test_categories_tree():
 
 @app.get("/test-buy")
 async def test_buy():
-    cheapest = None
-    async for page in starpets.iter_items():
-        for item in page:
-            price = float(item.get("price_usd") or 0)
-            if price <= 0 or price >= 3.0:
-                continue
-            if cheapest is None or price < float(cheapest.get("price_usd") or 0):
-                cheapest = item
-        if cheapest is not None:
-            break
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
 
-    if not cheapest:
-        return {"error": "no item found under $3"}
+    # Find a product from DB with price < $3 that has starpets_product_id
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer)
+            .where(
+                Offer.starpets_product_id.isnot(None),
+                Offer.price_usd < 3.0,
+                Offer.price_usd > 0,
+            )
+            .order_by(Offer.price_usd.asc())
+            .limit(10)
+        )
+        candidates = result.scalars().all()
 
-    item_id = cheapest.get("id")
-    price_usd = float(cheapest.get("price_usd") or 0)
+    if not candidates:
+        return {"error": "no offer with price_usd < $3 found in DB"}
 
-    # POST /store/ex-buyers/items/buy — buy by specific item ID at known price
+    # Try candidates in price order until we find one with a live top item
+    async with httpx.AsyncClient(timeout=15) as client:
+        for offer in candidates:
+            product_id = offer.starpets_product_id
+            top_item = await starpets.get_top_item(client, str(product_id))
+            if top_item:
+                break
+        else:
+            return {"error": "no live top item found for any candidate offer"}
+
+    item_id = top_item.get("id")
+    price_usd = float(top_item.get("price_usd") or 0)
+
+    # POST /store/ex-buyers/items/buy — buy the live item at its current price
     base = starpets._base_params()
     payload = {**base, "items": [{"id": item_id, "price": price_usd}]}
 
@@ -465,12 +482,8 @@ async def test_buy():
             body = resp.text
 
     return {
-        "item": {
-            "id": item_id,
-            "productId": cheapest.get("productId"),
-            "name": cheapest.get("name") or cheapest.get("productName"),
-            "price_usd": price_usd,
-        },
+        "offer": {"id": offer.id, "name": offer.name, "product_id": product_id},
+        "item": {"id": item_id, "price_usd": price_usd},
         "payload_sent": payload,
         "status_code": resp.status_code,
         "response": body,
