@@ -490,6 +490,29 @@ async def test_buy():
     }
 
 
+@app.get("/test-trade-status")
+async def test_trade_status():
+    params = {**starpets._base_params(), "tradeId": 57369867}
+
+    async with httpx.AsyncClient(
+        headers=starpets._headers(starpets._sign(params)), timeout=15
+    ) as client:
+        resp = await client.get(
+            f"{starpets.base_url}/ex-buyers/trades/updates",
+            params=params,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+
+    return {
+        "params_sent": params,
+        "status_code": resp.status_code,
+        "response": body,
+    }
+
+
 @app.get("/test-trade")
 async def test_trade():
     base = starpets._base_params()
