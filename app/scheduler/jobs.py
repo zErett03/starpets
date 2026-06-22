@@ -157,12 +157,21 @@ async def trade_protection():
     print("[Scheduler] trade_protection: not implemented yet")
 
 
+async def monitor_delivery_safe():
+    try:
+        from app.workers.monitor_delivery import monitor_all_deliveries
+        await monitor_all_deliveries()
+    except Exception as e:
+        print(f"[Scheduler] monitor_delivery error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
     scheduler.add_job(reconcile, "interval", hours=1, id="reconcile")
     scheduler.add_job(trade_protection, "interval", hours=1, id="trade_protection")
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")
+    scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler

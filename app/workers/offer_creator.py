@@ -63,8 +63,8 @@ def _build_description(offer: Offer) -> tuple[str, str, str, str]:
 
     desc_ru = "\n".join(parts_ru)
     desc_en = "\n".join(parts_en)
-    instructions_ru = "После оплаты укажите ваш Roblox Username. Питомец будет отправлен через трейд в течение 24 часов."
-    instructions_en = "After payment, provide your Roblox Username. The pet will be sent via trade within 24 hours."
+    instructions_ru = "После оплаты вам будет назначен бот для доставки. Добавьте его в друзья на Roblox. Зайдите в Adopt Me, найдите бота в друзьях, телепортируйтесь к нему и примите трейд."
+    instructions_en = "After payment a delivery bot will be assigned. Add it as a friend on Roblox. Join Adopt Me, find the bot in friends, teleport to it and accept the trade."
     return desc_ru, desc_en, instructions_ru, instructions_en
 
 

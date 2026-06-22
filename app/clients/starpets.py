@@ -192,5 +192,31 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_bulk_trade_updates(self, limit: int = 50) -> list:
+        """GET /ex-buyers/trades/updates — bulk status poll, returns list of trade objects."""
+        params = {**self._base_params(), "limit": limit}
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
+            resp = await client.get(f"{self.base_url}/ex-buyers/trades/updates", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        if isinstance(data, list):
+            return data
+        return data.get("trades") or data.get("items") or data.get("data") or []
+
+    async def send_friendship(self, trade_id: int, item_id: str, username: str) -> dict:
+        """PUT /trades/ex-buyers/friendship — ask buyer to add bot as friend."""
+        params = {
+            **self._base_params(),
+            "tradeId": trade_id,
+            "itemId": item_id,
+            "username": username,
+        }
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
+            resp = await client.put(
+                f"{self.base_url}/trades/ex-buyers/friendship", params=params
+            )
+            resp.raise_for_status()
+            return resp.json()
+
 
 starpets = StarPetsClient()

@@ -469,13 +469,12 @@ async def test_buy():
     base = starpets._base_params()
     payload = {**base, "items": [{"id": item_id, "price": price_usd}]}
 
-    async with httpx.AsyncClient(
-        headers=starpets._headers(starpets._sign(payload)), timeout=15
-    ) as client:
-        resp = await client.post(
-            f"{starpets.base_url}/store/ex-buyers/items/buy",
-            json=payload,
-        )
+    signed = starpets._sign(payload)
+    headers = starpets._headers(signed)
+    url = f"{starpets.base_url}/store/ex-buyers/items/buy"
+
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        resp = await client.post(url, json=payload)
         try:
             body = resp.json()
         except Exception:
@@ -484,32 +483,33 @@ async def test_buy():
     return {
         "offer": {"id": offer.id, "name": offer.name, "product_id": product_id},
         "item": {"id": item_id, "price_usd": price_usd},
-        "payload_sent": payload,
-        "status_code": resp.status_code,
-        "response": body,
+        "request_url": url,
+        "request_headers": dict(headers),
+        "request_body": payload,
+        "response_status": resp.status_code,
+        "response_body": body,
     }
 
 
 @app.get("/test-friendship")
-async def test_friendship(trade_id: int = 57393365):
-    params = {**starpets._base_params(), "tradeId": trade_id}
+async def test_friendship(trade_id: int = 57393365, item_id: str = "72488406", username: str = "klvcdy"):
+    params = {**starpets._base_params(), "tradeId": trade_id, "itemId": item_id, "username": username}
+    headers = starpets._headers(starpets._sign(params))
+    url = f"{starpets.base_url}/trades/ex-buyers/friendship"
 
-    async with httpx.AsyncClient(
-        headers=starpets._headers(starpets._sign(params)), timeout=15
-    ) as client:
-        resp = await client.put(
-            f"{starpets.base_url}/trades/ex-buyers/friendship",
-            params=params,
-        )
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        resp = await client.put(url, params=params)
         try:
             body = resp.json()
         except Exception:
             body = resp.text
 
     return {
-        "trade_id": trade_id,
-        "status_code": resp.status_code,
-        "response": body,
+        "request_url": str(resp.request.url),
+        "request_headers": dict(headers),
+        "request_body": None,
+        "response_status": resp.status_code,
+        "response_body": body,
     }
 
 
@@ -518,48 +518,128 @@ async def test_trade_status():
     from datetime import datetime, timezone
     today_ms = int(datetime(2026, 6, 17, tzinfo=timezone.utc).timestamp() * 1000)
     params = {**starpets._base_params(), "date": today_ms, "limit": 50}
+    headers = starpets._headers(starpets._sign(params))
+    url = f"{starpets.base_url}/ex-buyers/trades/updates"
 
-    async with httpx.AsyncClient(
-        headers=starpets._headers(starpets._sign(params)), timeout=15
-    ) as client:
-        resp = await client.get(
-            f"{starpets.base_url}/ex-buyers/trades/updates",
-            params=params,
-        )
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        resp = await client.get(url, params=params)
         try:
             body = resp.json()
         except Exception:
             body = resp.text
 
     return {
-        "params_sent": params,
-        "status_code": resp.status_code,
-        "response": body,
+        "request_url": str(resp.request.url),
+        "request_headers": dict(headers),
+        "request_body": None,
+        "response_status": resp.status_code,
+        "response_body": body,
     }
 
 
 @app.get("/test-trade")
-async def test_trade(item_id: str, username: str):
+async def test_trade(item_id: str = "72488406", username: str = "klvcdy"):
     base = starpets._base_params()
     payload = {**base, "username": username, "items": [item_id]}
+    headers = starpets._headers(starpets._sign(payload))
+    url = f"{starpets.base_url}/trades/ex-buyers/withdrawal"
 
-    async with httpx.AsyncClient(
-        headers=starpets._headers(starpets._sign(payload)), timeout=15
-    ) as client:
-        resp = await client.post(
-            f"{starpets.base_url}/trades/ex-buyers/withdrawal",
-            json=payload,
-        )
+    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+        resp = await client.post(url, json=payload)
         try:
             body = resp.json()
         except Exception:
             body = resp.text
 
     return {
-        "payload_sent": payload,
-        "status_code": resp.status_code,
-        "response": body,
+        "request_url": url,
+        "request_headers": dict(headers),
+        "request_body": payload,
+        "response_status": resp.status_code,
+        "response_body": body,
     }
+
+
+@app.post("/create-all-offers")
+async def create_all_offers():
+    import asyncio
+    asyncio.create_task(_run_create_all_offers())
+    return {"started": True}
+
+
+async def _run_create_all_offers():
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.workers.offer_creator import create_offer
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.id).where(Offer.status == OfferStatus.pending_create)
+        )
+        offer_ids = [r[0] for r in result.all()]
+
+    print(f"[CreateAllOffers] starting — {len(offer_ids)} offers pending_create", flush=True)
+
+    for i, offer_id in enumerate(offer_ids, 1):
+        try:
+            await create_offer(offer_id)
+        except Exception as e:
+            print(f"[CreateAllOffers] offer_id={offer_id} error: {e}", flush=True)
+
+        if i % 50 == 0:
+            print(f"[CreateAllOffers] progress {i}/{len(offer_ids)}", flush=True)
+
+        await asyncio.sleep(3)
+
+    print(f"[CreateAllOffers] done — {len(offer_ids)} processed", flush=True)
+
+
+@app.post("/activate-all-offers")
+async def activate_all_offers():
+    import asyncio
+    asyncio.create_task(_run_activate_all_offers())
+    return {"started": True}
+
+
+async def _run_activate_all_offers():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.clients.ggsel import ggsel_office
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.ggsel_offer_id).where(
+                Offer.ggsel_offer_id.isnot(None),
+                Offer.status == OfferStatus.draft,
+            )
+        )
+        offer_ids = [r[0] for r in result.all()]
+
+    print(f"[ActivateAllOffers] starting — {len(offer_ids)} draft offers", flush=True)
+
+    batch_size = 100
+    for batch_num, start in enumerate(range(0, len(offer_ids), batch_size), 1):
+        batch = offer_ids[start:start + batch_size]
+        try:
+            await ggsel_office.batch_activate(batch)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Offer).where(Offer.ggsel_offer_id.in_(batch))
+                )
+                for offer in result.scalars().all():
+                    offer.status = OfferStatus.active
+                await db.commit()
+            print(
+                f"[ActivateAllOffers] batch {batch_num}: activated {len(batch)} offers",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[ActivateAllOffers] batch {batch_num} error: {e}", flush=True)
+
+    print(f"[ActivateAllOffers] done — {len(offer_ids)} total", flush=True)
 
 
 @app.get("/test-starpets")
