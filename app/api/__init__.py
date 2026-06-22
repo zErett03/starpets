@@ -47,6 +47,21 @@ async def db_stats():
     }
 
 
+@app.get("/offer-errors")
+async def offer_errors():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.name, Offer.last_error)
+            .where(Offer.status == OfferStatus.error)
+            .limit(10)
+        )
+        rows = result.all()
+    return [{"name": r.name, "last_error": r.last_error} for r in rows]
+
+
 @app.get("/test-sync")
 async def test_sync():
     import asyncio
