@@ -26,11 +26,25 @@ async def myip():
 async def db_stats():
     from sqlalchemy import func, select
     from app.db import AsyncSessionLocal
-    from app.db.models import Offer
+    from app.db.models import Offer, OfferStatus
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(func.count()).select_from(Offer))
-        count = result.scalar()
-    return {"offers": count}
+        total_result = await db.execute(select(func.count()).select_from(Offer))
+        count = total_result.scalar()
+
+        status_result = await db.execute(
+            select(Offer.status, func.count().label("n"))
+            .group_by(Offer.status)
+        )
+        by_status = {row.status.value: row.n for row in status_result}
+
+    return {
+        "offers": count,
+        "offers_by_status": {
+            "pending_create": by_status.get(OfferStatus.pending_create.value, 0),
+            "active": by_status.get(OfferStatus.active.value, 0),
+            "error": by_status.get(OfferStatus.error.value, 0),
+        },
+    }
 
 
 @app.get("/test-sync")
