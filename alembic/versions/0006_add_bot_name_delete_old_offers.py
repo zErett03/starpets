@@ -19,7 +19,7 @@ _STALE_OFFER_IDS = [102217598, 102217599, 102217600, 102217601, 102217602]
 def upgrade() -> None:
     op.add_column("orders", sa.Column("bot_name", sa.String(), nullable=True))
     op.execute(
-        f"DELETE FROM offers WHERE ggsel_offer_id IN ({','.join(str(i) for i in _STALE_OFFER_IDS)})"
+        f"UPDATE offers SET ggsel_offer_id = NULL WHERE ggsel_offer_id IN ({','.join(str(i) for i in _STALE_OFFER_IDS)})"
     )
 
 
