@@ -117,6 +117,15 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def set_post_payment_url(self, offer_id: int, url: str) -> dict:
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await client.patch(
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+                json={"post_payment_url": url},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     async def update_price(self, offer_id: int, price: float) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await client.patch(

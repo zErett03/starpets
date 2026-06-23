@@ -836,6 +836,47 @@ async def retry_errors():
     return {"reset": count}
 
 
+@app.get("/fix-post-payment-url")
+async def fix_post_payment_url():
+    import asyncio
+    asyncio.create_task(_run_fix_post_payment_url())
+    return {"started": True}
+
+
+async def _run_fix_post_payment_url():
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+
+    url = f"{settings.public_url}/delivery"
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.ggsel_offer_id).where(Offer.ggsel_offer_id.isnot(None))
+        )
+        offer_ids = [r[0] for r in result.all()]
+
+    total = len(offer_ids)
+    print(f"[FixPostPaymentUrl] starting — {total} offers, url={url}", flush=True)
+
+    updated = errors = 0
+    for i, gid in enumerate(offer_ids, 1):
+        try:
+            await ggsel_office.set_post_payment_url(gid, url)
+            updated += 1
+        except Exception as e:
+            print(f"[FixPostPaymentUrl] ggsel_offer_id={gid} error: {e}", flush=True)
+            errors += 1
+
+        if i % 50 == 0:
+            print(f"[FixPostPaymentUrl] progress {i}/{total} updated={updated} errors={errors}", flush=True)
+
+        await asyncio.sleep(0.3)
+
+    print(f"[FixPostPaymentUrl] done — updated={updated} errors={errors} total={total}", flush=True)
+
+
 @app.get("/fix-webhooks")
 async def fix_webhooks():
     from sqlalchemy import select
