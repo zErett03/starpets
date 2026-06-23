@@ -900,7 +900,7 @@ async def fix_webhooks():
             await ggsel_office.patch_offer(
                 offer_id=gid,
                 precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}",
-                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}",
+                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={settings.webhook_shared_secret}",
             )
             updated.append(gid)
         except Exception as e:

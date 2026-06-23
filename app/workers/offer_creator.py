@@ -134,7 +134,7 @@ async def create_offer(offer_id: int) -> None:
             await ggsel_office.patch_offer(
                 offer_id=ggsel_offer_id,
                 precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{ggsel_offer_id}",
-                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{ggsel_offer_id}",
+                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{ggsel_offer_id}?secret={settings.webhook_shared_secret}",
             )
 
             offer.ggsel_offer_id = ggsel_offer_id
