@@ -41,6 +41,7 @@ class GgselSellerOfficeClient:
             "is_autoselling": False,
             "category_id": category_id,
             "delivery": "manual",
+            "post_payment_url": f"{settings.public_url}/delivery",
         }
 
         import json as _json

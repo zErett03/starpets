@@ -1,5 +1,6 @@
 import httpx
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from app.api.webhooks import router as webhooks_router
 from app.clients.ggsel import SELLER_OFFICE_V2_URL, ggsel_office
@@ -469,6 +470,194 @@ async def test_webhook(body: dict):
         },
         "note": "DELIVER task NOT queued — test mode only",
     }
+
+
+@app.get("/delivery", response_class=HTMLResponse)
+async def delivery_page(id: int = None):
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, DeliveryStatus
+
+    order = None
+    if id is not None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Order).where(Order.ggsel_order_id == id))
+            order = result.scalar_one_or_none()
+
+    bot_name = (order.bot_name or "").strip() if order else ""
+    status = order.delivery_status if order else None
+
+    if status == DeliveryStatus.done or status == DeliveryStatus.finalized:
+        body_html = """
+        <div class="card">
+            <div class="icon">✅</div>
+            <h1>Предмет доставлен!</h1>
+            <p class="sub">Спасибо за покупку. Проверьте свой инвентарь в Adopt Me.</p>
+        </div>"""
+        extra_js = ""
+
+    elif status == DeliveryStatus.failed:
+        body_html = """
+        <div class="card">
+            <div class="icon">❌</div>
+            <h1>Ошибка доставки</h1>
+            <p class="sub">Напишите в чат заказа — мы решим проблему.</p>
+        </div>"""
+        extra_js = ""
+
+    elif bot_name:
+        body_html = f"""
+        <div class="card">
+            <div class="icon">🤖</div>
+            <p class="label">Имя бота для трейда</p>
+            <div class="bot-name">{bot_name}</div>
+            <div class="timer-box">
+                <span class="timer-label">Осталось времени</span>
+                <div class="timer" id="timer">05:00</div>
+            </div>
+            <div class="steps">
+                <div class="step"><span class="num">1</span>Добавьте бота <strong>{bot_name}</strong> в друзья на Roblox</div>
+                <div class="step"><span class="num">2</span>Зайдите в игру <strong>Adopt Me</strong></div>
+                <div class="step"><span class="num">3</span>Найдите бота в списке друзей и телепортируйтесь к нему</div>
+                <div class="step"><span class="num">4</span>Примите входящий трейд</div>
+            </div>
+            <p class="warn">⚠️ У вас <strong>5 минут</strong> — будьте готовы заранее!</p>
+        </div>"""
+        extra_js = """
+        (function() {
+            var total = 5 * 60;
+            var el = document.getElementById('timer');
+            var iv = setInterval(function() {
+                total--;
+                if (total <= 0) { clearInterval(iv); el.textContent = '00:00'; el.style.color='#ef4444'; return; }
+                var m = Math.floor(total / 60);
+                var s = total % 60;
+                el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+            }, 1000);
+        })();"""
+
+    else:
+        body_html = """
+        <div class="card">
+            <div class="spinner"></div>
+            <h1>Заказ обрабатывается</h1>
+            <p class="sub">Пожалуйста, подождите — это займёт несколько секунд...</p>
+            <p class="sub small">Страница обновится автоматически</p>
+        </div>"""
+        extra_js = ""
+
+    refresh_meta = "" if (bot_name or status in (DeliveryStatus.done, DeliveryStatus.finalized, DeliveryStatus.failed)) else '<meta http-equiv="refresh" content="5">'
+
+    return HTMLResponse(content=f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Доставка предмета — StarPets</title>
+{refresh_meta}
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 16px;
+    color: #fff;
+  }}
+  .card {{
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 20px;
+    padding: 40px 32px;
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+  }}
+  .icon {{ font-size: 56px; margin-bottom: 16px; }}
+  h1 {{ font-size: 1.6rem; font-weight: 700; margin-bottom: 10px; }}
+  .sub {{ color: rgba(255,255,255,0.65); font-size: 0.95rem; line-height: 1.5; margin-top: 8px; }}
+  .sub.small {{ font-size: 0.8rem; margin-top: 4px; }}
+  .label {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.5px; color: rgba(255,255,255,0.5); margin-bottom: 8px; }}
+  .bot-name {{
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #a78bfa, #60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 24px;
+    word-break: break-all;
+  }}
+  .timer-box {{
+    background: rgba(0,0,0,0.3);
+    border-radius: 12px;
+    padding: 14px 20px;
+    margin-bottom: 28px;
+  }}
+  .timer-label {{ font-size: 0.75rem; color: rgba(255,255,255,0.5); display: block; margin-bottom: 4px; }}
+  .timer {{
+    font-size: 2.8rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    color: #34d399;
+    letter-spacing: 2px;
+  }}
+  .steps {{ text-align: left; margin-bottom: 24px; }}
+  .step {{
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    font-size: 0.95rem;
+    line-height: 1.4;
+    color: rgba(255,255,255,0.88);
+  }}
+  .step:last-child {{ border-bottom: none; }}
+  .num {{
+    min-width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #7c3aed, #2563eb);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }}
+  .warn {{
+    background: rgba(239,68,68,0.15);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    color: #fca5a5;
+  }}
+  .spinner {{
+    width: 52px;
+    height: 52px;
+    border: 4px solid rgba(255,255,255,0.15);
+    border-top-color: #a78bfa;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    margin: 0 auto 24px;
+  }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+</style>
+</head>
+<body>
+{body_html}
+<script>{extra_js}</script>
+</body>
+</html>
+""")
 
 
 @app.get("/system-status")
