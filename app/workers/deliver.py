@@ -6,6 +6,81 @@ from sqlalchemy import select
 from app.db import AsyncSessionLocal
 from app.db.models import Order, Offer, DeliveryStatus
 from app.clients.starpets import starpets
+from app.config import settings
+from app.fx import get_usd_rub
+
+_BUY_MAX_RETRIES = 3
+
+
+async def _buy_with_retry(
+    item_id: str,
+    price_usd: float,
+    offer_price_rub: float,
+) -> tuple[str, float]:
+    """Buy item, retrying up to 3x on code=330 (PRICES_HAVE_CHANGED).
+
+    Returns (purchased_item_id, exec_price_usd).
+    Raises RuntimeError('price_too_high') if the updated price would exceed
+    the ggsel offer price after applying markup and FX conversion.
+    """
+    current_id = item_id
+    current_price = price_usd
+
+    for attempt in range(1, _BUY_MAX_RETRIES + 1):
+        try:
+            buy_resp = await starpets.buy_by_items([{"id": current_id, "price": current_price}])
+            purchased = buy_resp.get("items") or []
+            if not purchased:
+                raise RuntimeError(f"Buy returned no items: {buy_resp}")
+            purchased_item_id = str(purchased[0]["id"])
+            exec_price = float(purchased[0].get("price_usd") or current_price)
+            return purchased_item_id, exec_price
+
+        except httpx.HTTPStatusError as exc:
+            try:
+                err_body = exc.response.json()
+            except Exception:
+                raise exc
+
+            if err_body.get("code") != 330:
+                raise exc
+
+            resp_items = err_body.get("items") or []
+            if not resp_items:
+                raise exc
+
+            new_price_usd = float(
+                resp_items[0].get("price_usd") or resp_items[0].get("price") or 0
+            )
+            if not new_price_usd:
+                raise exc
+
+            fx_rate = await get_usd_rub()
+            new_price_rub = new_price_usd * settings.markup * fx_rate
+
+            print(
+                f"[Buy] code=330 PRICES_HAVE_CHANGED attempt={attempt}/{_BUY_MAX_RETRIES} "
+                f"item_id={current_id} old_usd={current_price} new_usd={new_price_usd} "
+                f"new_rub={new_price_rub:.2f} offer_rub={offer_price_rub}",
+                flush=True,
+            )
+
+            if new_price_rub > offer_price_rub:
+                print(
+                    f"[Buy] price_too_high: {new_price_rub:.2f} > {offer_price_rub} — aborting",
+                    flush=True,
+                )
+                raise RuntimeError("price_too_high")
+
+            if attempt == _BUY_MAX_RETRIES:
+                raise RuntimeError(
+                    f"code=330 after {_BUY_MAX_RETRIES} retries, last_price_usd={new_price_usd}"
+                )
+
+            current_price = new_price_usd
+            new_id = str(resp_items[0].get("id") or "")
+            if new_id:
+                current_id = new_id
 
 
 async def deliver_order(order_id: int) -> None:
@@ -25,6 +100,7 @@ async def deliver_order(order_id: int) -> None:
             raise RuntimeError(f"Offer {offer.id} has no starpets_product_id")
 
         roblox_username = order.roblox_username or ""
+        offer_price_rub = float(offer.price_rub or 0)
         print(
             f"[Deliver] start order_id={order_id} offer_id={offer.id} "
             f"product_id={product_id} roblox_username={roblox_username!r}",
@@ -40,13 +116,25 @@ async def deliver_order(order_id: int) -> None:
         price_usd = float(top_item.get("price_usd") or 0)
         print(f"[Deliver] top_item id={item_id} price_usd={price_usd}", flush=True)
 
-        # 2. Buy the item at its current price
-        buy_resp = await starpets.buy_by_items([{"id": item_id, "price": price_usd}])
-        purchased = buy_resp.get("items") or []
-        if not purchased:
-            raise RuntimeError(f"Buy returned no items: {buy_resp}")
-        purchased_item_id = str(purchased[0]["id"])
-        exec_price = float(purchased[0].get("price_usd") or price_usd)
+        # 2. Buy the item (with retry on code=330 PRICES_HAVE_CHANGED)
+        try:
+            purchased_item_id, exec_price = await _buy_with_retry(
+                item_id, price_usd, offer_price_rub
+            )
+        except RuntimeError as e:
+            if str(e) == "price_too_high":
+                order.delivery_status = DeliveryStatus.failed
+                order.error_reason = "price_too_high"
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(
+                    f"[Deliver] order_id={order_id} marked failed: price_too_high "
+                    f"item_id={item_id} price_usd={price_usd} offer_rub={offer_price_rub}",
+                    flush=True,
+                )
+                return
+            raise
+
         print(f"[Deliver] bought purchased_item_id={purchased_item_id} exec_price={exec_price}", flush=True)
 
         # 3. Create withdrawal trade

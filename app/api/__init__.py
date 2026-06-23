@@ -62,6 +62,60 @@ async def offer_errors():
     return [{"name": r.name, "last_error": r.last_error} for r in rows]
 
 
+@app.get("/check-offers-health")
+async def check_offers_health():
+    from sqlalchemy import func, select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        sample_result = await db.execute(
+            select(Offer.name, Offer.ggsel_offer_id)
+            .where(Offer.ggsel_offer_id.isnot(None))
+            .order_by(func.random())
+            .limit(10)
+        )
+        sample = sample_result.all()
+
+        status_result = await db.execute(
+            select(Offer.status, func.count().label("n")).group_by(Offer.status)
+        )
+        by_status = {row.status.value: row.n for row in status_result}
+
+    stats = {
+        "pending_create": by_status.get(OfferStatus.pending_create.value, 0),
+        "active": by_status.get(OfferStatus.active.value, 0),
+        "error": by_status.get(OfferStatus.error.value, 0),
+    }
+
+    offers = []
+    async with httpx.AsyncClient(headers=ggsel_office._headers(), timeout=10) as client:
+        for row in sample:
+            gid = row.ggsel_offer_id
+            try:
+                resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{gid}")
+                if resp.is_success:
+                    data = resp.json()
+                    offers.append({
+                        "name": row.name,
+                        "ggsel_offer_id": gid,
+                        "has_options": data.get("has_options"),
+                        "notification_settings": data.get("notification_settings"),
+                        "pre_payment_settings": data.get("pre_payment_settings"),
+                    })
+                else:
+                    offers.append({
+                        "name": row.name,
+                        "ggsel_offer_id": gid,
+                        "error": f"HTTP {resp.status_code}",
+                        "body": resp.text[:200],
+                    })
+            except Exception as e:
+                offers.append({"name": row.name, "ggsel_offer_id": gid, "error": str(e)})
+
+    return {"stats": stats, "sample_size": len(sample), "offers": offers}
+
+
 @app.get("/test-sync")
 async def test_sync():
     import asyncio
@@ -463,6 +517,7 @@ async def test_buy():
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Offer
+    from app.workers.deliver import _buy_with_retry
 
     # Find a product from DB with price < $3 that has starpets_product_id
     async with AsyncSessionLocal() as db:
@@ -491,33 +546,28 @@ async def test_buy():
         else:
             return {"error": "no live top item found for any candidate offer"}
 
-    item_id = top_item.get("id")
+    item_id = str(top_item["id"])
     price_usd = float(top_item.get("price_usd") or 0)
+    offer_price_rub = float(offer.price_rub or 0)
 
-    # POST /store/ex-buyers/items/buy — buy the live item at its current price
-    base = starpets._base_params()
-    payload = {**base, "items": [{"id": item_id, "price": price_usd}]}
-
-    signed = starpets._sign(payload)
-    headers = starpets._headers(signed)
-    url = f"{starpets.base_url}/store/ex-buyers/items/buy"
-
-    async with httpx.AsyncClient(headers=headers, timeout=15) as client:
-        resp = await client.post(url, json=payload)
-        try:
-            body = resp.json()
-        except Exception:
-            body = resp.text
-
-    return {
-        "offer": {"id": offer.id, "name": offer.name, "product_id": product_id},
-        "item": {"id": item_id, "price_usd": price_usd},
-        "request_url": url,
-        "request_headers": dict(headers),
-        "request_body": payload,
-        "response_status": resp.status_code,
-        "response_body": body,
-    }
+    try:
+        purchased_item_id, exec_price = await _buy_with_retry(
+            item_id, price_usd, offer_price_rub
+        )
+        return {
+            "offer": {"id": offer.id, "name": offer.name, "product_id": product_id, "price_rub": offer_price_rub},
+            "item": {"id": item_id, "price_usd": price_usd},
+            "result": "ok",
+            "purchased_item_id": purchased_item_id,
+            "exec_price_usd": exec_price,
+        }
+    except RuntimeError as e:
+        return {
+            "offer": {"id": offer.id, "name": offer.name, "product_id": product_id, "price_rub": offer_price_rub},
+            "item": {"id": item_id, "price_usd": price_usd},
+            "result": "failed",
+            "error": str(e),
+        }
 
 
 @app.get("/test-friendship")
