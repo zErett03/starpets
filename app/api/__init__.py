@@ -300,6 +300,117 @@ async def test_top_item():
         return {"product_id": product_id, "status_code": resp.status_code, "body": body}
 
 
+@app.get("/test-deliver-dryrun")
+async def test_deliver_dryrun(ggsel_offer_id: int, username: str = "testuser"):
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.fx import get_usd_rub
+
+    steps = []
+
+    # 1. Look up offer in DB
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Offer).where(Offer.ggsel_offer_id == ggsel_offer_id))
+        offer = result.scalar_one_or_none()
+
+    if not offer:
+        return {"ok": False, "error": f"Offer with ggsel_offer_id={ggsel_offer_id} not found in DB", "steps": steps}
+    steps.append({
+        "step": "offer_lookup",
+        "ok": True,
+        "offer_id": offer.id,
+        "name": offer.name,
+        "status": offer.status.value,
+        "ggsel_offer_id": offer.ggsel_offer_id,
+        "starpets_product_id": offer.starpets_product_id,
+        "price_usd": float(offer.price_usd or 0),
+        "price_rub": float(offer.price_rub or 0),
+    })
+
+    if not offer.starpets_product_id:
+        return {"ok": False, "error": "Offer has no starpets_product_id", "steps": steps}
+
+    if offer.status != OfferStatus.active:
+        steps.append({"step": "status_check", "ok": False, "warning": f"Offer status is {offer.status.value}, not active"})
+    else:
+        steps.append({"step": "status_check", "ok": True})
+
+    # 2. Get top item from StarPets
+    product_id = str(offer.starpets_product_id)
+    top_item = None
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            top_item = await starpets.get_top_item(http, product_id)
+        if top_item:
+            steps.append({
+                "step": "get_top_item",
+                "ok": True,
+                "item_id": top_item.get("id"),
+                "price_usd": float(top_item.get("price_usd") or 0),
+            })
+        else:
+            steps.append({"step": "get_top_item", "ok": False, "error": "No items available for this product"})
+    except Exception as e:
+        steps.append({"step": "get_top_item", "ok": False, "error": str(e)})
+        return {"ok": False, "error": "get_top_item failed", "steps": steps}
+
+    if not top_item:
+        return {"ok": False, "error": "No items available", "steps": steps}
+
+    # 3. Price profitability check
+    item_price_usd = float(top_item.get("price_usd") or 0)
+    offer_price_rub = float(offer.price_rub or 0)
+    fx_rate = await get_usd_rub()
+    cost_rub = item_price_usd * fx_rate * 1.0  # raw cost without markup
+    cost_rub_with_markup = item_price_usd * fx_rate * settings.markup
+    profitable = cost_rub_with_markup <= offer_price_rub
+    steps.append({
+        "step": "price_check",
+        "ok": profitable,
+        "item_price_usd": item_price_usd,
+        "fx_rate": fx_rate,
+        "markup": settings.markup,
+        "cost_rub_with_markup": round(cost_rub_with_markup, 2),
+        "offer_price_rub": offer_price_rub,
+        "margin_rub": round(offer_price_rub - cost_rub_with_markup, 2),
+        "would_buy": profitable,
+    })
+
+    # 4. Dry-run buy (no real purchase)
+    steps.append({
+        "step": "buy_dryrun",
+        "ok": True,
+        "skipped": True,
+        "would_call": "POST /store/ex-buyers/items/buy",
+        "would_send": {"id": top_item.get("id"), "price": item_price_usd},
+    })
+
+    # 5. Dry-run trade
+    steps.append({
+        "step": "trade_dryrun",
+        "ok": True,
+        "skipped": True,
+        "would_call": "POST /trades/ex-buyers/withdrawal",
+        "would_send": {"username": username, "items": [str(top_item.get("id"))]},
+    })
+
+    print(
+        f"[DryRun] ggsel_offer_id={ggsel_offer_id} name={offer.name!r} "
+        f"item_id={top_item.get('id')} price_usd={item_price_usd} "
+        f"cost_rub={cost_rub_with_markup:.2f} offer_rub={offer_price_rub} "
+        f"profitable={profitable} username={username!r}",
+        flush=True,
+    )
+
+    return {
+        "ok": profitable,
+        "dryrun": True,
+        "warning": None if profitable else "price_too_high — would NOT buy",
+        "steps": steps,
+    }
+
+
 @app.post("/test-webhook")
 async def test_webhook(body: dict):
     from datetime import datetime
