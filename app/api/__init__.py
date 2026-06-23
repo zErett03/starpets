@@ -471,6 +471,93 @@ async def test_webhook(body: dict):
     }
 
 
+@app.get("/sync-prices")
+async def sync_prices():
+    import asyncio
+    asyncio.create_task(_run_sync_prices())
+    return {"started": True}
+
+
+async def _run_sync_prices():
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.fx import get_usd_rub
+
+    fx_rate = await get_usd_rub()
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer).where(
+                Offer.ggsel_offer_id.isnot(None),
+                Offer.starpets_product_id.isnot(None),
+                Offer.status == OfferStatus.active,
+            )
+        )
+        offers = result.scalars().all()
+        offer_snapshot = [
+            (o.id, o.ggsel_offer_id, o.starpets_product_id, o.name, float(o.price_rub or 0))
+            for o in offers
+        ]
+
+    print(f"[SyncPrices] starting — {len(offer_snapshot)} active offers, fx_rate={fx_rate}", flush=True)
+
+    updated = skipped = errors = 0
+
+    async with httpx.AsyncClient(timeout=15) as http:
+        for i, (offer_id, ggsel_id, product_id, name, current_rub) in enumerate(offer_snapshot, 1):
+            try:
+                top_item = await starpets.get_top_item(http, str(product_id))
+                if not top_item:
+                    skipped += 1
+                    continue
+
+                price_usd = float(top_item.get("price_usd") or 0)
+                if not price_usd:
+                    skipped += 1
+                    continue
+
+                new_rub = round(price_usd * fx_rate * settings.markup, 2)
+                new_rub = max(new_rub, settings.min_price_rub)
+
+                if abs(new_rub - current_rub) < 0.01:
+                    skipped += 1
+                    continue
+
+                await ggsel_office.update_price(ggsel_id, new_rub)
+
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(Offer).where(Offer.id == offer_id))
+                    offer = result.scalar_one_or_none()
+                    if offer:
+                        offer.price_usd = price_usd
+                        offer.price_rub = new_rub
+                        await db.commit()
+
+                print(
+                    f"[SyncPrices] updated ggsel_id={ggsel_id} name={name!r} "
+                    f"old_rub={current_rub} → new_rub={new_rub} price_usd={price_usd}",
+                    flush=True,
+                )
+                updated += 1
+
+                if i % 20 == 0:
+                    print(f"[SyncPrices] progress {i}/{len(offer_snapshot)}", flush=True)
+
+                await asyncio.sleep(0.2)
+
+            except Exception as e:
+                print(f"[SyncPrices] error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
+                errors += 1
+
+    print(
+        f"[SyncPrices] done — updated={updated} skipped={skipped} errors={errors} "
+        f"total={len(offer_snapshot)}",
+        flush=True,
+    )
+
+
 @app.get("/fix-webhooks")
 async def fix_webhooks():
     from sqlalchemy import select
