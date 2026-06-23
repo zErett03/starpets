@@ -881,15 +881,12 @@ async def _run_fix_post_payment_url():
 async def fix_webhooks():
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
-    from app.db.models import Offer, OfferStatus
+    from app.db.models import Offer
     from app.config import settings
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Offer).where(
-                Offer.status == OfferStatus.active,
-                Offer.ggsel_offer_id.isnot(None),
-            )
+            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
         )
         offers = result.scalars().all()
 
