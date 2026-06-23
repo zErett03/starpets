@@ -201,7 +201,7 @@ class StarPetsClient:
             data = resp.json()
         if isinstance(data, list):
             return data
-        return data.get("trades") or data.get("items") or data.get("data") or []
+        return data.get("trades") or data.get("updates") or data.get("items") or data.get("data") or []
 
     async def send_friendship(self, trade_id: int, item_id: str, username: str) -> dict:
         """PUT /trades/ex-buyers/friendship — ask buyer to add bot as friend."""

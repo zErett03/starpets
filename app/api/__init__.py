@@ -471,6 +471,68 @@ async def test_webhook(body: dict):
     }
 
 
+@app.get("/system-status")
+async def system_status():
+    from sqlalchemy import func, select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, Order, OfferStatus, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        offer_result = await db.execute(
+            select(Offer.status, func.count().label("n")).group_by(Offer.status)
+        )
+        offers_by_status = {row.status.value: row.n for row in offer_result}
+
+        order_result = await db.execute(
+            select(Order.delivery_status, func.count().label("n")).group_by(Order.delivery_status)
+        )
+        orders_by_status = {row.delivery_status.value: row.n for row in order_result}
+
+    starpets_balance = None
+    try:
+        info = await starpets.get_info()
+        starpets_balance = (
+            info.get("balance")
+            or info.get("balanceUsd")
+            or (info.get("data") or {}).get("balance")
+        )
+    except Exception as e:
+        starpets_balance = f"error: {e}"
+
+    return {
+        "offers": {s.value: offers_by_status.get(s.value, 0) for s in OfferStatus},
+        "orders": {s.value: orders_by_status.get(s.value, 0) for s in DeliveryStatus},
+        "starpets_balance_usd": starpets_balance,
+    }
+
+
+@app.get("/order-info")
+async def order_info(order_id: int):
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Order).where(Order.ggsel_order_id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            result = await db.execute(select(Order).where(Order.id == order_id))
+            order = result.scalar_one_or_none()
+
+    if not order:
+        return {"error": f"Order {order_id} not found"}
+
+    return {
+        "order_id": order.id,
+        "ggsel_order_id": order.ggsel_order_id,
+        "item_name": order.item_name,
+        "roblox_username": order.roblox_username,
+        "bot_name": order.bot_name,
+        "delivery_status": order.delivery_status.value if order.delivery_status else None,
+        "starpets_trade_id": order.starpets_custom_id,
+    }
+
+
 @app.get("/sync-prices")
 async def sync_prices():
     import asyncio

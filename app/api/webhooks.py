@@ -37,8 +37,9 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
 
         roblox_username = None
         for opt in options:
-            if opt.get("type") == "text":
-                roblox_username = opt.get("value", "").strip()
+            val = (opt.get("value") or "").strip()
+            if val:
+                roblox_username = val
                 break
 
         if not roblox_username:
@@ -63,7 +64,7 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
                 )
                 db.add(order)
 
-        precheck_ext_id = f"precheck-{offer_id}"
+        precheck_ext_id = f"precheck-{offer_id}-{id_i}" if id_i is not None else f"precheck-{offer_id}"
         result = await db.execute(
             select(WebhookEvent).where(WebhookEvent.external_id == precheck_ext_id)
         )
@@ -96,6 +97,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
     email = body.get("email")
     ip = body.get("ip")
     date_str = body.get("date")
+    options = body.get("options", [])
 
     async with AsyncSessionLocal() as db:
         existing = await db.execute(
@@ -112,30 +114,62 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
         if not offer:
             raise HTTPException(status_code=422, detail="Offer not found")
 
-        precheck_result = await db.execute(
-            select(WebhookEvent).where(
-                WebhookEvent.kind == WebhookKind.precheck,
-                WebhookEvent.external_id == f"precheck-{offer_id}",
-            )
+        # Look up order created during precheck (has roblox_username already)
+        existing_order_result = await db.execute(
+            select(Order).where(Order.ggsel_order_id == id_i)
         )
-        precheck_event = precheck_result.scalar_one_or_none()
-        precheck_payload = precheck_event.payload if precheck_event else {}
-        roblox_username = precheck_payload.get("roblox_username", "")
+        existing_order = existing_order_result.scalar_one_or_none()
+
+        roblox_username = (existing_order.roblox_username if existing_order else None) or ""
+
+        if not roblox_username:
+            # Try options from the notification body
+            for opt in options:
+                val = (opt.get("value") or "").strip()
+                if val:
+                    roblox_username = val
+                    break
+
+        if not roblox_username:
+            # Fall back to precheck event (keyed per order if available)
+            for ext_id in (f"precheck-{offer_id}-{id_i}", f"precheck-{offer_id}"):
+                precheck_result = await db.execute(
+                    select(WebhookEvent).where(
+                        WebhookEvent.kind == WebhookKind.precheck,
+                        WebhookEvent.external_id == ext_id,
+                    )
+                )
+                precheck_event = precheck_result.scalar_one_or_none()
+                if precheck_event:
+                    roblox_username = (precheck_event.payload or {}).get("roblox_username", "")
+                    break
 
         paid_at = datetime.fromisoformat(date_str) if date_str else datetime.utcnow()
-        order = Order(
-            ggsel_order_id=id_i,
-            offer_id=offer.id,
-            item_name=offer.name,
-            amount_rub=amount,
-            roblox_username=roblox_username,
-            buyer_email=email,
-            buyer_ip=ip,
-            starpets_custom_id=str(id_i),
-            delivery_status=DeliveryStatus.pending,
-            paid_at=paid_at,
-        )
-        db.add(order)
+
+        if existing_order:
+            existing_order.amount_rub = amount
+            existing_order.buyer_email = email
+            existing_order.buyer_ip = ip
+            existing_order.paid_at = paid_at
+            existing_order.delivery_status = DeliveryStatus.pending
+            if roblox_username:
+                existing_order.roblox_username = roblox_username
+            order = existing_order
+        else:
+            order = Order(
+                ggsel_order_id=id_i,
+                offer_id=offer.id,
+                item_name=offer.name,
+                amount_rub=amount,
+                roblox_username=roblox_username,
+                buyer_email=email,
+                buyer_ip=ip,
+                starpets_custom_id=str(id_i),
+                delivery_status=DeliveryStatus.pending,
+                paid_at=paid_at,
+            )
+            db.add(order)
+
         await db.flush()
 
         db.add(Task(kind=TaskKind.DELIVER, priority=1, payload={"order_id": order.id}))

@@ -150,7 +150,10 @@ async def deliver_order(order_id: int) -> None:
         )
         if not trade_id:
             raise RuntimeError(f"create_trade returned no trade_id: {trade_resp}")
-        print(f"[Deliver] trade created trade_id={trade_id} resp={trade_resp}", flush=True)
+
+        linked = trade_resp.get("linkedRobloxAccount") or (trade_resp.get("data") or {}).get("linkedRobloxAccount") or {}
+        bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
+        print(f"[Deliver] trade created trade_id={trade_id} bot_name={bot_name!r} resp={trade_resp}", flush=True)
 
         # 4. Send friendship request so buyer can add bot
         try:
@@ -167,6 +170,7 @@ async def deliver_order(order_id: int) -> None:
         # 5. Persist results
         order.starpets_purchase_id = purchased_item_id
         order.starpets_custom_id = str(trade_id)
+        order.bot_name = bot_name
         order.exec_price_usd = exec_price
         order.max_price_usd = price_usd
         order.delivery_status = DeliveryStatus.dispatched

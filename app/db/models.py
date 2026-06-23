@@ -103,6 +103,7 @@ class Order(Base):
     max_price_usd = Column(Numeric(10, 3), nullable=True)
 
     roblox_username = Column(String, nullable=True)
+    bot_name = Column(String, nullable=True)
 
     buyer_email = Column(String, nullable=True)
     buyer_ip = Column(String, nullable=True)

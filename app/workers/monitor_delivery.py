@@ -33,9 +33,10 @@ async def monitor_all_deliveries() -> None:
 
         trade_map: dict[str, dict] = {}
         for t in trades:
-            tid = str(t.get("tradeId") or t.get("id") or "")
-            if tid:
-                trade_map[tid] = t
+            for key in ("tradeId", "id", "customId", "custom_id"):
+                tid = str(t.get(key) or "")
+                if tid:
+                    trade_map[tid] = t
 
         print(
             f"[MonitorDelivery] trades fetched={len(trades)} mapped={len(trade_map)}",
@@ -52,7 +53,7 @@ async def monitor_all_deliveries() -> None:
             if trade is None:
                 continue
 
-            status = trade.get("status")
+            status = trade.get("status") or (trade.get("data") or {}).get("status")
             print(
                 f"[MonitorDelivery] order_id={order.id} trade_id={trade_key} status={status}",
                 flush=True,
