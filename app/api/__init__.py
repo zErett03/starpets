@@ -564,6 +564,28 @@ async def _run_sync_prices():
         print(f"[SyncPrices] fatal error: {e}\n{traceback.format_exc()}", flush=True)
 
 
+@app.get("/retry-errors")
+async def retry_errors():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer).where(Offer.status == OfferStatus.error)
+        )
+        offers = result.scalars().all()
+        count = len(offers)
+        for offer in offers:
+            offer.status = OfferStatus.pending_create
+            offer.last_error = None
+            offer.error_count = 0
+        await db.commit()
+
+    print(f"[RetryErrors] reset {count} error offers to pending_create", flush=True)
+    return {"reset": count}
+
+
 @app.get("/fix-webhooks")
 async def fix_webhooks():
     from sqlalchemy import select
