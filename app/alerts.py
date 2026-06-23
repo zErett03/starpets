@@ -1,12 +1,15 @@
-from telegram import Bot
+import httpx
 
 from app.config import settings
 
 
 async def send_alert(chat_id: str, message: str) -> None:
     try:
-        bot = Bot(token=settings.telegram_bot_token)
-        await bot.send_message(chat_id=chat_id, text=message)
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": message},
+            )
     except Exception as e:
         print(f"[Alert] Failed to send telegram message: {e}")
 

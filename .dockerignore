@@ -1,0 +1,14 @@
+.git
+.gitignore
+.claude
+.dockerignore
+cs2-layer-ref/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+*.md
+docker-compose*.yml
