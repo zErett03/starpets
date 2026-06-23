@@ -64,6 +64,25 @@ async def offer_errors():
     return [{"name": r.name, "last_error": r.last_error} for r in rows]
 
 
+@app.get("/cheapest-offers")
+async def cheapest_offers():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.name, Offer.price_rub, Offer.ggsel_offer_id)
+            .where(
+                Offer.status == OfferStatus.draft,
+                Offer.ggsel_offer_id.isnot(None),
+            )
+            .order_by(Offer.price_rub.asc())
+            .limit(5)
+        )
+        rows = result.all()
+    return [{"name": r.name, "price_rub": float(r.price_rub), "ggsel_offer_id": r.ggsel_offer_id} for r in rows]
+
+
 @app.get("/check-offers-health")
 async def check_offers_health():
     from sqlalchemy import func, select
