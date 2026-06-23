@@ -165,6 +165,14 @@ async def monitor_delivery_safe():
         print(f"[Scheduler] monitor_delivery error: {e}", flush=True)
 
 
+async def sync_prices_safe():
+    try:
+        from app.api import _run_sync_prices
+        await _run_sync_prices()
+    except Exception as e:
+        print(f"[Scheduler] sync_prices error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
@@ -172,6 +180,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(trade_protection, "interval", hours=1, id="trade_protection")
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
+    scheduler.add_job(sync_prices_safe, "interval", minutes=30, id="sync_prices")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler
