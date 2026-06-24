@@ -150,17 +150,36 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
         #    (ggsel may send precheck and notification with different id_i values)
         precheck_order = None
         if not existing_order:
+            # Diagnostic: dump all orders for this offer_id so we can see what's there
+            all_orders_result = await db.execute(
+                select(Order).where(Order.offer_id == offer.id).order_by(Order.created_at.desc())
+            )
+            all_orders = all_orders_result.scalars().all()
+            print(
+                f"[notification] all orders for offer_id={offer.id} (ggsel_offer_id={offer_id}): "
+                f"count={len(all_orders)}",
+                flush=True,
+            )
+            for o in all_orders:
+                print(
+                    f"[notification]   order id={o.id} ggsel_order_id={o.ggsel_order_id} "
+                    f"status={o.delivery_status.value if o.delivery_status else None} "
+                    f"paid_at={o.paid_at} amount_rub={o.amount_rub} "
+                    f"roblox_username={o.roblox_username!r}",
+                    flush=True,
+                )
+
+            # Search: precheck orders have no amount_rub (payment info comes only from notification)
             precheck_order_result = await db.execute(
                 select(Order).where(
                     Order.offer_id == offer.id,
-                    Order.paid_at.is_(None),
-                    Order.delivery_status == DeliveryStatus.pending,
+                    Order.amount_rub.is_(None),
                 ).order_by(Order.created_at.desc())
             )
             precheck_order = precheck_order_result.scalars().first()
             print(
-                f"[notification] lookup precheck order by offer_id={offer.id}: "
-                f"{'found id=' + str(precheck_order.id) + ' ggsel_order_id=' + str(precheck_order.ggsel_order_id) + ' username=' + repr(precheck_order.roblox_username) if precheck_order else 'not found'}",
+                f"[notification] precheck order search (offer_id={offer.id}, amount_rub IS NULL): "
+                f"{'found id=' + str(precheck_order.id) + ' ggsel_order_id=' + str(precheck_order.ggsel_order_id) + ' status=' + str(precheck_order.delivery_status.value if precheck_order.delivery_status else None) + ' username=' + repr(precheck_order.roblox_username) if precheck_order else 'not found'}",
                 flush=True,
             )
 
