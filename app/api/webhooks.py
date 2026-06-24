@@ -19,7 +19,7 @@ def check_secret(secret: str):
 async def precheck(offer_id: int, request: Request, secret: str = ""):
     check_secret(secret)
     body = await request.json()
-    print(f"[precheck] body: {body}", flush=True)
+    print(f"[precheck] offer_id={offer_id} body: {body}", flush=True)
 
     product = body.get("product", {})
     options = body.get("options", [])
@@ -41,6 +41,8 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
             if val:
                 roblox_username = val
                 break
+
+        print(f"[precheck] offer_id={offer_id} id_i={id_i} roblox_username={roblox_username!r}", flush=True)
 
         if not roblox_username:
             return {"error": "Укажите Roblox Username"}
@@ -90,7 +92,7 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
 async def notification(offer_id: int, request: Request, secret: str = ""):
     check_secret(secret)
     body = await request.json()
-    print(f"[notification] body: {body}", flush=True)
+    print(f"[notification] offer_id={offer_id} body: {body}", flush=True)
 
     id_i = body.get("id_i")
     amount = body.get("amount")
@@ -114,24 +116,50 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
         if not offer:
             raise HTTPException(status_code=422, detail="Offer not found")
 
-        # Look up order created during precheck (has roblox_username already)
+        # 1. Look up order by ggsel_order_id (exact match)
         existing_order_result = await db.execute(
             select(Order).where(Order.ggsel_order_id == id_i)
         )
         existing_order = existing_order_result.scalar_one_or_none()
+        print(
+            f"[notification] lookup by ggsel_order_id={id_i}: "
+            f"{'found id=' + str(existing_order.id) + ' username=' + repr(existing_order.roblox_username) if existing_order else 'not found'}",
+            flush=True,
+        )
 
-        roblox_username = (existing_order.roblox_username if existing_order else None) or ""
+        # 2. If not found by order_id, look for a precheck-created order by offer_id
+        #    (ggsel may send precheck and notification with different id_i values)
+        precheck_order = None
+        if not existing_order:
+            precheck_order_result = await db.execute(
+                select(Order).where(
+                    Order.offer_id == offer.id,
+                    Order.paid_at.is_(None),
+                    Order.delivery_status == DeliveryStatus.pending,
+                ).order_by(Order.created_at.desc())
+            )
+            precheck_order = precheck_order_result.scalars().first()
+            print(
+                f"[notification] lookup precheck order by offer_id={offer.id}: "
+                f"{'found id=' + str(precheck_order.id) + ' ggsel_order_id=' + str(precheck_order.ggsel_order_id) + ' username=' + repr(precheck_order.roblox_username) if precheck_order else 'not found'}",
+                flush=True,
+            )
+
+        # Resolve roblox_username: order → notification options → precheck WebhookEvent
+        order_for_username = existing_order or precheck_order
+        roblox_username = (order_for_username.roblox_username if order_for_username else None) or ""
+        print(f"[notification] roblox_username from order: {roblox_username!r}", flush=True)
 
         if not roblox_username:
-            # Try options from the notification body
             for opt in options:
                 val = (opt.get("value") or "").strip()
                 if val:
                     roblox_username = val
                     break
+            print(f"[notification] roblox_username from notification options: {roblox_username!r}", flush=True)
 
         if not roblox_username:
-            # Fall back to precheck event (keyed per order if available)
+            # Try exact precheck event keys first, then any precheck event for this offer
             for ext_id in (f"precheck-{offer_id}-{id_i}", f"precheck-{offer_id}"):
                 precheck_result = await db.execute(
                     select(WebhookEvent).where(
@@ -142,7 +170,23 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                 precheck_event = precheck_result.scalar_one_or_none()
                 if precheck_event:
                     roblox_username = (precheck_event.payload or {}).get("roblox_username", "")
+                    print(f"[notification] roblox_username from precheck event {ext_id!r}: {roblox_username!r}", flush=True)
                     break
+
+        if not roblox_username:
+            # Last resort: any precheck event for this offer_id (handles mismatched id_i)
+            any_precheck_result = await db.execute(
+                select(WebhookEvent).where(
+                    WebhookEvent.kind == WebhookKind.precheck,
+                    WebhookEvent.external_id.like(f"precheck-{offer_id}%"),
+                ).order_by(WebhookEvent.processed_at.desc())
+            )
+            any_precheck = any_precheck_result.scalars().first()
+            if any_precheck:
+                roblox_username = (any_precheck.payload or {}).get("roblox_username", "")
+                print(f"[notification] roblox_username from any precheck event {any_precheck.external_id!r}: {roblox_username!r}", flush=True)
+
+        print(f"[notification] final roblox_username={roblox_username!r} id_i={id_i}", flush=True)
 
         paid_at = datetime.fromisoformat(date_str) if date_str else datetime.utcnow()
 
@@ -155,6 +199,24 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             if roblox_username:
                 existing_order.roblox_username = roblox_username
             order = existing_order
+        elif precheck_order:
+            # Link precheck order to this notification (update to real ggsel_order_id)
+            print(
+                f"[notification] linking precheck order id={precheck_order.id} "
+                f"old_ggsel_order_id={precheck_order.ggsel_order_id} → new={id_i} "
+                f"roblox_username={roblox_username!r}",
+                flush=True,
+            )
+            precheck_order.ggsel_order_id = id_i
+            precheck_order.starpets_custom_id = str(id_i)
+            precheck_order.amount_rub = amount
+            precheck_order.buyer_email = email
+            precheck_order.buyer_ip = ip
+            precheck_order.paid_at = paid_at
+            precheck_order.delivery_status = DeliveryStatus.pending
+            if roblox_username:
+                precheck_order.roblox_username = roblox_username
+            order = precheck_order
         else:
             order = Order(
                 ggsel_order_id=id_i,
