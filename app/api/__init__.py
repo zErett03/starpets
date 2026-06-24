@@ -717,7 +717,8 @@ async def system_status():
                 if resp.is_success:
                     data = resp.json()
                     starpets_balance = (
-                        data.get("balance")
+                        (data.get("buyer") or {}).get("balance")
+                        or data.get("balance")
                         or data.get("balanceUsd")
                         or data.get("balance_usd")
                         or (data.get("data") or {}).get("balance")

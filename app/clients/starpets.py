@@ -42,7 +42,7 @@ class StarPetsClient:
     async def get_info(self) -> dict:
         params = self._base_params()
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=10) as client:
-            resp = await client.get(f"{self.base_url}/info", params=params)
+            resp = await client.get(f"{self.base_url}/ex-buyers/info/me", params=params)
             resp.raise_for_status()
             return resp.json()
 
