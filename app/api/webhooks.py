@@ -234,7 +234,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
 
         await db.flush()
 
-        db.add(Task(kind=TaskKind.DELIVER, priority=1, payload={"order_id": order.id}))
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=3, payload={"order_id": order.id}))
         db.add(WebhookEvent(
             kind=WebhookKind.notification,
             external_id=str(id_i),

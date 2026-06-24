@@ -38,6 +38,7 @@ class GgselSellerOfficeClient:
             "cover_image_ru": cover_data_uri,
             "price": price,
             "currency": "RUB",
+            "quantity": 999,
             "is_autoselling": False,
             "category_id": category_id,
             "delivery": "manual",

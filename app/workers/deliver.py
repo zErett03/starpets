@@ -112,6 +112,15 @@ async def deliver_order(order_id: int) -> None:
             print(f"[Deliver] order_id={order_id} already {order.delivery_status.value} — skip", flush=True)
             return
 
+        # Guard: must have roblox_username before spending any money
+        if not roblox_username:
+            order.delivery_status = DeliveryStatus.failed
+            order.error_reason = "no_roblox_username"
+            order.updated_at = datetime.utcnow()
+            await db.commit()
+            print(f"[Deliver] order_id={order_id} failed: no_roblox_username", flush=True)
+            return
+
         # Reuse existing purchased_item_id if item was already bought (retry after partial failure)
         if order.starpets_purchase_id:
             purchased_item_id = order.starpets_purchase_id
@@ -160,10 +169,30 @@ async def deliver_order(order_id: int) -> None:
             await db.commit()
 
         # 3. Create withdrawal trade
-        trade_resp = await starpets.create_trade(
-            purchased_item_ids=[purchased_item_id],
-            roblox_username=roblox_username,
+        print(
+            f"[Deliver] create_trade order_id={order_id} "
+            f"purchased_item_id={purchased_item_id} roblox_username={roblox_username!r}",
+            flush=True,
         )
+        try:
+            trade_resp = await starpets.create_trade(
+                purchased_item_ids=[purchased_item_id],
+                roblox_username=roblox_username,
+            )
+        except httpx.HTTPStatusError as exc:
+            err_body = ""
+            try:
+                err_body = exc.response.text
+            except Exception:
+                pass
+            print(
+                f"[Deliver] create_trade FAILED order_id={order_id} "
+                f"status={exc.response.status_code} body={err_body}",
+                flush=True,
+            )
+            raise
+        print(f"[Deliver] create_trade response order_id={order_id}: {trade_resp}", flush=True)
+
         trade_id = (
             trade_resp.get("tradeId")
             or trade_resp.get("trade_id")
@@ -175,7 +204,7 @@ async def deliver_order(order_id: int) -> None:
 
         linked = trade_resp.get("linkedRobloxAccount") or (trade_resp.get("data") or {}).get("linkedRobloxAccount") or {}
         bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
-        print(f"[Deliver] trade created trade_id={trade_id} bot_name={bot_name!r} resp={trade_resp}", flush=True)
+        print(f"[Deliver] trade_id={trade_id} bot_name={bot_name!r}", flush=True)
 
         # 4. Send friendship request so buyer can add bot
         try:

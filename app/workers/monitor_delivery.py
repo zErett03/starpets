@@ -20,10 +20,16 @@ async def monitor_all_deliveries() -> None:
         )
         orders = result.scalars().all()
 
+        print(f"[MonitorDelivery] dispatched orders: {len(orders)}", flush=True)
+        for o in orders:
+            print(
+                f"[MonitorDelivery]   order_id={o.id} ggsel_order_id={o.ggsel_order_id} "
+                f"roblox_username={o.roblox_username!r} trade_id={o.starpets_custom_id}",
+                flush=True,
+            )
+
         if not orders:
             return
-
-        print(f"[MonitorDelivery] checking {len(orders)} dispatched orders", flush=True)
 
         try:
             trades = await starpets.get_bulk_trade_updates(limit=50)
