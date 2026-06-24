@@ -38,7 +38,6 @@ class GgselSellerOfficeClient:
             "cover_image_ru": cover_data_uri,
             "price": price,
             "currency": "RUB",
-            "quantity": 999,
             "is_autoselling": False,
             "category_id": category_id,
             "delivery": "manual",
@@ -123,6 +122,15 @@ class GgselSellerOfficeClient:
             resp = await client.patch(
                 f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"post_payment_url": url},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def set_quantity(self, offer_id: int, quantity: int) -> dict:
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await client.patch(
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+                json={"quantity": quantity},
             )
             resp.raise_for_status()
             return resp.json()
