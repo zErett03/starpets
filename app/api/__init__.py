@@ -737,6 +737,35 @@ async def system_status():
     }
 
 
+@app.get("/trigger-deliver")
+async def trigger_deliver(order_id: int):
+    from datetime import datetime
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            return {"error": f"Order {order_id} not found"}
+
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        order.updated_at = datetime.utcnow()
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=3, payload={"order_id": order_id}))
+        await db.commit()
+
+    print(f"[trigger-deliver] order_id={order_id} reset to pending, DELIVER task queued", flush=True)
+    return {
+        "order_id": order_id,
+        "delivery_status": "pending",
+        "queued_deliver": True,
+        "roblox_username": order.roblox_username,
+        "starpets_purchase_id": order.starpets_purchase_id,
+    }
+
+
 @app.get("/fix-order-username")
 async def fix_order_username(order_id: int, username: str):
     from datetime import datetime
