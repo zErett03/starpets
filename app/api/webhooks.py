@@ -15,22 +15,29 @@ def check_secret(secret: str):
         raise HTTPException(status_code=403, detail="Invalid secret")
 
 
-@router.post("/hooks/ggsel/precheck/{offer_id}")
-async def precheck(offer_id: int, request: Request, secret: str = ""):
+@router.post("/hooks/ggsel/precheck/{ggsel_offer_id}")
+async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
     check_secret(secret)
     body = await request.json()
-    print(f"[precheck] offer_id={offer_id} body: {body}", flush=True)
+    print(f"[precheck] ggsel_offer_id={ggsel_offer_id} body: {body}", flush=True)
 
     product = body.get("product", {})
     options = body.get("options", [])
     id_i = body.get("id_i")
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Offer).where(Offer.ggsel_offer_id == offer_id))
+        result = await db.execute(select(Offer).where(Offer.ggsel_offer_id == ggsel_offer_id))
         offer = result.scalar_one_or_none()
 
         if not offer:
             return {"error": "Оффер не найден"}
+
+        # offer.id is the internal PK; ggsel_offer_id is the external ggsel ID
+        internal_offer_id = offer.id
+        print(
+            f"[precheck] ggsel_offer_id={ggsel_offer_id} → internal offer.id={internal_offer_id}",
+            flush=True,
+        )
 
         if product.get("cnt") != 1:
             return {"error": "Количество должно быть 1"}
@@ -42,7 +49,7 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
                 roblox_username = val
                 break
 
-        print(f"[precheck] offer_id={offer_id} id_i={id_i} roblox_username={roblox_username!r}", flush=True)
+        print(f"[precheck] id_i={id_i} roblox_username={roblox_username!r}", flush=True)
 
         if not roblox_username:
             return {"error": "Укажите Roblox Username"}
@@ -56,17 +63,29 @@ async def precheck(offer_id: int, request: Request, secret: str = ""):
 
             if order:
                 order.roblox_username = roblox_username
+                # Fix offer_id if it was previously stored as ggsel_offer_id instead of internal id
+                if order.offer_id != internal_offer_id:
+                    print(
+                        f"[precheck] fixing order.offer_id: {order.offer_id} → {internal_offer_id}",
+                        flush=True,
+                    )
+                    order.offer_id = internal_offer_id
             else:
                 order = Order(
                     ggsel_order_id=id_i,
-                    offer_id=offer.id,
+                    offer_id=internal_offer_id,
                     item_name=offer.name,
                     roblox_username=roblox_username,
                     starpets_custom_id=str(id_i),
                 )
                 db.add(order)
+            print(
+                f"[precheck] order saved: ggsel_order_id={id_i} offer_id={internal_offer_id} "
+                f"roblox_username={roblox_username!r}",
+                flush=True,
+            )
 
-        precheck_ext_id = f"precheck-{offer_id}-{id_i}" if id_i is not None else f"precheck-{offer_id}"
+        precheck_ext_id = f"precheck-{ggsel_offer_id}-{id_i}" if id_i is not None else f"precheck-{ggsel_offer_id}"
         result = await db.execute(
             select(WebhookEvent).where(WebhookEvent.external_id == precheck_ext_id)
         )
