@@ -54,16 +54,12 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         if not roblox_username:
             return {"error": "Укажите Roblox Username"}
 
-        if offer.starpets_qty == 0:
-            return {"error": "Товар временно недоступен"}
-
         if id_i is not None:
             result = await db.execute(select(Order).where(Order.ggsel_order_id == id_i))
             order = result.scalar_one_or_none()
 
             if order:
                 order.roblox_username = roblox_username
-                # Fix offer_id if it was previously stored as ggsel_offer_id instead of internal id
                 if order.offer_id != internal_offer_id:
                     print(
                         f"[precheck] fixing order.offer_id: {order.offer_id} → {internal_offer_id}",
@@ -85,6 +81,7 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
                 flush=True,
             )
 
+        # Save WebhookEvent BEFORE qty check so username is always persisted
         precheck_ext_id = f"precheck-{ggsel_offer_id}-{id_i}" if id_i is not None else f"precheck-{ggsel_offer_id}"
         result = await db.execute(
             select(WebhookEvent).where(WebhookEvent.external_id == precheck_ext_id)
@@ -103,6 +100,11 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
             ))
 
         await db.commit()
+        print(f"[precheck] WebhookEvent saved: {precheck_ext_id!r} username={roblox_username!r}", flush=True)
+
+        # qty check AFTER commit — username already persisted above
+        if offer.starpets_qty == 0:
+            return {"error": "Товар временно недоступен"}
 
     return {"error": None}
 
