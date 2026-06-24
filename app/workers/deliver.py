@@ -193,8 +193,11 @@ async def deliver_order(order_id: int) -> None:
             raise
         print(f"[Deliver] create_trade response order_id={order_id}: {trade_resp}", flush=True)
 
+        first_trade = (trade_resp.get("trades") or [{}])[0]
         trade_id = (
-            trade_resp.get("tradeId")
+            first_trade.get("id")
+            or first_trade.get("tradeId")
+            or trade_resp.get("tradeId")
             or trade_resp.get("trade_id")
             or trade_resp.get("id")
             or (trade_resp.get("data") or {}).get("id")
@@ -202,7 +205,12 @@ async def deliver_order(order_id: int) -> None:
         if not trade_id:
             raise RuntimeError(f"create_trade returned no trade_id: {trade_resp}")
 
-        linked = trade_resp.get("linkedRobloxAccount") or (trade_resp.get("data") or {}).get("linkedRobloxAccount") or {}
+        linked = (
+            first_trade.get("linkedRobloxAccount")
+            or trade_resp.get("linkedRobloxAccount")
+            or (trade_resp.get("data") or {}).get("linkedRobloxAccount")
+            or {}
+        )
         bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
         print(f"[Deliver] trade_id={trade_id} bot_name={bot_name!r}", flush=True)
 
