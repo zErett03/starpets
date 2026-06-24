@@ -139,6 +139,11 @@ class StarPetsClient:
             resp = await client.post(
                 f"{self.base_url}/store/ex-buyers/items/buy", json=payload
             )
+            if not resp.is_success:
+                print(
+                    f"[buy_by_items] FAILED status={resp.status_code} body={resp.text}",
+                    flush=True,
+                )
             resp.raise_for_status()
             return resp.json()
 

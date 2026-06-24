@@ -697,20 +697,42 @@ async def system_status():
         orders_by_status = {row.delivery_status.value: row.n for row in order_result}
 
     starpets_balance = None
-    try:
-        info = await starpets.get_info()
-        starpets_balance = (
-            info.get("balance")
-            or info.get("balanceUsd")
-            or (info.get("data") or {}).get("balance")
-        )
-    except Exception as e:
-        starpets_balance = f"error: {e}"
+    starpets_balance_raw = None
+    balance_endpoints = [
+        "/ex-buyers/balance",
+        "/account/balance",
+        "/ex-buyers/info/me",
+        "/info",
+    ]
+    async with httpx.AsyncClient(timeout=10) as _hc:
+        for ep in balance_endpoints:
+            try:
+                params = starpets._base_params()
+                resp = await _hc.get(
+                    f"{starpets.base_url}{ep}",
+                    headers=starpets._headers(starpets._sign(params)),
+                    params=params,
+                )
+                starpets_balance_raw = {"endpoint": ep, "status": resp.status_code, "body": resp.text[:300]}
+                if resp.is_success:
+                    data = resp.json()
+                    starpets_balance = (
+                        data.get("balance")
+                        or data.get("balanceUsd")
+                        or data.get("balance_usd")
+                        or (data.get("data") or {}).get("balance")
+                        or (data.get("data") or {}).get("balanceUsd")
+                    )
+                    if starpets_balance is not None:
+                        break
+            except Exception as e:
+                starpets_balance_raw = {"endpoint": ep, "error": str(e)}
 
     return {
         "offers": {s.value: offers_by_status.get(s.value, 0) for s in OfferStatus},
         "orders": {s.value: orders_by_status.get(s.value, 0) for s in DeliveryStatus},
         "starpets_balance_usd": starpets_balance,
+        "starpets_balance_debug": starpets_balance_raw,
     }
 
 
