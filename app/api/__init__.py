@@ -966,6 +966,13 @@ async def _run_fix_post_payment_url():
 
 @app.get("/fix-webhooks")
 async def fix_webhooks():
+    import asyncio
+    asyncio.create_task(_run_fix_webhooks())
+    return {"started": True}
+
+
+async def _run_fix_webhooks():
+    import asyncio
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Offer
@@ -973,24 +980,32 @@ async def fix_webhooks():
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
+            select(Offer.ggsel_offer_id).where(Offer.ggsel_offer_id.isnot(None))
         )
-        offers = result.scalars().all()
+        offer_ids = [r[0] for r in result.all()]
 
-    updated, errors = [], []
-    for offer in offers:
-        gid = offer.ggsel_offer_id
+    total = len(offer_ids)
+    print(f"[FixWebhooks] starting — {total} offers", flush=True)
+
+    updated = errors = 0
+    for i, gid in enumerate(offer_ids, 1):
         try:
             await ggsel_office.patch_offer(
                 offer_id=gid,
                 precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={settings.webhook_shared_secret}",
                 notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={settings.webhook_shared_secret}",
             )
-            updated.append(gid)
+            updated += 1
         except Exception as e:
-            errors.append({"ggsel_offer_id": gid, "error": str(e)})
+            print(f"[FixWebhooks] ggsel_offer_id={gid} error: {e}", flush=True)
+            errors += 1
 
-    return {"updated": len(updated), "offer_ids": updated, "errors": errors}
+        if i % 100 == 0:
+            print(f"[FixWebhooks] progress {i}/{total} updated={updated} errors={errors}", flush=True)
+
+        await asyncio.sleep(0.3)
+
+    print(f"[FixWebhooks] done — updated={updated} errors={errors} total={total}", flush=True)
 
 
 @app.get("/create-offers")
