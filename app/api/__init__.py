@@ -714,6 +714,51 @@ async def system_status():
     }
 
 
+@app.get("/fix-order-username")
+async def fix_order_username(order_id: int, username: str):
+    from datetime import datetime
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order:
+            return {"error": f"Order {order_id} not found"}
+
+        old_username = order.roblox_username
+        order.roblox_username = username
+        order.updated_at = datetime.utcnow()
+
+        queued_deliver = False
+        # If failed due to missing username or still pending with item already bought → retry deliver
+        if order.delivery_status in (DeliveryStatus.failed,) and order.error_reason == "no_roblox_username":
+            order.delivery_status = DeliveryStatus.pending
+            order.error_reason = None
+            db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=3, payload={"order_id": order.id}))
+            queued_deliver = True
+        elif order.delivery_status == DeliveryStatus.pending and order.starpets_purchase_id:
+            db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=3, payload={"order_id": order.id}))
+            queued_deliver = True
+
+        await db.commit()
+        print(
+            f"[fix-order-username] order_id={order_id} username: {old_username!r} → {username!r} "
+            f"status={order.delivery_status.value} queued_deliver={queued_deliver}",
+            flush=True,
+        )
+
+    return {
+        "order_id": order_id,
+        "old_username": old_username,
+        "new_username": username,
+        "delivery_status": order.delivery_status.value,
+        "starpets_purchase_id": order.starpets_purchase_id,
+        "queued_deliver": queued_deliver,
+    }
+
+
 @app.get("/order-info")
 async def order_info(order_id: int):
     from sqlalchemy import select
