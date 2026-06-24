@@ -197,7 +197,27 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             print(f"[notification] roblox_username from notification options: {roblox_username!r}", flush=True)
 
         if not roblox_username:
-            # Try exact precheck event keys first, then any precheck event for this offer
+            # Diagnostic: count all precheck WebhookEvents for this ggsel_offer_id
+            from sqlalchemy import func as _func
+            diag_result = await db.execute(
+                select(WebhookEvent.external_id, WebhookEvent.processed_at, WebhookEvent.payload).where(
+                    WebhookEvent.kind == WebhookKind.precheck,
+                    WebhookEvent.external_id.like(f"precheck-{offer_id}%"),
+                ).order_by(WebhookEvent.processed_at.desc())
+            )
+            diag_rows = diag_result.all()
+            print(
+                f"[notification] WebhookEvent precheck count for offer_id={offer_id}: {len(diag_rows)}",
+                flush=True,
+            )
+            for row in diag_rows:
+                print(
+                    f"[notification]   event external_id={row.external_id!r} "
+                    f"processed_at={row.processed_at} payload={row.payload}",
+                    flush=True,
+                )
+
+            # Try exact keys first: precheck-{offer_id}-{id_i}, then precheck-{offer_id}
             for ext_id in (f"precheck-{offer_id}-{id_i}", f"precheck-{offer_id}"):
                 precheck_result = await db.execute(
                     select(WebhookEvent).where(
@@ -211,18 +231,15 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                     print(f"[notification] roblox_username from precheck event {ext_id!r}: {roblox_username!r}", flush=True)
                     break
 
-        if not roblox_username:
-            # Last resort: any precheck event for this offer_id (handles mismatched id_i)
-            any_precheck_result = await db.execute(
-                select(WebhookEvent).where(
-                    WebhookEvent.kind == WebhookKind.precheck,
-                    WebhookEvent.external_id.like(f"precheck-{offer_id}%"),
-                ).order_by(WebhookEvent.processed_at.desc())
-            )
-            any_precheck = any_precheck_result.scalars().first()
-            if any_precheck:
-                roblox_username = (any_precheck.payload or {}).get("roblox_username", "")
-                print(f"[notification] roblox_username from any precheck event {any_precheck.external_id!r}: {roblox_username!r}", flush=True)
+            if not roblox_username and diag_rows:
+                # Last resort: any precheck event for this offer_id (handles mismatched id_i)
+                any_precheck_payload = diag_rows[0].payload or {}
+                roblox_username = any_precheck_payload.get("roblox_username", "")
+                print(
+                    f"[notification] roblox_username from latest precheck event "
+                    f"{diag_rows[0].external_id!r}: {roblox_username!r}",
+                    flush=True,
+                )
 
         print(f"[notification] final roblox_username={roblox_username!r} id_i={id_i}", flush=True)
 
