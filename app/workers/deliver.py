@@ -107,35 +107,57 @@ async def deliver_order(order_id: int) -> None:
             flush=True,
         )
 
-        # 1. Get cheapest available item for this product
-        async with httpx.AsyncClient(timeout=15) as http:
-            top_item = await starpets.get_top_item(http, product_id)
-        if not top_item:
-            raise RuntimeError(f"No items available for product_id={product_id}")
-        item_id = str(top_item["id"])
-        price_usd = float(top_item.get("price_usd") or 0)
-        print(f"[Deliver] top_item id={item_id} price_usd={price_usd}", flush=True)
+        # Already fully dispatched — nothing to do on retry
+        if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
+            print(f"[Deliver] order_id={order_id} already {order.delivery_status.value} — skip", flush=True)
+            return
 
-        # 2. Buy the item (with retry on code=330 PRICES_HAVE_CHANGED)
-        try:
-            purchased_item_id, exec_price = await _buy_with_retry(
-                item_id, price_usd, offer_price_rub
+        # Reuse existing purchased_item_id if item was already bought (retry after partial failure)
+        if order.starpets_purchase_id:
+            purchased_item_id = order.starpets_purchase_id
+            exec_price = float(order.exec_price_usd or 0)
+            price_usd = float(order.max_price_usd or 0)
+            print(
+                f"[Deliver] order_id={order_id} reusing purchased_item_id={purchased_item_id} — skip buy",
+                flush=True,
             )
-        except RuntimeError as e:
-            if str(e) == "price_too_high":
-                order.delivery_status = DeliveryStatus.failed
-                order.error_reason = "price_too_high"
-                order.updated_at = datetime.utcnow()
-                await db.commit()
-                print(
-                    f"[Deliver] order_id={order_id} marked failed: price_too_high "
-                    f"item_id={item_id} price_usd={price_usd} offer_rub={offer_price_rub}",
-                    flush=True,
-                )
-                return
-            raise
+        else:
+            # 1. Get cheapest available item for this product
+            async with httpx.AsyncClient(timeout=15) as http:
+                top_item = await starpets.get_top_item(http, product_id)
+            if not top_item:
+                raise RuntimeError(f"No items available for product_id={product_id}")
+            item_id = str(top_item["id"])
+            price_usd = float(top_item.get("price_usd") or 0)
+            print(f"[Deliver] top_item id={item_id} price_usd={price_usd}", flush=True)
 
-        print(f"[Deliver] bought purchased_item_id={purchased_item_id} exec_price={exec_price}", flush=True)
+            # 2. Buy the item (with retry on code=330 PRICES_HAVE_CHANGED)
+            try:
+                purchased_item_id, exec_price = await _buy_with_retry(
+                    item_id, price_usd, offer_price_rub
+                )
+            except RuntimeError as e:
+                if str(e) == "price_too_high":
+                    order.delivery_status = DeliveryStatus.failed
+                    order.error_reason = "price_too_high"
+                    order.updated_at = datetime.utcnow()
+                    await db.commit()
+                    print(
+                        f"[Deliver] order_id={order_id} marked failed: price_too_high "
+                        f"item_id={item_id} price_usd={price_usd} offer_rub={offer_price_rub}",
+                        flush=True,
+                    )
+                    return
+                raise
+
+            print(f"[Deliver] bought purchased_item_id={purchased_item_id} exec_price={exec_price}", flush=True)
+
+            # Persist purchase immediately so a retry won't double-buy
+            order.starpets_purchase_id = purchased_item_id
+            order.exec_price_usd = exec_price
+            order.max_price_usd = price_usd
+            order.updated_at = datetime.utcnow()
+            await db.commit()
 
         # 3. Create withdrawal trade
         trade_resp = await starpets.create_trade(
@@ -168,11 +190,8 @@ async def deliver_order(order_id: int) -> None:
             print(f"[Deliver] friendship request failed (non-fatal): {e}", flush=True)
 
         # 5. Persist results
-        order.starpets_purchase_id = purchased_item_id
         order.starpets_custom_id = str(trade_id)
         order.bot_name = bot_name
-        order.exec_price_usd = exec_price
-        order.max_price_usd = price_usd
         order.delivery_status = DeliveryStatus.dispatched
         order.updated_at = datetime.utcnow()
         await db.commit()
