@@ -199,9 +199,14 @@ class StarPetsClient:
 
     async def get_bulk_trade_updates(self, limit: int = 50) -> list:
         """GET /ex-buyers/trades/updates — bulk status poll, returns list of trade objects."""
-        from datetime import datetime, timezone
-        today_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-        params = {**self._base_params(), "date": today_ms, "limit": limit}
+        from datetime import datetime, timezone, timedelta
+        # 48h lookback so trades created yesterday are included
+        since_ms = int((datetime.now(timezone.utc) - timedelta(hours=48)).timestamp() * 1000)
+        params = {**self._base_params(), "date": since_ms, "limit": limit}
+        print(
+            f"[starpets] get_bulk_trade_updates params={params}",
+            flush=True,
+        )
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
             resp = await client.get(f"{self.base_url}/ex-buyers/trades/updates", params=params)
             if not resp.is_success:
@@ -209,9 +214,14 @@ class StarPetsClient:
                     err_body = resp.json()
                 except Exception:
                     err_body = resp.text
-                print(f"[starpets] get_bulk_trade_updates {resp.status_code}: {err_body}", flush=True)
+                print(
+                    f"[starpets] get_bulk_trade_updates FAILED status={resp.status_code} "
+                    f"url={resp.request.url} body={err_body}",
+                    flush=True,
+                )
             resp.raise_for_status()
             data = resp.json()
+        print(f"[starpets] get_bulk_trade_updates raw response: {str(data)[:300]}", flush=True)
         if isinstance(data, list):
             return data
         return data.get("trades") or data.get("updates") or data.get("items") or data.get("data") or []

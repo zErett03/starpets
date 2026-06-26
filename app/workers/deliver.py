@@ -135,7 +135,15 @@ async def deliver_order(order_id: int) -> None:
             async with httpx.AsyncClient(timeout=15) as http:
                 top_item = await starpets.get_top_item(http, product_id)
             if not top_item:
-                raise RuntimeError(f"No items available for product_id={product_id}")
+                order.delivery_status = DeliveryStatus.failed
+                order.error_reason = "no_items_available"
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(
+                    f"[Deliver] order_id={order_id} failed: no_items_available product_id={product_id}",
+                    flush=True,
+                )
+                return
             item_id = str(top_item["id"])
             price_usd = float(top_item.get("price_usd") or 0)
             print(f"[Deliver] top_item id={item_id} price_usd={price_usd}", flush=True)

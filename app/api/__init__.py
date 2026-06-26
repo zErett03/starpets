@@ -518,9 +518,9 @@ async def delivery_page(id: int = None):
     elif status == DeliveryStatus.failed:
         body_html = """
         <div class="card">
-            <div class="icon">❌</div>
-            <h1>Ошибка доставки</h1>
-            <p class="sub">Напишите в чат заказа — мы решим проблему.</p>
+            <div class="icon">⏳</div>
+            <h1>Товар временно закончился</h1>
+            <p class="sub">Деньги вернутся автоматически.</p>
         </div>"""
         extra_js = ""
 
@@ -855,6 +855,49 @@ async def _run_sync_prices():
 
     print("[SyncPrices] started", flush=True)
     try:
+        # Balance guard: pause all active offers and abort if funds are too low
+        try:
+            info = await starpets.get_info()
+            balance = float(
+                (info.get("buyer") or {}).get("balance")
+                or info.get("balanceUsd")
+                or info.get("balance_usd")
+                or info.get("balance")
+                or (info.get("data") or {}).get("balance")
+                or 0
+            )
+        except Exception as _be:
+            print(f"[SyncPrices] balance check failed (non-fatal): {_be}", flush=True)
+            balance = None
+
+        if balance is not None and balance < 1.0:
+            print(f"[SyncPrices] LOW BALANCE: ${balance:.2f} — pausing all active offers", flush=True)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(Offer).where(
+                        Offer.ggsel_offer_id.isnot(None),
+                        Offer.status == OfferStatus.active,
+                    )
+                )
+                active_offers = result.scalars().all()
+                ggsel_ids = [o.ggsel_offer_id for o in active_offers]
+                offer_ids = [o.id for o in active_offers]
+
+            if ggsel_ids:
+                for batch_start in range(0, len(ggsel_ids), 100):
+                    batch = ggsel_ids[batch_start:batch_start + 100]
+                    try:
+                        await ggsel_office.pause_offers(batch)
+                    except Exception as _pe:
+                        print(f"[SyncPrices] pause_offers batch error: {_pe}", flush=True)
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(Offer).where(Offer.id.in_(offer_ids)))
+                    for offer in result.scalars().all():
+                        offer.status = OfferStatus.paused
+                    await db.commit()
+                print(f"[SyncPrices] paused {len(ggsel_ids)} offers", flush=True)
+            return
+
         fx_rate = await get_usd_rub()
 
         async with AsyncSessionLocal() as db:
@@ -866,17 +909,44 @@ async def _run_sync_prices():
             )
             offers = result.scalars().all()
             offer_snapshot = [
-                (o.id, o.ggsel_offer_id, o.starpets_product_id, o.name, float(o.price_rub or 0))
+                (o.id, o.ggsel_offer_id, o.starpets_product_id, o.name, float(o.price_rub or 0), int(o.starpets_qty or 0), o.status)
                 for o in offers
             ]
 
-        print(f"[SyncPrices] {len(offer_snapshot)} active offers to check, fx_rate={fx_rate}", flush=True)
+        print(f"[SyncPrices] {len(offer_snapshot)} offers to check, fx_rate={fx_rate}", flush=True)
 
         updated = skipped = errors = 0
+        paused_count = 0
+        to_activate: list[tuple[int, int, str]] = []  # (offer_id, ggsel_id, name)
 
         async with httpx.AsyncClient(timeout=15) as http:
-            for i, (offer_id, ggsel_id, product_id, name, current_rub) in enumerate(offer_snapshot, 1):
+            for i, (offer_id, ggsel_id, product_id, name, current_rub, starpets_qty, offer_status) in enumerate(offer_snapshot, 1):
                 try:
+                    # Pause active offers with qty=0
+                    if starpets_qty == 0 and offer_status == OfferStatus.active:
+                        try:
+                            await ggsel_office.pause_offer(ggsel_id)
+                            async with AsyncSessionLocal() as db:
+                                result = await db.execute(select(Offer).where(Offer.id == offer_id))
+                                offer = result.scalar_one_or_none()
+                                if offer:
+                                    offer.status = OfferStatus.paused
+                                    await db.commit()
+                            print(
+                                f"[SyncPrices] PAUSED ggsel_id={ggsel_id} name={name!r} starpets_qty=0",
+                                flush=True,
+                            )
+                            paused_count += 1
+                        except Exception as e:
+                            print(f"[SyncPrices] pause error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
+                            errors += 1
+                        skipped += 1
+                        continue
+
+                    # Collect paused offers with qty>0 for batch activation
+                    if starpets_qty > 0 and offer_status == OfferStatus.paused:
+                        to_activate.append((offer_id, ggsel_id, name))
+
                     top_item = await starpets.get_top_item(http, str(product_id))
                     if not top_item:
                         skipped += 1
@@ -920,9 +990,31 @@ async def _run_sync_prices():
                     print(f"[SyncPrices] error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
                     errors += 1
 
+        # Batch activate paused offers that now have qty>0
+        activated_count = 0
+        if to_activate:
+            ggsel_id_map = {gid: (oid, n) for oid, gid, n in to_activate}
+            all_gids = list(ggsel_id_map.keys())
+            for batch_start in range(0, len(all_gids), 100):
+                batch = all_gids[batch_start:batch_start + 100]
+                try:
+                    await ggsel_office.batch_activate(batch)
+                    batch_offer_ids = [ggsel_id_map[gid][0] for gid in batch]
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(Offer).where(Offer.id.in_(batch_offer_ids)))
+                        for offer in result.scalars().all():
+                            offer.status = OfferStatus.active
+                        await db.commit()
+                    for gid in batch:
+                        _, n = ggsel_id_map[gid]
+                        print(f"[SyncPrices] ACTIVATED ggsel_id={gid} name={n!r} starpets_qty>0", flush=True)
+                    activated_count += len(batch)
+                except Exception as e:
+                    print(f"[SyncPrices] batch_activate error (batch={len(batch)}): {e}", flush=True)
+
         print(
-            f"[SyncPrices] done — updated={updated} skipped={skipped} errors={errors} "
-            f"total={len(offer_snapshot)}",
+            f"[SyncPrices] done — updated={updated} paused={paused_count} activated={activated_count} "
+            f"skipped={skipped} errors={errors} total={len(offer_snapshot)}",
             flush=True,
         )
 
@@ -1339,11 +1431,12 @@ async def _run_activate_all_offers():
             select(Offer.ggsel_offer_id).where(
                 Offer.ggsel_offer_id.isnot(None),
                 Offer.status == OfferStatus.draft,
+                Offer.starpets_qty > 0,
             )
         )
         offer_ids = [r[0] for r in result.all()]
 
-    print(f"[ActivateAllOffers] starting — {len(offer_ids)} draft offers", flush=True)
+    print(f"[ActivateAllOffers] starting — {len(offer_ids)} draft offers with starpets_qty>0", flush=True)
 
     batch_size = 100
     for batch_num, start in enumerate(range(0, len(offer_ids), batch_size), 1):
