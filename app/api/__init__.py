@@ -1027,13 +1027,19 @@ async def fix_paused_to_draft():
     from sqlalchemy import text
     from app.db import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            text("UPDATE offers SET status='draft' WHERE status='paused' AND ggsel_offer_id IS NOT NULL")
+        count_before = (await db.execute(
+            text("SELECT COUNT(*) FROM offers WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
+        )).scalar()
+        upd = await db.execute(
+            text("UPDATE offers SET status = 'draft'::offerstatus WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
         )
-        affected = result.rowcount
+        affected = upd.rowcount
         await db.commit()
-    print(f"[FixPausedToDraft] updated {affected} offers paused→draft", flush=True)
-    return {"updated": affected}
+        count_after = (await db.execute(
+            text("SELECT COUNT(*) FROM offers WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
+        )).scalar()
+    print(f"[FixPausedToDraft] count_before={count_before} affected={affected} count_after={count_after}", flush=True)
+    return {"count_before": count_before, "affected": affected, "count_after": count_after}
 
 
 @app.get("/retry-errors")
