@@ -922,35 +922,30 @@ async def _run_sync_prices():
         async with httpx.AsyncClient(timeout=15) as http:
             for i, (offer_id, ggsel_id, product_id, name, current_rub, starpets_qty, offer_status) in enumerate(offer_snapshot, 1):
                 try:
-                    # Pause active offers with qty=0
-                    if starpets_qty == 0 and offer_status == OfferStatus.active:
-                        try:
-                            await ggsel_office.pause_offer(ggsel_id)
-                            async with AsyncSessionLocal() as db:
-                                result = await db.execute(select(Offer).where(Offer.id == offer_id))
-                                offer = result.scalar_one_or_none()
-                                if offer:
-                                    offer.status = OfferStatus.paused
-                                    await db.commit()
-                            print(
-                                f"[SyncPrices] PAUSED ggsel_id={ggsel_id} name={name!r} starpets_qty=0",
-                                flush=True,
-                            )
-                            paused_count += 1
-                        except Exception as e:
-                            print(f"[SyncPrices] pause error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
-                            errors += 1
-                        skipped += 1
-                        continue
-
-                    # Collect paused offers with qty>0 for batch activation
-                    if starpets_qty > 0 and offer_status == OfferStatus.paused:
-                        to_activate.append((offer_id, ggsel_id, name))
-
                     top_item = await starpets.get_top_item(http, str(product_id))
+
                     if not top_item:
+                        # No stock — pause if currently active
+                        if offer_status == OfferStatus.active:
+                            try:
+                                await ggsel_office.pause_offer(ggsel_id)
+                                async with AsyncSessionLocal() as db:
+                                    result = await db.execute(select(Offer).where(Offer.id == offer_id))
+                                    offer = result.scalar_one_or_none()
+                                    if offer:
+                                        offer.status = OfferStatus.paused
+                                        await db.commit()
+                                print(f"[SyncPrices] paused ggsel_id={ggsel_id} name={name!r}", flush=True)
+                                paused_count += 1
+                            except Exception as e:
+                                print(f"[SyncPrices] pause error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
+                                errors += 1
                         skipped += 1
                         continue
+
+                    # In stock — collect paused offers for batch activation
+                    if offer_status == OfferStatus.paused:
+                        to_activate.append((offer_id, ggsel_id, name))
 
                     price_usd = float(top_item.get("price_usd") or 0)
                     if not price_usd:
@@ -1131,13 +1126,24 @@ async def _run_fix_webhooks():
     total = len(offer_ids)
     print(f"[FixWebhooks] starting — {total} offers", flush=True)
 
-    updated = errors = 0
+    updated = skipped = errors = 0
+    secret = settings.webhook_shared_secret
     for i, gid in enumerate(offer_ids, 1):
+        try:
+            current = await ggsel_office.get_offer(gid)
+            precheck_url = (current.get("pre_payment_settings") or {}).get("url") or ""
+            notif_url = (current.get("notification_settings") or {}).get("url") or ""
+            if secret in precheck_url and secret in notif_url:
+                skipped += 1
+                continue
+        except Exception:
+            pass  # GET failed — proceed with PATCH anyway
+
         try:
             await ggsel_office.patch_offer(
                 offer_id=gid,
-                precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={settings.webhook_shared_secret}",
-                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={settings.webhook_shared_secret}",
+                precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={secret}",
+                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={secret}",
             )
             updated += 1
         except Exception as e:
@@ -1145,11 +1151,11 @@ async def _run_fix_webhooks():
             errors += 1
 
         if i % 100 == 0:
-            print(f"[FixWebhooks] progress {i}/{total} updated={updated} errors={errors}", flush=True)
+            print(f"[FixWebhooks] progress {i}/{total} updated={updated} skipped={skipped} errors={errors}", flush=True)
 
         await asyncio.sleep(0.3)
 
-    print(f"[FixWebhooks] done — updated={updated} errors={errors} total={total}", flush=True)
+    print(f"[FixWebhooks] done — updated={updated} skipped={skipped} errors={errors} total={total}", flush=True)
 
 
 @app.get("/create-offers")

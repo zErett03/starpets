@@ -101,6 +101,12 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_offer(self, offer_id: int) -> dict:
+        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
+            resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}")
+            resp.raise_for_status()
+            return resp.json()
+
     async def get_options(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
             resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options")
