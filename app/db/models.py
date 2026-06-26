@@ -114,6 +114,7 @@ class Order(Base):
     starpets_error_code = Column(String, nullable=True)
 
     exec_price_usd = Column(Numeric(10, 3), nullable=True)
+    trade_retry_count = Column(Integer, default=0, nullable=False, server_default="0")
 
     delivery_status = Column(SAEnum(DeliveryStatus), nullable=False, default=DeliveryStatus.pending)
     ggsel_marked_delivered_at = Column(DateTime(timezone=True), nullable=True)

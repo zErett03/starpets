@@ -9,7 +9,16 @@ from app.clients.starpets import starpets
 _STATUS_FINISHED = 8
 _STATUS_FAILED = {6, 7}
 _STATUS_STARTED = 4
+_STATUS_EXPIRED_STR = {"timeout", "expired", "cancelled", "cancel"}
+_STATUS_EXPIRED_INT = {5, 9}
 _FRIENDSHIP_RETRY_AFTER = timedelta(minutes=5)
+_MAX_TRADE_RETRIES = 3
+
+
+def _is_expired(status) -> bool:
+    if isinstance(status, str):
+        return status.lower() in _STATUS_EXPIRED_STR
+    return status in _STATUS_EXPIRED_INT
 
 
 async def monitor_all_deliveries() -> None:
@@ -85,6 +94,85 @@ async def monitor_all_deliveries() -> None:
                     f"[MonitorDelivery] order_id={order.id} → failed (status={status})",
                     flush=True,
                 )
+
+            elif _is_expired(status):
+                print(
+                    f"[MonitorDelivery] order_id={order.id} trade expired (status={status!r}) "
+                    f"retry_count={order.trade_retry_count}",
+                    flush=True,
+                )
+                if order.trade_retry_count >= _MAX_TRADE_RETRIES:
+                    order.delivery_status = DeliveryStatus.needs_attention
+                    order.error_reason = f"trade expired after {_MAX_TRADE_RETRIES} retries"
+                    print(
+                        f"[MonitorDelivery] order_id={order.id} → needs_attention (max retries reached)",
+                        flush=True,
+                    )
+                else:
+                    purchased_item_id = (order.starpets_purchase_id or "").split(",")[0]
+                    roblox_username = order.roblox_username or ""
+                    if not purchased_item_id or not roblox_username:
+                        order.delivery_status = DeliveryStatus.needs_attention
+                        order.error_reason = "trade expired but missing purchase_id or username"
+                        print(
+                            f"[MonitorDelivery] order_id={order.id} → needs_attention "
+                            f"(missing purchase_id={purchased_item_id!r} or username={roblox_username!r})",
+                            flush=True,
+                        )
+                    else:
+                        try:
+                            trade_resp = await starpets.create_trade(
+                                purchased_item_ids=[purchased_item_id],
+                                roblox_username=roblox_username,
+                            )
+                            first_trade = (trade_resp.get("trades") or [{}])[0]
+                            new_trade_id = (
+                                first_trade.get("id")
+                                or first_trade.get("tradeId")
+                                or trade_resp.get("tradeId")
+                                or trade_resp.get("trade_id")
+                                or trade_resp.get("id")
+                                or (trade_resp.get("data") or {}).get("id")
+                            )
+                            if not new_trade_id:
+                                raise RuntimeError(f"create_trade returned no trade_id: {trade_resp}")
+
+                            linked = (
+                                first_trade.get("linkedRobloxAccount")
+                                or trade_resp.get("linkedRobloxAccount")
+                                or (trade_resp.get("data") or {}).get("linkedRobloxAccount")
+                                or {}
+                            )
+                            bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
+
+                            order.starpets_custom_id = str(new_trade_id)
+                            order.bot_name = bot_name or order.bot_name
+                            order.trade_retry_count = (order.trade_retry_count or 0) + 1
+                            order.updated_at = now
+                            print(
+                                f"[MonitorDelivery] order_id={order.id} → new trade_id={new_trade_id} "
+                                f"retry_count={order.trade_retry_count}",
+                                flush=True,
+                            )
+
+                            try:
+                                await starpets.send_friendship(
+                                    trade_id=int(new_trade_id),
+                                    item_id=purchased_item_id,
+                                    username=roblox_username,
+                                )
+                            except Exception as fe:
+                                print(
+                                    f"[MonitorDelivery] order_id={order.id} friendship failed (non-fatal): {fe}",
+                                    flush=True,
+                                )
+                        except Exception as e:
+                            print(
+                                f"[MonitorDelivery] order_id={order.id} create_trade on retry failed: {e}",
+                                flush=True,
+                            )
+                            order.delivery_status = DeliveryStatus.needs_attention
+                            order.error_reason = f"trade expired, retry create_trade failed: {e}"
 
             elif status == _STATUS_STARTED:
                 dispatched_at = order.updated_at
