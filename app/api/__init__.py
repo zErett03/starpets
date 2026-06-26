@@ -1024,17 +1024,13 @@ async def _run_sync_prices():
 
 @app.get("/fix-paused-to-draft")
 async def fix_paused_to_draft():
-    from sqlalchemy import update
+    from sqlalchemy import text
     from app.db import AsyncSessionLocal
-    from app.db.models import Offer, OfferStatus
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            update(Offer)
-            .where(Offer.status == OfferStatus.paused, Offer.ggsel_offer_id.isnot(None))
-            .values(status=OfferStatus.draft)
-            .returning(Offer.id)
+            text("UPDATE offers SET status='draft' WHERE status='paused' AND ggsel_offer_id IS NOT NULL")
         )
-        affected = len(result.all())
+        affected = result.rowcount
         await db.commit()
     print(f"[FixPausedToDraft] updated {affected} offers paused→draft", flush=True)
     return {"updated": affected}
