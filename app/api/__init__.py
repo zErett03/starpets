@@ -1413,6 +1413,47 @@ async def _run_create_all_offers():
     print(f"[CreateAllOffers] done — {len(offer_ids)} processed", flush=True)
 
 
+@app.get("/pause-all-offers")
+async def pause_all_offers():
+    import asyncio
+    asyncio.create_task(_run_pause_all_offers())
+    return {"started": True}
+
+
+async def _run_pause_all_offers():
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer).where(
+                Offer.ggsel_offer_id.isnot(None),
+                Offer.status == OfferStatus.active,
+            )
+        )
+        offers = result.scalars().all()
+        ggsel_ids = [o.ggsel_offer_id for o in offers]
+        offer_ids = [o.id for o in offers]
+
+    print(f"[PauseAllOffers] pausing {len(ggsel_ids)} active offers", flush=True)
+
+    for batch_start in range(0, len(ggsel_ids), 100):
+        batch = ggsel_ids[batch_start:batch_start + 100]
+        try:
+            await ggsel_office.pause_offers(batch)
+        except Exception as e:
+            print(f"[PauseAllOffers] batch error: {e}", flush=True)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Offer).where(Offer.id.in_(offer_ids)))
+        for offer in result.scalars().all():
+            offer.status = OfferStatus.paused
+        await db.commit()
+
+    print(f"[PauseAllOffers] done — paused {len(ggsel_ids)} offers", flush=True)
+
+
 @app.post("/activate-all-offers")
 async def activate_all_offers():
     import asyncio
