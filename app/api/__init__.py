@@ -1022,6 +1022,24 @@ async def _run_sync_prices():
         print(f"[SyncPrices] fatal error: {e}\n{traceback.format_exc()}", flush=True)
 
 
+@app.get("/fix-paused-to-draft")
+async def fix_paused_to_draft():
+    from sqlalchemy import update
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(Offer)
+            .where(Offer.status == OfferStatus.paused, Offer.ggsel_offer_id.isnot(None))
+            .values(status=OfferStatus.draft)
+            .returning(Offer.id)
+        )
+        affected = len(result.all())
+        await db.commit()
+    print(f"[FixPausedToDraft] updated {affected} offers paused→draft", flush=True)
+    return {"updated": affected}
+
+
 @app.get("/retry-errors")
 async def retry_errors():
     from sqlalchemy import select
