@@ -1027,19 +1027,22 @@ async def fix_paused_to_draft():
     from sqlalchemy import text
     from app.db import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
+        # Diagnose actual stored values
+        diag = (await db.execute(
+            text("SELECT status::text, COUNT(*) FROM offers GROUP BY status::text")
+        )).all()
+        diag_map = {row[0]: row[1] for row in diag}
+
         count_before = (await db.execute(
-            text("SELECT COUNT(*) FROM offers WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
+            text("SELECT COUNT(*) FROM offers WHERE status::text = 'paused' AND ggsel_offer_id IS NOT NULL")
         )).scalar()
         upd = await db.execute(
-            text("UPDATE offers SET status = 'draft'::offerstatus WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
+            text("UPDATE offers SET status = 'draft'::offerstatus WHERE status::text = 'paused' AND ggsel_offer_id IS NOT NULL")
         )
         affected = upd.rowcount
         await db.commit()
-        count_after = (await db.execute(
-            text("SELECT COUNT(*) FROM offers WHERE status = 'paused'::offerstatus AND ggsel_offer_id IS NOT NULL")
-        )).scalar()
-    print(f"[FixPausedToDraft] count_before={count_before} affected={affected} count_after={count_after}", flush=True)
-    return {"count_before": count_before, "affected": affected, "count_after": count_after}
+    print(f"[FixPausedToDraft] diag={diag_map} count_before={count_before} affected={affected}", flush=True)
+    return {"diag": diag_map, "count_before": count_before, "affected": affected}
 
 
 @app.get("/retry-errors")
