@@ -181,7 +181,7 @@ class GgselSellerOfficeClient:
     async def pause_offers(self, offer_ids: list[int]) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
             resp = await client.post(
-                f"{SELLER_OFFICE_V2_URL}/offers/batch/actions/pause",
+                f"{SELLER_OFFICE_V2_URL}/offers/batch/pause",
                 json={"offer_ids": offer_ids},
             )
             resp.raise_for_status()
@@ -190,7 +190,7 @@ class GgselSellerOfficeClient:
     async def activate_offers(self, offer_ids: list[int]) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
             resp = await client.post(
-                f"{SELLER_OFFICE_V2_URL}/offers/batch/actions/activate",
+                f"{SELLER_OFFICE_V2_URL}/offers/batch/activate",
                 json={"offer_ids": offer_ids},
             )
             resp.raise_for_status()
