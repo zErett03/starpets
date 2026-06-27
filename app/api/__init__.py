@@ -1551,40 +1551,43 @@ async def _run_pause_all_offers():
     from app.db import AsyncSessionLocal
     from app.db.models import Offer, OfferStatus
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
-        )
-        offers = result.scalars().all()
-        rows = [(o.id, o.ggsel_offer_id) for o in offers]
+    # Get active offer IDs directly from GGSel — avoids DB status mismatch
+    print("[PauseAllOffers] fetching active offer IDs from GGSel...", flush=True)
+    try:
+        active_gids = await ggsel_office.get_active_offer_ids()
+    except Exception as e:
+        print(f"[PauseAllOffers] failed to fetch active offers: {e}", flush=True)
+        return
 
-    total = len(rows)
-    print(f"[PauseAllOffers] pausing {total} offers in batches of 100", flush=True)
+    total = len(active_gids)
+    print(f"[PauseAllOffers] found {total} active offers on GGSel", flush=True)
+    if not active_gids:
+        return
 
-    paused_db_ids = []
+    paused_gids = []
     errors = 0
     batch_size = 100
     for batch_start in range(0, total, batch_size):
-        batch = rows[batch_start:batch_start + batch_size]
-        db_ids = [r[0] for r in batch]
-        gids = [r[1] for r in batch]
+        batch = active_gids[batch_start:batch_start + batch_size]
         try:
-            await ggsel_office.pause_offers(gids)
-            paused_db_ids.extend(db_ids)
+            await ggsel_office.pause_offers(batch)
+            paused_gids.extend(batch)
         except Exception as e:
             print(f"[PauseAllOffers] batch {batch_start}–{batch_start+len(batch)} error: {e}", flush=True)
             errors += len(batch)
-
         await asyncio.sleep(0.5)
 
-    if paused_db_ids:
+    # Sync paused status in local DB for offers we successfully paused
+    if paused_gids:
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Offer).where(Offer.id.in_(paused_db_ids)))
+            result = await db.execute(
+                select(Offer).where(Offer.ggsel_offer_id.in_(paused_gids))
+            )
             for offer in result.scalars().all():
                 offer.status = OfferStatus.paused
             await db.commit()
 
-    print(f"[PauseAllOffers] done — paused={len(paused_db_ids)} errors={errors} total={total}", flush=True)
+    print(f"[PauseAllOffers] done — paused={len(paused_gids)} errors={errors} total={total}", flush=True)
 
 
 @app.post("/activate-all-offers")

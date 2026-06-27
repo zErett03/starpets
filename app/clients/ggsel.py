@@ -101,6 +101,33 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_active_offer_ids(self) -> list[int]:
+        """Fetch all active offer IDs from GGSel via paginated GET /offers?status=active."""
+        ids = []
+        offset = 0
+        limit = 100
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            while True:
+                resp = await client.get(
+                    f"{SELLER_OFFICE_V2_URL}/offers",
+                    params={"status": "active", "limit": limit, "offset": offset},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                page = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
+                print(
+                    f"[get_active_offer_ids] offset={offset} got={len(page)} "
+                    f"status={resp.status_code}",
+                    flush=True,
+                )
+                if not page:
+                    break
+                ids.extend(o["id"] for o in page)
+                if len(page) < limit:
+                    break
+                offset += limit
+        return ids
+
     async def get_offer(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
             resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}")
