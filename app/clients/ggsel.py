@@ -195,15 +195,27 @@ class GgselSellerOfficeClient:
             return resp.json()
 
     async def pause_offers(self, offer_ids: list[int]) -> dict:
-        """POST /offers/batch_pause — pause up to 100 offers at once."""
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.post(
-                f"{SELLER_OFFICE_V2_URL}/offers/batch_pause",
-                json={"offer_ids": offer_ids},
-            )
+            # Attempt 1: batch_pause (underscore, like batch_activate)
+            url1 = f"{SELLER_OFFICE_V2_URL}/offers/batch_pause"
+            body1 = {"offer_ids": offer_ids}
+            resp = await client.post(url1, json=body1)
             print(
-                f"[batch_pause] count={len(offer_ids)} status={resp.status_code} "
-                f"response={resp.text[:300]}",
+                f"[batch_pause] attempt=1 url={url1} body={body1} "
+                f"status={resp.status_code} response={resp.text[:300]}",
+                flush=True,
+            )
+            if resp.status_code != 404:
+                resp.raise_for_status()
+                return resp.json()
+
+            # Attempt 2: batch/pause (slash) with {ids: [...]}
+            url2 = f"{SELLER_OFFICE_V2_URL}/offers/batch/pause"
+            body2 = {"ids": offer_ids}
+            resp = await client.post(url2, json=body2)
+            print(
+                f"[batch_pause] attempt=2 url={url2} body={body2} "
+                f"status={resp.status_code} response={resp.text[:300]}",
                 flush=True,
             )
             resp.raise_for_status()

@@ -1496,6 +1496,48 @@ async def _run_create_all_offers():
     print(f"[CreateAllOffers] done — {len(offer_ids)} processed", flush=True)
 
 
+@app.get("/test-batch-pause")
+async def test_batch_pause():
+    import httpx as _httpx
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+    from app.clients.ggsel import SELLER_OFFICE_V2_URL
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Offer.ggsel_offer_id).where(Offer.ggsel_offer_id.isnot(None)).limit(3)
+        )
+        offer_ids = [r[0] for r in result.all()]
+
+    if not offer_ids:
+        return {"error": "no offers with ggsel_offer_id found"}
+
+    attempts = []
+    headers = ggsel_office._headers()
+
+    async with _httpx.AsyncClient(headers=headers, timeout=30) as client:
+        for url, body in [
+            (f"{SELLER_OFFICE_V2_URL}/offers/batch_pause", {"offer_ids": offer_ids}),
+            (f"{SELLER_OFFICE_V2_URL}/offers/batch/pause", {"ids": offer_ids}),
+            (f"{SELLER_OFFICE_V2_URL}/offers/batch/pause", {"offer_ids": offer_ids}),
+        ]:
+            try:
+                resp = await client.post(url, json=body)
+                attempts.append({
+                    "url": url,
+                    "body": body,
+                    "status": resp.status_code,
+                    "response": resp.text[:500],
+                })
+                if resp.status_code == 200:
+                    break
+            except Exception as e:
+                attempts.append({"url": url, "body": body, "error": str(e)})
+
+    return {"offer_ids_tested": offer_ids, "attempts": attempts}
+
+
 @app.get("/pause-all-offers")
 async def pause_all_offers():
     import asyncio
@@ -1517,9 +1559,9 @@ async def _run_pause_all_offers():
         rows = [(o.id, o.ggsel_offer_id) for o in offers]
 
     total = len(rows)
-    print(f"[PauseAllOffers] deleting {total} offers from ggsel in batches of 100", flush=True)
+    print(f"[PauseAllOffers] pausing {total} offers in batches of 100", flush=True)
 
-    deleted_db_ids = []
+    paused_db_ids = []
     errors = 0
     batch_size = 100
     for batch_start in range(0, total, batch_size):
@@ -1527,23 +1569,22 @@ async def _run_pause_all_offers():
         db_ids = [r[0] for r in batch]
         gids = [r[1] for r in batch]
         try:
-            await ggsel_office.delete_offers(gids)
-            deleted_db_ids.extend(db_ids)
+            await ggsel_office.pause_offers(gids)
+            paused_db_ids.extend(db_ids)
         except Exception as e:
             print(f"[PauseAllOffers] batch {batch_start}–{batch_start+len(batch)} error: {e}", flush=True)
             errors += len(batch)
 
         await asyncio.sleep(0.5)
 
-    if deleted_db_ids:
+    if paused_db_ids:
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Offer).where(Offer.id.in_(deleted_db_ids)))
+            result = await db.execute(select(Offer).where(Offer.id.in_(paused_db_ids)))
             for offer in result.scalars().all():
-                offer.status = OfferStatus.draft
-                offer.ggsel_offer_id = None
+                offer.status = OfferStatus.paused
             await db.commit()
 
-    print(f"[PauseAllOffers] done — deleted={len(deleted_db_ids)} errors={errors} total={total}", flush=True)
+    print(f"[PauseAllOffers] done — paused={len(paused_db_ids)} errors={errors} total={total}", flush=True)
 
 
 @app.post("/activate-all-offers")
