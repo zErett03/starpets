@@ -102,7 +102,7 @@ class GgselSellerOfficeClient:
             return resp.json()
 
     async def get_active_offer_ids(self) -> list[int]:
-        """Fetch all active offer IDs from GGSel via paginated GET /offers?status=active."""
+        """Fetch all active offer IDs from GGSel via paginated GET /offers, filter by status."""
         ids = []
         offset = 0
         limit = 100
@@ -110,19 +110,25 @@ class GgselSellerOfficeClient:
             while True:
                 resp = await client.get(
                     f"{SELLER_OFFICE_V2_URL}/offers",
-                    params={"status": "active", "limit": limit, "offset": offset},
+                    params={"limit": limit, "offset": offset},
                 )
-                resp.raise_for_status()
                 data = resp.json()
+                if offset == 0:
+                    print(
+                        f"[get_active_offer_ids] first page status={resp.status_code} "
+                        f"response={resp.text[:500]}",
+                        flush=True,
+                    )
+                resp.raise_for_status()
                 page = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
-                print(
-                    f"[get_active_offer_ids] offset={offset} got={len(page)} "
-                    f"status={resp.status_code}",
-                    flush=True,
-                )
                 if not page:
                     break
-                ids.extend(o["id"] for o in page)
+                active = [o["id"] for o in page if o.get("status") == "active"]
+                print(
+                    f"[get_active_offer_ids] offset={offset} page={len(page)} active={len(active)}",
+                    flush=True,
+                )
+                ids.extend(active)
                 if len(page) < limit:
                     break
                 offset += limit
