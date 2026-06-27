@@ -209,6 +209,22 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def delete_offers(self, offer_ids: list[int]) -> dict:
+        """POST /offers/batch_delete — delete up to 100 offers at once."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await client.post(
+                f"{SELLER_OFFICE_V2_URL}/offers/batch_delete",
+                json={"offer_ids": offer_ids},
+            )
+            print(
+                f"[batch_delete] url={SELLER_OFFICE_V2_URL}/offers/batch_delete "
+                f"count={len(offer_ids)} status={resp.status_code} "
+                f"response={resp.text[:300]}",
+                flush=True,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     async def activate_offers(self, offer_ids: list[int]) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
             resp = await client.post(
