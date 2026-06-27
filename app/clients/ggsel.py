@@ -102,35 +102,21 @@ class GgselSellerOfficeClient:
             return resp.json()
 
     async def get_active_offer_ids(self) -> list[int]:
-        """Fetch all active offer IDs from GGSel via paginated GET /offers, filter by status."""
+        """Fetch all active offer IDs from GGSel, filter by status in response."""
         ids = []
-        page_num = 1
-        per_page = 100
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            while True:
-                resp = await client.get(
-                    f"{SELLER_OFFICE_V2_URL}/offers",
-                    params={"per_page": per_page, "page": page_num},
-                )
-                print(
-                    f"[get_active_offer_ids] page={page_num} status={resp.status_code} "
-                    f"response={resp.text[:500]}",
-                    flush=True,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                page = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
-                if not page:
-                    break
-                active = [o["id"] for o in page if o.get("status") == "active"]
-                print(
-                    f"[get_active_offer_ids] page={page_num} total={len(page)} active={len(active)}",
-                    flush=True,
-                )
-                ids.extend(active)
-                if len(page) < per_page:
-                    break
-                page_num += 1
+            resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers")
+            print(
+                f"[get_active_offer_ids] status={resp.status_code} "
+                f"response={resp.text[:2000]}",
+                flush=True,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            page = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
+            active = [o["id"] for o in page if o.get("status") == "active"]
+            print(f"[get_active_offer_ids] total={len(page)} active={len(active)}", flush=True)
+            ids.extend(active)
         return ids
 
     async def get_offer(self, offer_id: int) -> dict:
