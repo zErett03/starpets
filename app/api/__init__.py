@@ -506,9 +506,6 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
             if order is None and id is not None:
                 result = await db.execute(select(Order).where(Order.ggsel_order_id == id))
                 order = result.scalar_one_or_none()
-            if order is None and uniquecode is not None:
-                result = await db.execute(select(Order).where(Order.uniquecode == uniquecode))
-                order = result.scalar_one_or_none()
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None

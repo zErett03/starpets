@@ -134,7 +134,6 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
     ip = body.get("ip")
     date_str = body.get("date")
     options = body.get("options", [])
-    uniquecode = body.get("uniquecode")
 
     async with AsyncSessionLocal() as db:
         existing = await db.execute(
@@ -269,8 +268,6 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             existing_order.delivery_status = DeliveryStatus.pending
             if roblox_username:
                 existing_order.roblox_username = roblox_username
-            if uniquecode:
-                existing_order.uniquecode = uniquecode
             order = existing_order
         elif precheck_order:
             # Link precheck order to this notification (update to real ggsel_order_id)
@@ -289,8 +286,6 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             precheck_order.delivery_status = DeliveryStatus.pending
             if roblox_username:
                 precheck_order.roblox_username = roblox_username
-            if uniquecode:
-                precheck_order.uniquecode = uniquecode
             order = precheck_order
         else:
             order = Order(
@@ -299,7 +294,6 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                 item_name=offer.name,
                 amount_rub=amount,
                 roblox_username=roblox_username,
-                uniquecode=uniquecode,
                 buyer_email=email,
                 buyer_ip=ip,
                 starpets_custom_id=str(id_i),
