@@ -1039,27 +1039,10 @@ async def _run_sync_prices():
                     print(f"[SyncPrices] error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
                     errors += 1
 
-        # Batch activate paused offers that now have qty>0
+        # Activation disabled — maintenance mode (pause-all-offers in progress)
         activated_count = 0
         if to_activate:
-            ggsel_id_map = {gid: (oid, n) for oid, gid, n in to_activate}
-            all_gids = list(ggsel_id_map.keys())
-            for batch_start in range(0, len(all_gids), 100):
-                batch = all_gids[batch_start:batch_start + 100]
-                try:
-                    await ggsel_office.batch_activate(batch)
-                    batch_offer_ids = [ggsel_id_map[gid][0] for gid in batch]
-                    async with AsyncSessionLocal() as db:
-                        result = await db.execute(select(Offer).where(Offer.id.in_(batch_offer_ids)))
-                        for offer in result.scalars().all():
-                            offer.status = OfferStatus.active
-                        await db.commit()
-                    for gid in batch:
-                        _, n = ggsel_id_map[gid]
-                        print(f"[SyncPrices] ACTIVATED ggsel_id={gid} name={n!r} starpets_qty>0", flush=True)
-                    activated_count += len(batch)
-                except Exception as e:
-                    print(f"[SyncPrices] batch_activate error (batch={len(batch)}): {e}", flush=True)
+            print(f"[SyncPrices] skipping activation of {len(to_activate)} offers (maintenance mode)", flush=True)
 
         print(
             f"[SyncPrices] done — updated={updated} paused={paused_count} activated={activated_count} "
