@@ -226,7 +226,7 @@ class StarPetsClient:
             return data
         return data.get("trades") or data.get("updates") or data.get("items") or data.get("data") or []
 
-    async def send_friendship(self, trade_id: int, item_id: str, username: str) -> dict:
+    async def send_friendship(self, trade_id: int) -> dict:
         """PUT /trades/ex-buyers/friendship — ask buyer to add bot as friend."""
         params = {
             **self._base_params(),

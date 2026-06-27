@@ -226,8 +226,6 @@ async def deliver_order(order_id: int) -> None:
         try:
             friendship_resp = await starpets.send_friendship(
                 trade_id=int(trade_id),
-                item_id=purchased_item_id,
-                username=roblox_username,
             )
             print(f"[Deliver] friendship sent resp={friendship_resp}", flush=True)
         except Exception as e:

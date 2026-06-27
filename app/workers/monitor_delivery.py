@@ -158,8 +158,6 @@ async def monitor_all_deliveries() -> None:
                             try:
                                 await starpets.send_friendship(
                                     trade_id=int(new_trade_id),
-                                    item_id=purchased_item_id,
-                                    username=roblox_username,
                                 )
                             except Exception as fe:
                                 print(
@@ -184,8 +182,6 @@ async def monitor_all_deliveries() -> None:
                     try:
                         await starpets.send_friendship(
                             trade_id=int(trade_key),
-                            item_id=item_id,
-                            username=order.roblox_username or "",
                         )
                         print(
                             f"[MonitorDelivery] order_id={order.id} friendship retried "

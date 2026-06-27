@@ -1392,8 +1392,8 @@ async def test_buy():
 
 
 @app.get("/test-friendship")
-async def test_friendship(trade_id: int = 57393365, item_id: str = "72488406", username: str = "klvcdy"):
-    params = {**starpets._base_params(), "tradeId": trade_id, "itemId": item_id, "username": username}
+async def test_friendship(trade_id: int = 57393365):
+    params = {**starpets._base_params(), "tradeId": trade_id}
     headers = starpets._headers(starpets._sign(params))
     url = f"{starpets.base_url}/trades/ex-buyers/friendship"
 
