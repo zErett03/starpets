@@ -1479,6 +1479,46 @@ async def _run_create_all_offers():
     print(f"[CreateAllOffers] done — {len(offer_ids)} processed", flush=True)
 
 
+@app.get("/test-offers-format")
+async def test_offers_format():
+    import httpx as _httpx
+    from app.clients.ggsel import SELLER_OFFICE_V2_URL
+
+    headers = ggsel_office._headers()
+    result = {}
+
+    async with _httpx.AsyncClient(headers=headers, timeout=30) as client:
+        # 1. Full response page 1 — including all metadata/pagination keys
+        r1 = await client.get(f"{SELLER_OFFICE_V2_URL}/offers")
+        data1 = r1.json() if r1.status_code == 200 else r1.text
+        result["page1"] = {
+            "status": r1.status_code,
+            "keys": list(data1.keys()) if isinstance(data1, dict) else "array",
+            "full_response": data1 if isinstance(data1, dict) else data1[:3],  # first 3 if list
+        }
+
+        # 2. Try page=2 to confirm pagination format
+        r2 = await client.get(f"{SELLER_OFFICE_V2_URL}/offers", params={"page": 2})
+        data2 = r2.json() if r2.status_code == 200 else r2.text
+        result["page2_attempt"] = {
+            "status": r2.status_code,
+            "response": data2 if not isinstance(data2, list) else f"{len(data2)} items, first={data2[0].get('id') if data2 else None}",
+        }
+
+        # 3. GET individual status for the 3 offers we paused via test-batch-pause
+        individual = {}
+        for oid in [102438921, 102444611, 102438650]:
+            r = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{oid}")
+            if r.status_code == 200:
+                d = r.json()
+                individual[oid] = {"status": d.get("status"), "keys": list(d.keys())}
+            else:
+                individual[oid] = {"http": r.status_code, "response": r.text[:200]}
+        result["individual_offers"] = individual
+
+    return result
+
+
 @app.get("/test-batch-pause")
 async def test_batch_pause():
     import httpx as _httpx
