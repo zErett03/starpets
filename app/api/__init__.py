@@ -1511,30 +1511,29 @@ async def _run_pause_all_offers():
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Offer).where(
-                Offer.ggsel_offer_id.isnot(None),
-            )
+            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
         )
         offers = result.scalars().all()
         rows = [(o.id, o.ggsel_offer_id) for o in offers]
 
     total = len(rows)
-    print(f"[PauseAllOffers] pausing {total} active offers one by one", flush=True)
+    print(f"[PauseAllOffers] pausing {total} offers in batches of 100", flush=True)
 
     paused_db_ids = []
     errors = 0
-    for i, (db_id, gid) in enumerate(rows, 1):
+    batch_size = 100
+    for batch_start in range(0, total, batch_size):
+        batch = rows[batch_start:batch_start + batch_size]
+        db_ids = [r[0] for r in batch]
+        gids = [r[1] for r in batch]
         try:
-            await ggsel_office.pause_offer(gid)
-            paused_db_ids.append(db_id)
+            await ggsel_office.pause_offers(gids)
+            paused_db_ids.extend(db_ids)
         except Exception as e:
-            print(f"[PauseAllOffers] ggsel_offer_id={gid} error: {e}", flush=True)
-            errors += 1
+            print(f"[PauseAllOffers] batch {batch_start}–{batch_start+len(batch)} error: {e}", flush=True)
+            errors += len(batch)
 
-        if i % 50 == 0:
-            print(f"[PauseAllOffers] progress {i}/{total} errors={errors}", flush=True)
-
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
 
     if paused_db_ids:
         async with AsyncSessionLocal() as db:
