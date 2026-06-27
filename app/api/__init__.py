@@ -1504,6 +1504,7 @@ async def pause_all_offers():
 
 
 async def _run_pause_all_offers():
+    import asyncio
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Offer, OfferStatus
@@ -1516,25 +1517,34 @@ async def _run_pause_all_offers():
             )
         )
         offers = result.scalars().all()
-        ggsel_ids = [o.ggsel_offer_id for o in offers]
-        offer_ids = [o.id for o in offers]
+        rows = [(o.id, o.ggsel_offer_id) for o in offers]
 
-    print(f"[PauseAllOffers] pausing {len(ggsel_ids)} active offers", flush=True)
+    total = len(rows)
+    print(f"[PauseAllOffers] pausing {total} active offers one by one", flush=True)
 
-    for batch_start in range(0, len(ggsel_ids), 100):
-        batch = ggsel_ids[batch_start:batch_start + 100]
+    paused_db_ids = []
+    errors = 0
+    for i, (db_id, gid) in enumerate(rows, 1):
         try:
-            await ggsel_office.pause_offers(batch)
+            await ggsel_office.pause_offer(gid)
+            paused_db_ids.append(db_id)
         except Exception as e:
-            print(f"[PauseAllOffers] batch error: {e}", flush=True)
+            print(f"[PauseAllOffers] ggsel_offer_id={gid} error: {e}", flush=True)
+            errors += 1
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Offer).where(Offer.id.in_(offer_ids)))
-        for offer in result.scalars().all():
-            offer.status = OfferStatus.paused
-        await db.commit()
+        if i % 50 == 0:
+            print(f"[PauseAllOffers] progress {i}/{total} errors={errors}", flush=True)
 
-    print(f"[PauseAllOffers] done — paused {len(ggsel_ids)} offers", flush=True)
+        await asyncio.sleep(0.3)
+
+    if paused_db_ids:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Offer).where(Offer.id.in_(paused_db_ids)))
+            for offer in result.scalars().all():
+                offer.status = OfferStatus.paused
+            await db.commit()
+
+    print(f"[PauseAllOffers] done — paused={len(paused_db_ids)} errors={errors} total={total}", flush=True)
 
 
 @app.post("/activate-all-offers")
