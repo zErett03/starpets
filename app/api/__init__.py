@@ -1513,7 +1513,6 @@ async def _run_pause_all_offers():
         result = await db.execute(
             select(Offer).where(
                 Offer.ggsel_offer_id.isnot(None),
-                Offer.status == OfferStatus.active,
             )
         )
         offers = result.scalars().all()
