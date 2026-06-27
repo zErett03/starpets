@@ -492,16 +492,23 @@ async def test_webhook(body: dict):
 
 
 @app.get("/delivery", response_class=HTMLResponse)
-async def delivery_page(id: int = None):
+async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None):
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Order, DeliveryStatus
 
     order = None
-    if id is not None:
+    if id_i is not None or id is not None or uniquecode is not None:
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Order).where(Order.ggsel_order_id == id))
-            order = result.scalar_one_or_none()
+            if id_i is not None:
+                result = await db.execute(select(Order).where(Order.ggsel_order_id == id_i))
+                order = result.scalar_one_or_none()
+            if order is None and id is not None:
+                result = await db.execute(select(Order).where(Order.ggsel_order_id == id))
+                order = result.scalar_one_or_none()
+            if order is None and uniquecode is not None:
+                result = await db.execute(select(Order).where(Order.uniquecode == uniquecode))
+                order = result.scalar_one_or_none()
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None
@@ -923,6 +930,32 @@ async def _run_sync_prices():
             for i, (offer_id, ggsel_id, product_id, name, current_rub, starpets_qty, offer_status) in enumerate(offer_snapshot, 1):
                 try:
                     top_item = await starpets.get_top_item(http, str(product_id))
+
+                    # Sync status from ggsel — authoritative source
+                    try:
+                        ggsel_data = await ggsel_office.get_offer(ggsel_id)
+                        ggsel_status_raw = (ggsel_data.get("status") or "").lower()
+                        _status_map = {
+                            "active": OfferStatus.active,
+                            "paused": OfferStatus.paused,
+                            "draft": OfferStatus.draft,
+                        }
+                        synced_status = _status_map.get(ggsel_status_raw)
+                        if synced_status and synced_status != offer_status:
+                            async with AsyncSessionLocal() as db:
+                                result = await db.execute(select(Offer).where(Offer.id == offer_id))
+                                _o = result.scalar_one_or_none()
+                                if _o:
+                                    _o.status = synced_status
+                                    await db.commit()
+                            print(
+                                f"[SyncPrices] status synced ggsel_id={ggsel_id} name={name!r}: "
+                                f"db={offer_status.value} → ggsel={synced_status.value}",
+                                flush=True,
+                            )
+                            offer_status = synced_status
+                    except Exception as _se:
+                        print(f"[SyncPrices] get_offer status sync failed ggsel_id={ggsel_id}: {_se}", flush=True)
 
                     if not top_item:
                         # No stock — pause if currently active

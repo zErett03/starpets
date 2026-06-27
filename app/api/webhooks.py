@@ -1,4 +1,5 @@
 import hmac
+import httpx
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
@@ -6,6 +7,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import AsyncSessionLocal
 from app.db.models import Offer, Order, Task, WebhookEvent, TaskKind, DeliveryStatus, WebhookKind
+from app.clients.starpets import starpets
 
 router = APIRouter()
 
@@ -102,9 +104,20 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         await db.commit()
         print(f"[precheck] WebhookEvent saved: {precheck_ext_id!r} username={roblox_username!r}", flush=True)
 
-        # qty check AFTER commit — username already persisted above
-        if offer.starpets_qty == 0:
+        # Capture before session closes
+        _product_id = offer.starpets_product_id
+        _offer_name = offer.name
+        _starpets_qty = offer.starpets_qty
+
+    # Live availability check — don't rely on stale starpets_qty from DB (updated every 30 min)
+    if _product_id:
+        async with httpx.AsyncClient(timeout=10) as _http:
+            _top = await starpets.get_top_item(_http, str(_product_id))
+        if _top is None:
+            print(f"[precheck] live check: no items for product_id={_product_id} offer={_offer_name!r}", flush=True)
             return {"error": "Товар временно недоступен"}
+    elif _starpets_qty == 0:
+        return {"error": "Товар временно недоступен"}
 
     return {"error": None}
 
@@ -121,6 +134,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
     ip = body.get("ip")
     date_str = body.get("date")
     options = body.get("options", [])
+    uniquecode = body.get("uniquecode")
 
     async with AsyncSessionLocal() as db:
         existing = await db.execute(
@@ -255,6 +269,8 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             existing_order.delivery_status = DeliveryStatus.pending
             if roblox_username:
                 existing_order.roblox_username = roblox_username
+            if uniquecode:
+                existing_order.uniquecode = uniquecode
             order = existing_order
         elif precheck_order:
             # Link precheck order to this notification (update to real ggsel_order_id)
@@ -273,6 +289,8 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             precheck_order.delivery_status = DeliveryStatus.pending
             if roblox_username:
                 precheck_order.roblox_username = roblox_username
+            if uniquecode:
+                precheck_order.uniquecode = uniquecode
             order = precheck_order
         else:
             order = Order(
@@ -281,6 +299,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                 item_name=offer.name,
                 amount_rub=amount,
                 roblox_username=roblox_username,
+                uniquecode=uniquecode,
                 buyer_email=email,
                 buyer_ip=ip,
                 starpets_custom_id=str(id_i),

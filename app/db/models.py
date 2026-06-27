@@ -108,6 +108,8 @@ class Order(Base):
     buyer_email = Column(String, nullable=True)
     buyer_ip = Column(String, nullable=True)
 
+    uniquecode = Column(String, nullable=True)
+
     starpets_purchase_id = Column(String, nullable=True)
     starpets_custom_id = Column(String, nullable=True)
     starpets_status = Column(String, nullable=True)
