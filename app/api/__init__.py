@@ -493,6 +493,7 @@ async def test_webhook(body: dict):
 
 @app.get("/delivery", response_class=HTMLResponse)
 async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None):
+    from datetime import datetime, timedelta
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Order, DeliveryStatus
@@ -506,6 +507,29 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
             if order is None and id is not None:
                 result = await db.execute(select(Order).where(Order.ggsel_order_id == id))
                 order = result.scalar_one_or_none()
+            if order is None and uniquecode is not None:
+                # Повторный визит: order уже привязан к uniquecode
+                result = await db.execute(select(Order).where(Order.uniquecode == uniquecode))
+                order = result.scalar_one_or_none()
+            if order is None and uniquecode is not None:
+                # Первый визит: ищем свежий order без uniquecode (notification webhook
+                # срабатывает до редиректа, поэтому order уже есть в БД)
+                cutoff = datetime.utcnow() - timedelta(minutes=10)
+                result = await db.execute(
+                    select(Order)
+                    .where(
+                        Order.uniquecode.is_(None),
+                        Order.delivery_status.in_([DeliveryStatus.pending, DeliveryStatus.dispatched]),
+                        Order.created_at >= cutoff,
+                    )
+                    .order_by(Order.created_at.desc())
+                    .limit(1)
+                )
+                order = result.scalar_one_or_none()
+                if order is not None:
+                    order.uniquecode = uniquecode
+                    await db.commit()
+                    print(f"[delivery] linked uniquecode={uniquecode!r} → order id={order.id}", flush=True)
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None
