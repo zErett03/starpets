@@ -200,8 +200,8 @@ class StarPetsClient:
     async def get_bulk_trade_updates(self, limit: int = 50) -> list:
         """GET /ex-buyers/trades/updates — paginated bulk status poll.
 
-        StarPets API caps limit at 50 per request. We paginate using afterId
-        cursor until fewer than 50 results are returned. Max 10 pages safety cap.
+        StarPets API caps limit at 50 per request. We paginate using cursor
+        param until fewer than 50 results are returned. Max 10 pages safety cap.
         """
         from datetime import datetime, timezone, timedelta
 
@@ -214,7 +214,7 @@ class StarPetsClient:
         for page in range(max_pages):
             params = {**self._base_params(), "date": since_ms, "limit": page_size}
             if after_id is not None:
-                params["afterId"] = after_id
+                params["cursor"] = after_id
 
             print(
                 f"[starpets] get_bulk_trade_updates page={page + 1} after_id={after_id}",
