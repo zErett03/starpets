@@ -41,7 +41,7 @@ async def monitor_all_deliveries() -> None:
             return
 
         try:
-            trades = await starpets.get_bulk_trade_updates(limit=200)
+            trades = await starpets.get_bulk_trade_updates(limit=50)
         except Exception as e:
             print(f"[MonitorDelivery] get_bulk_trade_updates error: {e}", flush=True)
             return
