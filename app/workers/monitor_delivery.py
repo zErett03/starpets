@@ -40,6 +40,33 @@ async def monitor_all_deliveries() -> None:
         if not orders:
             return
 
+        # Device-independent friendship re-send. deliver_order fires friendship once at
+        # T=0 (before the buyer has added the bot), and the /delivery page re-send only
+        # works while the buyer's browser tab is foregrounded — unreliable on mobile,
+        # where the buyer leaves the browser for the Roblox app. This server-side loop
+        # re-pings friendship every cycle (~30s) for the first 10 min after dispatch,
+        # regardless of whether the trade is visible in the bulk-updates window.
+        now_fs = datetime.utcnow()
+        for order in orders:
+            tid = str(order.starpets_custom_id or "")
+            if not tid:
+                continue
+            dispatched_at = order.updated_at.replace(tzinfo=None) if order.updated_at else None
+            if dispatched_at and (now_fs - dispatched_at) > timedelta(minutes=10):
+                continue  # past the bot's online window — stop re-pinging
+            try:
+                await starpets.send_friendship(trade_id=int(tid))
+                print(
+                    f"[MonitorDelivery] order_id={order.id} friendship re-sent (periodic) "
+                    f"trade_id={tid}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[MonitorDelivery] order_id={order.id} periodic friendship failed: {e}",
+                    flush=True,
+                )
+
         try:
             trades = await starpets.get_bulk_trade_updates(limit=50)
         except Exception as e:

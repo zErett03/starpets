@@ -491,6 +491,11 @@ async def test_webhook(body: dict):
     }
 
 
+# In-process throttle for friendship re-sends on /delivery load (order_id -> last datetime).
+# Not shared across instances, but send_friendship is idempotent so duplicates are harmless.
+_friendship_resend_at: dict = {}
+
+
 @app.get("/delivery", response_class=HTMLResponse)
 async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None):
     from datetime import datetime, timedelta
@@ -533,6 +538,30 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None
+
+    # Re-send friendship when the buyer opens this page for a dispatched order.
+    # deliver_order fires friendship once at T=0 — before the buyer has added the bot
+    # as a friend — so that first call is a no-op. The buyer adds the bot HERE, on this
+    # page, so this is the right moment to (re)trigger the bot to accept the pending
+    # request. Throttled in-process (~20s) to avoid spam on rapid reloads.
+    if status == DeliveryStatus.dispatched and order and order.starpets_custom_id:
+        from datetime import datetime as _dt
+        _now = _dt.utcnow()
+        _last = _friendship_resend_at.get(order.id)
+        if _last is None or (_now - _last).total_seconds() > 20:
+            _friendship_resend_at[order.id] = _now
+            try:
+                await starpets.send_friendship(trade_id=int(order.starpets_custom_id))
+                print(
+                    f"[delivery] friendship re-sent order_id={order.id} "
+                    f"trade_id={order.starpets_custom_id}",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[delivery] friendship re-send failed order_id={order.id}: {e}",
+                    flush=True,
+                )
 
     if status == DeliveryStatus.done or status == DeliveryStatus.finalized:
         body_html = """
@@ -593,7 +622,15 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         </div>"""
         extra_js = ""
 
-    refresh_meta = "" if (bot_name or status in (DeliveryStatus.done, DeliveryStatus.finalized, DeliveryStatus.failed)) else '<meta http-equiv="refresh" content="5">'
+    if status in (DeliveryStatus.done, DeliveryStatus.finalized, DeliveryStatus.failed):
+        refresh_meta = ""
+    elif bot_name:
+        # Dispatched: refresh every 20s so a foregrounded tab re-triggers the friendship
+        # re-send above. Desktop-reliable; on mobile the server-side monitor loop is the
+        # real safety net (page timers pause when the tab is backgrounded for Roblox).
+        refresh_meta = '<meta http-equiv="refresh" content="20">'
+    else:
+        refresh_meta = '<meta http-equiv="refresh" content="5">'
 
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ru">
