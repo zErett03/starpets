@@ -1457,6 +1457,39 @@ async def test_trade_status():
     }
 
 
+@app.get("/test-trade-status-by-id")
+async def test_trade_status_by_id(id: str = "59510598"):
+    """Diagnostic: does GET /trade/status resolve a single trade by its tradeId?
+
+    Probes the per-trade status endpoint with two param names (`custom_id` and
+    `tradeId`) for the given trade id. If either returns this trade's real status,
+    per-trade polling is viable and the monitor can be rewritten off the 50-event
+    bulk endpoint — no pagination/webhook from StarPets needed.
+    """
+    results = {}
+    async with httpx.AsyncClient(timeout=15) as client:
+        for param_name in ("custom_id", "tradeId"):
+            params = {**starpets._base_params(), param_name: id}
+            headers = starpets._headers(starpets._sign(params))
+            try:
+                resp = await client.get(
+                    f"{starpets.base_url}/trade/status", params=params, headers=headers
+                )
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                results[param_name] = {
+                    "request_url": str(resp.request.url),
+                    "response_status": resp.status_code,
+                    "response_body": body,
+                }
+            except Exception as e:
+                results[param_name] = {"error": str(e)}
+
+    return {"tradeId_tested": id, "endpoint": f"{starpets.base_url}/trade/status", "results": results}
+
+
 @app.get("/test-trade")
 async def test_trade(item_id: str = "72488406", username: str = "klvcdy"):
     base = starpets._base_params()
