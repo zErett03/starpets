@@ -201,7 +201,7 @@ class StarPetsClient:
         """GET /ex-buyers/trades/updates — bulk status poll, returns list of trade objects."""
         from datetime import datetime, timezone, timedelta
         # 48h lookback so trades created yesterday are included
-        since_ms = int((datetime.now(timezone.utc) - timedelta(hours=48)).timestamp() * 1000)
+        since_ms = int((datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000)
         params = {**self._base_params(), "date": since_ms, "limit": limit}
         print(
             f"[starpets] get_bulk_trade_updates params={params}",
