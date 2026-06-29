@@ -198,90 +198,33 @@ class StarPetsClient:
             return resp.json()
 
     async def get_bulk_trade_updates(self, limit: int = 50) -> list:
-        """GET /ex-buyers/trades/updates — paginated bulk status poll.
-
-        StarPets API caps limit at 50 per request. We paginate using cursor
-        param until fewer than 50 results are returned. Max 10 pages safety cap.
-        """
+        """GET /ex-buyers/trades/updates — bulk status poll, returns list of trade objects."""
         from datetime import datetime, timezone, timedelta
-
+        # 48h lookback so trades created yesterday are included
         since_ms = int((datetime.now(timezone.utc) - timedelta(hours=48)).timestamp() * 1000)
-        page_size = 50  # API hard cap
-        all_updates: list = []
-        after_id = None
-        max_pages = 10
-
-        for page in range(max_pages):
-            params = {**self._base_params(), "date": since_ms, "limit": page_size}
-            if after_id is not None:
-                params["cursor"] = after_id
-
-            print(
-                f"[starpets] get_bulk_trade_updates page={page + 1} after_id={after_id}",
-                flush=True,
-            )
-
-            async with httpx.AsyncClient(
-                headers=self._headers(self._sign(params)), timeout=15
-            ) as client:
-                resp = await client.get(
-                    f"{self.base_url}/ex-buyers/trades/updates", params=params
-                )
-                if not resp.is_success:
-                    try:
-                        err_body = resp.json()
-                    except Exception:
-                        err_body = resp.text
-                    print(
-                        f"[starpets] get_bulk_trade_updates FAILED status={resp.status_code} "
-                        f"url={resp.request.url} body={err_body}",
-                        flush=True,
-                    )
-                    resp.raise_for_status()
-                data = resp.json()
-
-            if isinstance(data, list):
-                page_items = data
-            else:
-                page_items = (
-                    data.get("updates")
-                    or data.get("trades")
-                    or data.get("items")
-                    or data.get("data")
-                    or []
-                )
-
-            print(
-                f"[starpets] get_bulk_trade_updates page={page + 1} fetched={len(page_items)}",
-                flush=True,
-            )
-            all_updates.extend(page_items)
-
-            if len(page_items) < page_size:
-                break
-
-            last_id = None
-            for item in reversed(page_items):
-                raw_id = item.get("id")
-                if raw_id is not None:
-                    try:
-                        last_id = int(raw_id)
-                    except (ValueError, TypeError):
-                        pass
-                    break
-            if last_id is None:
-                print(
-                    "[starpets] get_bulk_trade_updates: no id in last item, stopping",
-                    flush=True,
-                )
-                break
-            after_id = last_id
-
+        params = {**self._base_params(), "date": since_ms, "limit": limit}
         print(
-            f"[starpets] get_bulk_trade_updates total fetched={len(all_updates)}",
+            f"[starpets] get_bulk_trade_updates params={params}",
             flush=True,
         )
-        return all_updates
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
+            resp = await client.get(f"{self.base_url}/ex-buyers/trades/updates", params=params)
+            if not resp.is_success:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                print(
+                    f"[starpets] get_bulk_trade_updates FAILED status={resp.status_code} "
+                    f"url={resp.request.url} body={err_body}",
+                    flush=True,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        print(f"[starpets] get_bulk_trade_updates raw response: {str(data)[:300]}", flush=True)
+        if isinstance(data, list):
+            return data
+        return data.get("trades") or data.get("updates") or data.get("items") or data.get("data") or []
 
     async def send_friendship(self, trade_id: int) -> dict:
         """PUT /trades/ex-buyers/friendship — ask buyer to add bot as friend."""
