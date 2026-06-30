@@ -1,10 +1,56 @@
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import AsyncSessionLocal
-from app.db.models import Order, Task, TaskKind, DeliveryStatus, KVState
+from app.db.models import Order, Task, TaskKind, DeliveryStatus, KVState, TradeEvent
 from app.clients.starpets import starpets
+
+
+def _parse_event_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _persist_trade_events(db, orders, events) -> None:
+    """Idempotently store each status-bearing trade event for tracked orders.
+
+    The audit trail (table trade_events) is our dispute-defense record since StarPets
+    never emits a terminal event. order_id is stamped now so it survives re-deliver.
+    """
+    by_trade = {str(o.starpets_custom_id): o for o in orders if o.starpets_custom_id}
+    if not by_trade:
+        return
+    for e in events:
+        order = by_trade.get(str(e.get("tradeId") or ""))
+        if not order:
+            continue
+        etype = e.get("event")
+        data = e.get("data") or {}
+        st = data.get("status")
+        if etype == 1 and st is None:
+            continue  # skip heartbeats (e.g. sessionTime) — only meaningful transitions
+        try:
+            sp_event_id = int(e["id"]) if e.get("id") is not None else None
+        except (ValueError, TypeError):
+            sp_event_id = None
+        stmt = pg_insert(TradeEvent.__table__).values(
+            order_id=order.id,
+            trade_id=str(e.get("tradeId") or ""),
+            sp_event_id=sp_event_id,
+            event_type=etype,
+            status=st,
+            bot_name=order.bot_name,
+            data_json=data,
+            occurred_at=_parse_event_dt(data.get("updatedAt")),
+            recorded_at=datetime.utcnow(),
+        ).on_conflict_do_nothing(constraint="uq_trade_events_trade_event")
+        await db.execute(stmt)
 
 # Official trade status codes (per StarPets Business API docs):
 #   0 CREATED · 1 DELAYED_START · 2 PENDING_FRIEND · 3 PENDING_START
@@ -93,6 +139,9 @@ async def monitor_all_deliveries() -> None:
             f"cursor={cursor}→{new_cursor}",
             flush=True,
         )
+
+        # ---- 1b. Persist trade-event audit trail (dispute defense) ----
+        await _persist_trade_events(db, orders, events)
 
         # ---- 2. Settle orders against new statuses ----
         now = datetime.utcnow()

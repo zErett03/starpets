@@ -123,6 +123,7 @@ class Order(Base):
     paid_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     error_reason = Column(Text, nullable=True)
+    last_redeliver_result = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -177,3 +178,27 @@ class KVState(Base):
     key = Column(String, primary_key=True)
     value = Column(String, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TradeEvent(Base):
+    """Per-order audit trail of StarPets trade status events (for dispute defense).
+
+    The /trades/updates stream never emits a terminal event, so we persist the full
+    progression (0->2->3->4->5, plus any event:2) we DO receive. order_id is stamped at
+    record time, so an order that spans multiple trades (re-deliver) keeps all of them.
+    """
+    __tablename__ = "trade_events"
+    __table_args__ = (
+        UniqueConstraint("trade_id", "sp_event_id", name="uq_trade_events_trade_event"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
+    trade_id = Column(String, nullable=True, index=True)
+    sp_event_id = Column(Integer, nullable=True)
+    event_type = Column(SmallInteger, nullable=True)   # 1 = update, 2 = finished/canceled
+    status = Column(SmallInteger, nullable=True)       # trade status 0..8 (None for heartbeats)
+    bot_name = Column(String, nullable=True)
+    data_json = Column(JSON, nullable=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=True)   # from event data.updatedAt
+    recorded_at = Column(DateTime(timezone=True), default=datetime.utcnow)
