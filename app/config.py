@@ -23,6 +23,11 @@ class Settings(BaseSettings):
 
     public_url: str = "https://starpets-production.up.railway.app"
 
+    # Operator admin panel (Basic Auth). Set ADMIN_PASSWORD in env to enable.
+    # If admin_password is empty the panel is fail-closed (denies every request).
+    admin_user: str = "admin"
+    admin_password: str = ""
+
     markup: float = 1.20
     min_price_rub: float = 100.0
     starpets_category_id: int = 0

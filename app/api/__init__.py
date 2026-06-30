@@ -3,12 +3,14 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from app.api.webhooks import router as webhooks_router
+from app.api.admin import router as admin_router
 from app.clients.ggsel import SELLER_OFFICE_V2_URL, ggsel_office
 from app.clients.starpets import starpets
 from app.config import settings
 
 app = FastAPI(title="starpets-layer")
 app.include_router(webhooks_router)
+app.include_router(admin_router)
 
 
 @app.get("/")
