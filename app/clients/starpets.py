@@ -197,12 +197,25 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def get_bulk_trade_updates(self, limit: int = 50) -> list:
-        """GET /ex-buyers/trades/updates — bulk status poll, returns list of trade objects."""
+    async def get_bulk_trade_updates(
+        self, limit: int = 50, cursor: int | None = None, date_ms: int | None = None
+    ) -> list:
+        """GET /ex-buyers/trades/updates — incremental status poll.
+
+        Per the API docs, `cursor` (event id) and `date` are mutually exclusive:
+        pass `cursor` to get events AFTER a given event id (incremental), or `date`
+        to bootstrap from a timestamp. Returns the raw `updates` list; each item is
+        {"id": <event id>, "tradeId": ..., "event": 1|2, "data": {"status": ...}}.
+        """
         from datetime import datetime, timezone, timedelta
-        # 48h lookback so trades created yesterday are included
-        since_ms = int((datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000)
-        params = {**self._base_params(), "date": since_ms, "limit": limit}
+        params = {**self._base_params(), "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            # bootstrap: events since `date_ms` (default last 6h)
+            params["date"] = date_ms if date_ms is not None else int(
+                (datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000
+            )
         print(
             f"[starpets] get_bulk_trade_updates params={params}",
             flush=True,

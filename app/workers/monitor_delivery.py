@@ -3,26 +3,42 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.db import AsyncSessionLocal
-from app.db.models import Order, Task, TaskKind, DeliveryStatus
+from app.db.models import Order, Task, TaskKind, DeliveryStatus, KVState
 from app.clients.starpets import starpets
 
+# Official trade status codes (per StarPets Business API docs):
+#   0 CREATED · 1 DELAYED_START · 2 PENDING_FRIEND · 3 PENDING_START
+#   4 STARTED · 5 IN_PROGRESS · 6 FAILED · 7 CANCELED · 8 FINISHED
 _STATUS_FINISHED = 8
 _STATUS_FAILED = {6, 7}
-_STATUS_STARTED = 4
-_STATUS_EXPIRED_STR = {"timeout", "expired", "cancelled", "cancel"}
-_STATUS_EXPIRED_INT = {5, 9}
-_FRIENDSHIP_RETRY_AFTER = timedelta(minutes=5)
-_MAX_TRADE_RETRIES = 3
+
+_CURSOR_KEY = "trades_cursor"
+_MAX_PAGES = 40                       # safety cap: 40 * 50 = 2000 events per cycle
+_FRIENDSHIP_WINDOW = timedelta(minutes=10)
+# starpets_status values meaning "bot already accepted / trade moving" → stop re-pinging
+_FRIENDSHIP_OPEN_STATES = (None, "", "0")
 
 
-def _is_expired(status) -> bool:
-    if isinstance(status, str):
-        return status.lower() in _STATUS_EXPIRED_STR
-    return status in _STATUS_EXPIRED_INT
+async def _get_cursor(db) -> int | None:
+    row = (await db.execute(select(KVState).where(KVState.key == _CURSOR_KEY))).scalar_one_or_none()
+    if row and row.value:
+        try:
+            return int(row.value)
+        except ValueError:
+            return None
+    return None
+
+
+async def _set_cursor(db, value: int) -> None:
+    row = (await db.execute(select(KVState).where(KVState.key == _CURSOR_KEY))).scalar_one_or_none()
+    if row:
+        row.value = str(value)
+    else:
+        db.add(KVState(key=_CURSOR_KEY, value=str(value)))
 
 
 async def monitor_all_deliveries() -> None:
-    """APScheduler job: poll all dispatched orders and update statuses."""
+    """APScheduler job (~30s): incrementally poll trade events by cursor and settle orders."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Order).where(Order.delivery_status == DeliveryStatus.dispatched)
@@ -33,71 +49,63 @@ async def monitor_all_deliveries() -> None:
         for o in orders:
             print(
                 f"[MonitorDelivery]   order_id={o.id} ggsel_order_id={o.ggsel_order_id} "
-                f"roblox_username={o.roblox_username!r} trade_id={o.starpets_custom_id}",
+                f"roblox_username={o.roblox_username!r} trade_id={o.starpets_custom_id} "
+                f"status={o.starpets_status}",
                 flush=True,
             )
 
         if not orders:
             return
 
-        # Device-independent friendship re-send. deliver_order fires friendship once at
-        # T=0 (before the buyer has added the bot), and the /delivery page re-send only
-        # works while the buyer's browser tab is foregrounded — unreliable on mobile,
-        # where the buyer leaves the browser for the Roblox app. This server-side loop
-        # re-pings friendship every cycle (~30s) for the first 10 min after dispatch,
-        # regardless of whether the trade is visible in the bulk-updates window.
-        now_fs = datetime.utcnow()
-        for order in orders:
-            tid = str(order.starpets_custom_id or "")
-            if not tid:
-                continue
-            dispatched_at = order.updated_at.replace(tzinfo=None) if order.updated_at else None
-            if dispatched_at and (now_fs - dispatched_at) > timedelta(minutes=10):
-                continue  # past the bot's online window — stop re-pinging
-            try:
-                await starpets.send_friendship(trade_id=int(tid))
-                print(
-                    f"[MonitorDelivery] order_id={order.id} friendship re-sent (periodic) "
-                    f"trade_id={tid}",
-                    flush=True,
-                )
-            except Exception as e:
-                print(
-                    f"[MonitorDelivery] order_id={order.id} periodic friendship failed: {e}",
-                    flush=True,
-                )
-
+        # ---- 1. Incremental event poll by cursor (durable, survives redeploys) ----
+        cursor = await _get_cursor(db)
+        new_cursor = cursor
+        events: list[dict] = []
         try:
-            trades = await starpets.get_bulk_trade_updates(limit=50)
+            c = cursor
+            for _ in range(_MAX_PAGES):
+                batch = await starpets.get_bulk_trade_updates(limit=50, cursor=c)
+                if not batch:
+                    break
+                events.extend(batch)
+                ids = [int(e["id"]) for e in batch if e.get("id") is not None]
+                if ids:
+                    bmax = max(ids)
+                    new_cursor = bmax if new_cursor is None else max(new_cursor, bmax)
+                    c = bmax
+                if len(batch) < 50:
+                    break
         except Exception as e:
             print(f"[MonitorDelivery] get_bulk_trade_updates error: {e}", flush=True)
-            return
+            return  # don't advance cursor — re-fetch next cycle
 
-        trade_map: dict[str, dict] = {}
-        for t in trades:
-            for key in ("tradeId", "id", "customId", "custom_id"):
-                tid = str(t.get(key) or "")
-                if tid:
-                    trade_map[tid] = t
+        # Latest status per trade from this batch (event:1 carries data.status;
+        # event:2 "finished/canceled" has no data, so we keep the prior status event).
+        status_by_trade: dict[str, int] = {}
+        for e in events:
+            if e.get("event") == 1:
+                st = (e.get("data") or {}).get("status")
+                if st is not None:
+                    status_by_trade[str(e.get("tradeId"))] = st
 
         print(
-            f"[MonitorDelivery] trades fetched={len(trades)} mapped={len(trade_map)}",
+            f"[MonitorDelivery] events fetched={len(events)} trades_with_status={len(status_by_trade)} "
+            f"cursor={cursor}→{new_cursor}",
             flush=True,
         )
 
+        # ---- 2. Settle orders against new statuses ----
         now = datetime.utcnow()
         for order in orders:
-            trade_key = str(order.starpets_custom_id or "")
-            if not trade_key:
+            tkey = str(order.starpets_custom_id or "")
+            if not tkey or tkey not in status_by_trade:
                 continue
-
-            trade = trade_map.get(trade_key)
-            if trade is None:
-                continue
-
-            status = trade.get("status") or (trade.get("data") or {}).get("status")
+            status = status_by_trade[tkey]
+            # persist last-known status only when it changed (avoids needless updated_at bumps)
+            if order.starpets_status != str(status):
+                order.starpets_status = str(status)
             print(
-                f"[MonitorDelivery] order_id={order.id} trade_id={trade_key} status={status}",
+                f"[MonitorDelivery] order_id={order.id} trade_id={tkey} status={status}",
                 flush=True,
             )
 
@@ -113,7 +121,6 @@ async def monitor_all_deliveries() -> None:
                     f"[MonitorDelivery] order_id={order.id} → delivered, MARK_DELIVERED queued",
                     flush=True,
                 )
-
             elif status in _STATUS_FAILED:
                 order.delivery_status = DeliveryStatus.failed
                 order.error_reason = f"trade status={status}"
@@ -121,106 +128,40 @@ async def monitor_all_deliveries() -> None:
                     f"[MonitorDelivery] order_id={order.id} → failed (status={status})",
                     flush=True,
                 )
+            # statuses 0–5 are healthy in-progress states → leave dispatched, no action.
 
-            elif _is_expired(status):
+        # ---- 3. Device-independent friendship re-send ----
+        # deliver_order fires friendship once at T=0 (before the buyer added the bot);
+        # the /delivery page re-send only works while the tab is foregrounded (unreliable
+        # on mobile). Re-ping here every cycle while the bot hasn't accepted yet
+        # (starpets_status still CREATED/unknown) and we're within the bot's online window.
+        for order in orders:
+            if order.delivery_status != DeliveryStatus.dispatched:
+                continue  # just settled this cycle — skip
+            if order.starpets_status not in _FRIENDSHIP_OPEN_STATES:
+                continue  # bot already accepted / trade moving — re-send would 400
+            tid = str(order.starpets_custom_id or "")
+            if not tid:
+                continue
+            dispatched_at = order.updated_at.replace(tzinfo=None) if order.updated_at else None
+            if dispatched_at is None or (now - dispatched_at) > _FRIENDSHIP_WINDOW:
+                continue  # past the bot's online window
+            try:
+                await starpets.send_friendship(trade_id=int(tid))
                 print(
-                    f"[MonitorDelivery] order_id={order.id} trade expired (status={status!r}) "
-                    f"retry_count={order.trade_retry_count}",
+                    f"[MonitorDelivery] order_id={order.id} friendship re-sent (periodic) "
+                    f"trade_id={tid}",
                     flush=True,
                 )
-                if order.trade_retry_count >= _MAX_TRADE_RETRIES:
-                    order.delivery_status = DeliveryStatus.needs_attention
-                    order.error_reason = f"trade expired after {_MAX_TRADE_RETRIES} retries"
-                    print(
-                        f"[MonitorDelivery] order_id={order.id} → needs_attention (max retries reached)",
-                        flush=True,
-                    )
-                else:
-                    purchased_item_id = (order.starpets_purchase_id or "").split(",")[0]
-                    roblox_username = order.roblox_username or ""
-                    if not purchased_item_id or not roblox_username:
-                        order.delivery_status = DeliveryStatus.needs_attention
-                        order.error_reason = "trade expired but missing purchase_id or username"
-                        print(
-                            f"[MonitorDelivery] order_id={order.id} → needs_attention "
-                            f"(missing purchase_id={purchased_item_id!r} or username={roblox_username!r})",
-                            flush=True,
-                        )
-                    else:
-                        try:
-                            trade_resp = await starpets.create_trade(
-                                purchased_item_ids=[purchased_item_id],
-                                roblox_username=roblox_username,
-                            )
-                            first_trade = (trade_resp.get("trades") or [{}])[0]
-                            new_trade_id = (
-                                first_trade.get("id")
-                                or first_trade.get("tradeId")
-                                or trade_resp.get("tradeId")
-                                or trade_resp.get("trade_id")
-                                or trade_resp.get("id")
-                                or (trade_resp.get("data") or {}).get("id")
-                            )
-                            if not new_trade_id:
-                                raise RuntimeError(f"create_trade returned no trade_id: {trade_resp}")
+            except Exception as e:
+                print(
+                    f"[MonitorDelivery] order_id={order.id} periodic friendship failed: {e}",
+                    flush=True,
+                )
 
-                            linked = (
-                                first_trade.get("linkedRobloxAccount")
-                                or trade_resp.get("linkedRobloxAccount")
-                                or (trade_resp.get("data") or {}).get("linkedRobloxAccount")
-                                or {}
-                            )
-                            bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
-
-                            order.starpets_custom_id = str(new_trade_id)
-                            order.bot_name = bot_name or order.bot_name
-                            order.trade_retry_count = (order.trade_retry_count or 0) + 1
-                            order.updated_at = now
-                            print(
-                                f"[MonitorDelivery] order_id={order.id} → new trade_id={new_trade_id} "
-                                f"retry_count={order.trade_retry_count}",
-                                flush=True,
-                            )
-
-                            try:
-                                await starpets.send_friendship(
-                                    trade_id=int(new_trade_id),
-                                )
-                            except Exception as fe:
-                                print(
-                                    f"[MonitorDelivery] order_id={order.id} friendship failed (non-fatal): {fe}",
-                                    flush=True,
-                                )
-                        except Exception as e:
-                            print(
-                                f"[MonitorDelivery] order_id={order.id} create_trade on retry failed: {e}",
-                                flush=True,
-                            )
-                            order.delivery_status = DeliveryStatus.needs_attention
-                            order.error_reason = f"trade expired, retry create_trade failed: {e}"
-
-            elif status == _STATUS_STARTED:
-                dispatched_at = order.updated_at
-                if dispatched_at is None:
-                    continue
-                elapsed = now - dispatched_at.replace(tzinfo=None)
-                if elapsed > _FRIENDSHIP_RETRY_AFTER:
-                    item_id = (order.starpets_purchase_id or "").split(",")[0]
-                    try:
-                        await starpets.send_friendship(
-                            trade_id=int(trade_key),
-                        )
-                        print(
-                            f"[MonitorDelivery] order_id={order.id} friendship retried "
-                            f"(elapsed={elapsed})",
-                            flush=True,
-                        )
-                    except Exception as e:
-                        print(
-                            f"[MonitorDelivery] order_id={order.id} friendship retry failed: {e}",
-                            flush=True,
-                        )
-
+        # ---- 4. Persist cursor + order changes atomically ----
+        if new_cursor is not None and new_cursor != cursor:
+            await _set_cursor(db, new_cursor)
         await db.commit()
 
 

@@ -168,3 +168,12 @@ class GgselToken(Base):
     seller_office_refresh_token = Column(String, nullable=True)
     seller_office_expires_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class KVState(Base):
+    """Tiny key/value store for durable scalar state (e.g. the trades poll cursor)."""
+    __tablename__ = "kv_state"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
