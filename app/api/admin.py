@@ -95,7 +95,7 @@ def _fmt_dt(dt) -> str:
     if not dt:
         return "—"
     try:
-        return dt.strftime("%m-%d %H:%M")
+        return dt.strftime("%m-%d %H:%M:%S")
     except Exception:
         return str(dt)
 
@@ -115,6 +115,7 @@ def classify_create_trade_error(code, body_text: str):
 
 _CSS = """
 :root{color-scheme:dark}
+html{scrollbar-gutter:stable}
 *{box-sizing:border-box}
 body{margin:0;background:#0d1117;color:#c9d1d9;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
 a{color:#58a6ff;text-decoration:none}
@@ -134,20 +135,20 @@ h1{margin:0;font-size:16px;font-weight:600}
 .pager select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:3px 6px;font-size:12px}
 .wrap{padding:14px 40px;overflow-x:auto}
 table{border-collapse:collapse;width:100%;min-width:1180px}
-th,td{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left;vertical-align:top;white-space:nowrap}
+th,td{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left;vertical-align:middle;white-space:nowrap}
 th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:#0d1117}
 tr:hover td{background:#161b2233}
 td{color:#c9d1d9}
 .badge{padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;cursor:default}
 .col-err{white-space:normal;max-width:160px}
-.actions{display:flex;flex-direction:column;gap:6px;width:206px}
+.actions{display:flex;flex-direction:column;gap:6px;width:150px}
 .actions .row1{display:flex;gap:6px;margin:0}
-.actions .row1 select{flex:1;min-width:0;height:30px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px}
+.actions .row1 select{flex:1;min-width:0;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px}
 .actform{margin:0}
-.act-btn{height:30px;width:100%;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid #30363d;background:#21262d;color:#c9d1d9;display:flex;align-items:center;justify-content:center}
+.act-btn{height:25px;width:100%;border-radius:6px;font-size:12px;font-weight:400;cursor:pointer;border:1px solid #30363d;background:#21262d;color:#c9d1d9;display:flex;align-items:center;justify-content:center}
 .act-btn:hover{filter:brightness(1.12)}
-.b-green{background:#238636;border-color:#238636;color:#fff;flex:0 0 80px;width:auto}
-.b-amber{background:#9e6a03;border-color:#bb8009;color:#fff}
+.b-green{background:#238636;border-color:#238636;color:#fff;flex:0 0 25px;width:25px;padding:0}
+.b-amber{background:#e28015;border-color:#bb8009;color:#fff}
 .b-ggsel{background:#238636;border-color:#238636;color:#fff}
 .b-blue{background:#1f6feb;border-color:#1f6feb;color:#fff}
 .overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(1,4,9,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px}
@@ -234,7 +235,7 @@ def _order_row(o) -> str:
       <form class="actform row1" method="post" action="/admin/set-status">
         <input type="hidden" name="order_id" value="{o.id}">
         <select name="status">{opts}</select>
-        <button type="submit" class="act-btn b-green">Обновить</button>
+        <button type="submit" class="act-btn b-green" title="Обновить статус">✓</button>
       </form>
       <form class="actform" method="post" action="/admin/redeliver"
             onsubmit="return confirm('Создать новый трейд по заказу {o.id}? Если предмет ещё у нас — запустится новая выдача; если ушёл — покажет ошибку.')">
