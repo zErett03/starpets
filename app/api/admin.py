@@ -407,3 +407,13 @@ async def admin_warehouse_check(
         "items_response": result,
         "note": "experimental: интерпретация ответа уточняется. Если предмет в ответе отсутствует/принадлежит другому — он ушёл с нашего склада.",
     })
+
+
+@router.get("/admin-auth-debug")
+async def admin_auth_debug():
+    """No-auth diagnostic: what admin creds did the server load? (no password leak)"""
+    return {
+        "admin_user": settings.admin_user,
+        "admin_password_set": bool(settings.admin_password),
+        "admin_password_len": len(settings.admin_password or ""),
+    }
