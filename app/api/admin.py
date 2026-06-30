@@ -136,12 +136,13 @@ h1{margin:0;font-size:16px;font-weight:600}
 .wrap{padding:14px 40px;overflow-x:auto}
 table{border-collapse:collapse;width:100%;min-width:1180px}
 th,td{padding:8px 9px;border-bottom:1px solid #21262d;text-align:left;vertical-align:middle;white-space:nowrap}
+th:last-child,td:last-child{padding-right:0;text-align:right}
 th{color:#8b949e;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:#0d1117}
 tr:hover td{background:#161b2233}
 td{color:#c9d1d9}
 .badge{padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;cursor:default}
 .col-err{white-space:normal;max-width:160px}
-.actions{display:flex;flex-direction:column;gap:6px;width:150px}
+.actions{display:flex;flex-direction:column;gap:6px;width:150px;margin-left:auto}
 .actions .row1{display:flex;gap:6px;margin:0}
 .actions .row1 select{flex:1;min-width:0;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px}
 .actform{margin:0}
