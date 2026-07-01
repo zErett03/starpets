@@ -1028,101 +1028,87 @@ async def _run_sync_prices():
 
         print(f"[SyncPrices] {len(offer_snapshot)} offers to check, fx_rate={fx_rate}", flush=True)
 
-        updated = skipped = errors = 0
-        paused_count = 0
-        to_activate: list[tuple[int, int, str]] = []  # (offer_id, ggsel_id, name)
+        counters = {"updated": 0, "skipped": 0, "errors": 0, "paused": 0}
+        to_activate: list[tuple[int, int, str]] = []          # (offer_id, ggsel_id, name)
+        price_updates: list[tuple[int, float, float]] = []    # (offer_id, price_usd, new_rub)
+        pause_ids: list[int] = []                             # offer_ids to mark paused in DB
+        sem = asyncio.Semaphore(settings.sync_concurrency)
 
-        async with httpx.AsyncClient(timeout=15) as http:
-            for i, (offer_id, ggsel_id, product_id, name, current_rub, starpets_qty, offer_status) in enumerate(offer_snapshot, 1):
+        async def _process_offer(http, rec):
+            offer_id, ggsel_id, product_id, name, current_rub, starpets_qty, offer_status = rec
+            async with sem:
                 try:
                     top_item = await starpets.get_top_item(http, str(product_id))
 
-                    # Sync status from ggsel — authoritative source
-                    try:
-                        ggsel_data = await ggsel_office.get_offer(ggsel_id)
-                        ggsel_status_raw = (ggsel_data.get("status") or "").lower()
-                        _status_map = {
-                            "active": OfferStatus.active,
-                            "paused": OfferStatus.paused,
-                            "draft": OfferStatus.draft,
-                        }
-                        synced_status = _status_map.get(ggsel_status_raw)
-                        if synced_status and synced_status != offer_status:
-                            async with AsyncSessionLocal() as db:
-                                result = await db.execute(select(Offer).where(Offer.id == offer_id))
-                                _o = result.scalar_one_or_none()
-                                if _o:
-                                    _o.status = synced_status
-                                    await db.commit()
-                            print(
-                                f"[SyncPrices] status synced ggsel_id={ggsel_id} name={name!r}: "
-                                f"db={offer_status.value} → ggsel={synced_status.value}",
-                                flush=True,
-                            )
-                            offer_status = synced_status
-                    except Exception as _se:
-                        print(f"[SyncPrices] get_offer status sync failed ggsel_id={ggsel_id}: {_se}", flush=True)
-
                     if not top_item:
-                        # No stock — pause if currently active
+                        # No stock — pause if currently active on our side
                         if offer_status == OfferStatus.active:
                             try:
                                 await ggsel_office.pause_offer(ggsel_id)
-                                async with AsyncSessionLocal() as db:
-                                    result = await db.execute(select(Offer).where(Offer.id == offer_id))
-                                    offer = result.scalar_one_or_none()
-                                    if offer:
-                                        offer.status = OfferStatus.paused
-                                        await db.commit()
+                                pause_ids.append(offer_id)
+                                counters["paused"] += 1
                                 print(f"[SyncPrices] paused ggsel_id={ggsel_id} name={name!r}", flush=True)
-                                paused_count += 1
                             except Exception as e:
+                                counters["errors"] += 1
                                 print(f"[SyncPrices] pause error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
-                                errors += 1
-                        skipped += 1
-                        continue
+                        counters["skipped"] += 1
+                        return
 
-                    # In stock — collect paused offers for batch activation
                     if offer_status == OfferStatus.paused:
                         to_activate.append((offer_id, ggsel_id, name))
 
                     price_usd = float(top_item.get("price_usd") or 0)
                     if not price_usd:
-                        skipped += 1
-                        continue
+                        counters["skipped"] += 1
+                        return
 
-                    new_rub = round(price_usd * fx_rate * settings.markup, 2)
-                    new_rub = max(new_rub, settings.min_price_rub)
-
+                    new_rub = max(round(price_usd * fx_rate * settings.markup, 2), settings.min_price_rub)
                     if abs(new_rub - current_rub) < 0.01:
-                        skipped += 1
-                        continue
+                        counters["skipped"] += 1
+                        return
 
                     await ggsel_office.update_price(ggsel_id, new_rub)
-
-                    async with AsyncSessionLocal() as db:
-                        result = await db.execute(select(Offer).where(Offer.id == offer_id))
-                        offer = result.scalar_one_or_none()
-                        if offer:
-                            offer.price_usd = price_usd
-                            offer.price_rub = new_rub
-                            await db.commit()
-
+                    price_updates.append((offer_id, price_usd, new_rub))
+                    counters["updated"] += 1
                     print(
                         f"[SyncPrices] updated ggsel_id={ggsel_id} name={name!r} "
                         f"old_rub={current_rub} → new_rub={new_rub} price_usd={price_usd}",
                         flush=True,
                     )
-                    updated += 1
-
-                    if i % 20 == 0:
-                        print(f"[SyncPrices] progress {i}/{len(offer_snapshot)}", flush=True)
-
-                    await asyncio.sleep(0.2)
-
                 except Exception as e:
+                    counters["errors"] += 1
                     print(f"[SyncPrices] error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
-                    errors += 1
+
+        # Process offers CONCURRENTLY (bounded by SYNC_CONCURRENCY). Network-bound, so this
+        # is ~Nx faster than the old one-at-a-time loop. The per-offer get_offer status-sync
+        # was removed from this hot path (it doubled the API calls) — status is kept in sync
+        # by the activate/pause flow and the hourly reconcile job.
+        _limits = httpx.Limits(max_connections=settings.sync_concurrency + 5)
+        async with httpx.AsyncClient(timeout=15, limits=_limits) as http:
+            total = len(offer_snapshot)
+            for chunk_start in range(0, total, 500):
+                chunk = offer_snapshot[chunk_start:chunk_start + 500]
+                await asyncio.gather(*[_process_offer(http, rec) for rec in chunk])
+                print(f"[SyncPrices] progress {min(chunk_start + 500, total)}/{total}", flush=True)
+
+        # Batch-persist price changes and pauses in a single DB session
+        if price_updates or pause_ids:
+            async with AsyncSessionLocal() as db:
+                for offer_id, price_usd, new_rub in price_updates:
+                    _o = (await db.execute(select(Offer).where(Offer.id == offer_id))).scalar_one_or_none()
+                    if _o:
+                        _o.price_usd = price_usd
+                        _o.price_rub = new_rub
+                for offer_id in pause_ids:
+                    _o = (await db.execute(select(Offer).where(Offer.id == offer_id))).scalar_one_or_none()
+                    if _o:
+                        _o.status = OfferStatus.paused
+                await db.commit()
+
+        updated = counters["updated"]
+        skipped = counters["skipped"]
+        errors = counters["errors"]
+        paused_count = counters["paused"]
 
         # Activation disabled — maintenance mode (pause-all-offers in progress)
         activated_count = 0

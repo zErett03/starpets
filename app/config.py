@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # buyer paid on the item, leaving ≥10% for ggsel commission + margin. Protects against
     # unprofitable trades when the live floor spiked above our (30-min-stale) offer price.
     max_cost_ratio: float = 0.9
+    # Price-sync parallelism: how many offers to process concurrently. Higher = faster
+    # sync but more load / risk of 429 from StarPets/ggsel. Tune via env SYNC_CONCURRENCY.
+    sync_concurrency: int = 10
     min_price_rub: float = 100.0
     starpets_category_id: int = 0
 
