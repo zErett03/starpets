@@ -23,7 +23,14 @@ class GgselSellerOfficeClient:
         small backoff recovers almost all of them within the same run."""
         resp = None
         for attempt in range(retries + 1):
-            resp = await client.request(method, url, **kwargs)
+            try:
+                resp = await client.request(method, url, **kwargs)
+            except httpx.TransportError:
+                # connection-level flap (disconnect/reset/timeout) under load — retry
+                if attempt < retries:
+                    await asyncio.sleep(0.4 * (2 ** attempt))
+                    continue
+                raise
             if resp.status_code in _GGSEL_RETRY_STATUS and attempt < retries:
                 await asyncio.sleep(0.4 * (2 ** attempt))  # 0.4s, 0.8s, 1.6s
                 continue
