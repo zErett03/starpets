@@ -64,6 +64,12 @@ _FRIENDSHIP_WINDOW = timedelta(minutes=10)
 # starpets_status values meaning "bot already accepted / trade moving" → stop re-pinging
 _FRIENDSHIP_OPEN_STATES = (None, "", "0")
 
+# Server-side delivery timer: how long a single trade's bot-online window lasts before
+# we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the
+# current trade's friendship was fired). Capped to avoid an infinite recreate loop.
+_DELIVERY_TIMEOUT = timedelta(minutes=10)
+_MAX_AUTO_RETRIES = 2
+
 
 async def _get_cursor(db) -> int | None:
     row = (await db.execute(select(KVState).where(KVState.key == _CURSOR_KEY))).scalar_one_or_none()
@@ -192,8 +198,9 @@ async def monitor_all_deliveries() -> None:
             tid = str(order.starpets_custom_id or "")
             if not tid:
                 continue
-            dispatched_at = order.updated_at.replace(tzinfo=None) if order.updated_at else None
-            if dispatched_at is None or (now - dispatched_at) > _FRIENDSHIP_WINDOW:
+            anchor = order.dispatched_at or order.updated_at
+            anchor = anchor.replace(tzinfo=None) if anchor else None
+            if anchor is None or (now - anchor) > _FRIENDSHIP_WINDOW:
                 continue  # past the bot's online window
             try:
                 await starpets.send_friendship(trade_id=int(tid))
@@ -205,6 +212,39 @@ async def monitor_all_deliveries() -> None:
             except Exception as e:
                 print(
                     f"[MonitorDelivery] order_id={order.id} periodic friendship failed: {e}",
+                    flush=True,
+                )
+
+        # ---- 3b. Server-side 10-min delivery timer: auto-recreate expired trades ----
+        # The bot's online window (~10 min) has passed without delivery. Recreate the
+        # trade (new bot, same purchased item) up to _MAX_AUTO_RETRIES times; the buyer's
+        # /delivery page (20s auto-refresh) then shows the new bot + a fresh timer.
+        # A create_trade code=130 means the item already left us -> auto-close as done.
+        from app.workers.redeliver import redeliver_same_item
+        for order in orders:
+            if order.delivery_status != DeliveryStatus.dispatched:
+                continue  # settled or already handled this cycle
+            anchor = order.dispatched_at or order.updated_at
+            anchor = anchor.replace(tzinfo=None) if anchor else None
+            if anchor is None or (now - anchor) <= _DELIVERY_TIMEOUT:
+                continue  # timer not expired yet
+            retries = order.trade_retry_count or 0
+            if retries < _MAX_AUTO_RETRIES:
+                order.trade_retry_count = retries + 1
+                result = await redeliver_same_item(db, order)
+                print(
+                    f"[MonitorDelivery] order_id={order.id} timer expired "
+                    f"(retry {order.trade_retry_count}/{_MAX_AUTO_RETRIES}) → {result}",
+                    flush=True,
+                )
+            else:
+                order.delivery_status = DeliveryStatus.needs_attention
+                if not order.error_reason:
+                    order.error_reason = "delivery timeout: max auto-retries reached"
+                order.updated_at = now
+                print(
+                    f"[MonitorDelivery] order_id={order.id} timer expired, "
+                    f"max auto-retries reached → needs_attention",
                     flush=True,
                 )
 

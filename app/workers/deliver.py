@@ -233,10 +233,12 @@ async def deliver_order(order_id: int) -> None:
             print(f"[Deliver] friendship request failed (non-fatal): {e}", flush=True)
 
         # 5. Persist results
+        now = datetime.utcnow()
         order.starpets_custom_id = str(trade_id)
         order.bot_name = bot_name
         order.delivery_status = DeliveryStatus.dispatched
-        order.updated_at = datetime.utcnow()
+        order.dispatched_at = now          # start the 10-min delivery timer
+        order.updated_at = now
         await db.commit()
 
         print(

@@ -546,7 +546,12 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
     # as a friend — so that first call is a no-op. The buyer adds the bot HERE, on this
     # page, so this is the right moment to (re)trigger the bot to accept the pending
     # request. Throttled in-process (~20s) to avoid spam on rapid reloads.
-    if status == DeliveryStatus.dispatched and order and order.starpets_custom_id:
+    if (
+        status == DeliveryStatus.dispatched
+        and order
+        and order.starpets_custom_id
+        and order.starpets_status in (None, "", "0")  # gate: bot hasn't accepted yet → avoid 400 spam
+    ):
         from datetime import datetime as _dt
         _now = _dt.utcnow()
         _last = _friendship_resend_at.get(order.id)
@@ -578,41 +583,56 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         body_html = """
         <div class="card">
             <div class="icon">⏳</div>
-            <h1>Товар временно закончился</h1>
-            <p class="sub">Деньги вернутся автоматически.</p>
+            <h1>Не удалось доставить предмет</h1>
+            <p class="sub">Свяжитесь с продавцом на странице заказа GGSEL — мы поможем с повторной доставкой или возвратом.</p>
         </div>"""
         extra_js = ""
 
     elif bot_name:
+        # Server-side timer: seconds remaining in the current trade's 10-min bot window,
+        # anchored to order.dispatched_at (survives tab close / device switch). The page
+        # auto-refreshes every 20s, so this re-syncs; when the server auto-recreates an
+        # expired trade, the refreshed page shows the new bot + a fresh countdown.
+        _TOTAL = 10 * 60
+        remaining = _TOTAL
+        if order and order.dispatched_at:
+            elapsed = (datetime.utcnow() - order.dispatched_at.replace(tzinfo=None)).total_seconds()
+            remaining = max(0, int(_TOTAL - elapsed))
+        _mm, _ss = remaining // 60, remaining % 60
+        timer_init = f"{_mm:02d}:{_ss:02d}"
+        from app.clients.roblox import bot_profile_url
+        profile_url = await bot_profile_url(bot_name)
         body_html = f"""
         <div class="card">
             <div class="icon">🤖</div>
             <p class="label">Имя бота для трейда</p>
-            <div class="bot-name">{bot_name}</div>
+            <a class="bot-name" href="{profile_url}" target="_blank" rel="noopener">{bot_name}</a>
+            <p class="profile-hint">👆 нажмите на имя, чтобы открыть профиль бота</p>
             <div class="timer-box">
                 <span class="timer-label">Осталось времени</span>
-                <div class="timer" id="timer">05:00</div>
+                <div class="timer" id="timer">{timer_init}</div>
             </div>
             <div class="steps">
-                <div class="step"><span class="num">1</span>Добавьте бота <strong>{bot_name}</strong> в друзья на Roblox</div>
-                <div class="step"><span class="num">2</span>Зайдите в игру <strong>Adopt Me</strong></div>
-                <div class="step"><span class="num">3</span>Найдите бота в списке друзей и телепортируйтесь к нему</div>
-                <div class="step"><span class="num">4</span>Примите входящий трейд</div>
+                <div class="step"><span class="num">1</span>Добавьте бота <strong>{bot_name}</strong> в друзья на Roblox и дождитесь, пока он примет заявку (~1 минута)</div>
+                <div class="step"><span class="num">2</span>Откройте <a href="{profile_url}" target="_blank" rel="noopener" class="steplink">профиль бота</a> и нажмите зелёную кнопку <strong>Join</strong></div>
+                <div class="step"><span class="num">3</span>Дождитесь загрузки в <strong>Adopt Me</strong> на сервере бота <em>(не телепортируйтесь к другу из игры — будет ошибка)</em></div>
+                <div class="step"><span class="num">4</span>Примите входящий трейд от бота</div>
             </div>
-            <p class="warn">⚠️ У вас <strong>5 минут</strong> — будьте готовы заранее!</p>
+            <p class="warn">⚠️ У вас <strong>10 минут</strong> — будьте готовы заранее!</p>
         </div>"""
-        extra_js = """
-        (function() {
-            var total = 5 * 60;
+        extra_js = f"""
+        (function() {{
+            var total = {remaining};
             var el = document.getElementById('timer');
-            var iv = setInterval(function() {
+            if (total <= 0) {{ el.textContent = '00:00'; el.style.color='#ef4444'; return; }}
+            var iv = setInterval(function() {{
                 total--;
-                if (total <= 0) { clearInterval(iv); el.textContent = '00:00'; el.style.color='#ef4444'; return; }
+                if (total <= 0) {{ clearInterval(iv); el.textContent = '00:00'; el.style.color='#ef4444'; return; }}
                 var m = Math.floor(total / 60);
                 var s = total % 60;
                 el.textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
-            }, 1000);
-        })();"""
+            }}, 1000);
+        }})();"""
 
     else:
         body_html = """
@@ -676,9 +696,15 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    margin-bottom: 24px;
+    margin-bottom: 6px;
     word-break: break-all;
+    display: inline-block;
+    text-decoration: none;
+    cursor: pointer;
   }}
+  .bot-name:hover {{ filter: brightness(1.15); text-decoration: underline; }}
+  .profile-hint {{ font-size: 0.8rem; color: rgba(255,255,255,0.55); margin-bottom: 22px; }}
+  .steplink {{ color: #a78bfa; font-weight: 700; text-decoration: underline; }}
   .timer-box {{
     background: rgba(0,0,0,0.3);
     border-radius: 12px;
@@ -819,6 +845,8 @@ async def trigger_deliver(order_id: int):
 
         order.delivery_status = DeliveryStatus.pending
         order.error_reason = None
+        order.trade_retry_count = 0          # fresh manual attempt → reset auto-retry budget
+        order.dispatched_at = None           # new timer starts when the new trade dispatches
         order.updated_at = datetime.utcnow()
         db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=3, payload={"order_id": order_id}))
         await db.commit()

@@ -63,6 +63,25 @@ _ERR_SHORT = {
 }
 
 
+# Cancellation reasons for DELETE /trades/ex-buyers/withdrawal (value → operator label).
+# "other" requires a free-text reason (1..144 chars). Default is wrong_account_specified
+# (buyer gave the wrong login) — the main driver of the "new login" re-issue flow.
+REASON_TYPES = [
+    ("wrong_account_specified", "Неверно указан логин"),
+    ("change_mind_about_picking_up", "Передумал покупать"),
+    ("seller_not_friending", "Не добавляет в друзья"),
+    ("seller_left_game", "Бот вышел из игры"),
+    ("roblox_join_error_773", "Ошибка входа 773"),
+    ("roblox_join_error_279", "Ошибка входа 279"),
+    ("other", "Другое (укажите текст)"),
+]
+_REASON_VALUES = {v for v, _ in REASON_TYPES}
+
+
+def _reason_options() -> str:
+    return "".join(f'<option value="{v}">{_esc(label)}</option>' for v, label in REASON_TYPES)
+
+
 def _err_short(reason: str) -> str:
     if reason in _ERR_SHORT:
         return _ERR_SHORT[reason]
@@ -142,7 +161,8 @@ tr:hover td{background:#161b2233}
 td{color:#c9d1d9}
 .badge{padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;cursor:default}
 .col-err{white-space:normal;max-width:160px}
-.actions{display:flex;flex-direction:column;gap:6px;width:150px;margin-left:auto}
+.actions{display:flex;flex-direction:column;gap:6px;width:168px;margin-left:auto}
+.actions .reissue{display:flex;flex-direction:column;gap:4px;margin-top:2px;padding-top:6px;border-top:1px dashed #30363d}
 .actions .row1{display:flex;gap:6px;margin:0}
 .actions .row1 select{flex:1;min-width:0;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px}
 .actform{margin:0}
@@ -247,6 +267,16 @@ def _order_row(o) -> str:
             onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
         <input type="hidden" name="order_id" value="{o.id}">
         <button type="submit" class="act-btn b-ggsel">Отправить на ggsel</button>
+      </form>
+      <form class="actform reissue" method="post" action="/admin/reissue-new-login"
+            onsubmit="return confirm('Отменить текущий трейд заказа {o.id} и пересоздать его на новый логин? Убедитесь, что предмет ещё НЕ доставлен.')">
+        <input type="hidden" name="order_id" value="{o.id}">
+        <input type="text" name="username" placeholder="новый логин"
+               style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
+        <select name="reason_type" style="width:100%;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px">{_reason_options()}</select>
+        <input type="text" name="reason_custom" placeholder="свой текст (для «Другое»)"
+               style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
+        <button type="submit" class="act-btn b-amber">Новый логин</button>
       </form>
       <button type="button" class="act-btn b-blue" onclick="openHistory({o.id})">История доставки</button>
     </div>
@@ -475,73 +505,90 @@ async def admin_redeliver(
 ):
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
-    from app.db.models import Order, DeliveryStatus
+    from app.db.models import Order
+    from app.workers.redeliver import redeliver_same_item
 
     async with AsyncSessionLocal() as db:
         order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
         if not order:
             raise HTTPException(404, f"order {order_id} not found")
 
-        purchase_id = order.starpets_purchase_id
-        username = order.roblox_username or ""
-        result = ""
-
-        if not purchase_id:
-            result = "⚪ нет purchase_id — выдача ещё не покупала предмет; используйте обычный DELIVER"
-        elif not username:
-            result = "⚪ не указан Roblox-ник — заполните ник и повторите"
-        else:
-            try:
-                trade_resp = await starpets.create_trade(
-                    purchased_item_ids=[purchase_id], roblox_username=username
-                )
-                first = (trade_resp.get("trades") or [{}])[0]
-                trade_id = (
-                    first.get("id") or first.get("tradeId") or trade_resp.get("tradeId")
-                    or trade_resp.get("trade_id") or trade_resp.get("id")
-                    or (trade_resp.get("data") or {}).get("id")
-                )
-                linked = (
-                    first.get("linkedRobloxAccount") or trade_resp.get("linkedRobloxAccount")
-                    or (trade_resp.get("data") or {}).get("linkedRobloxAccount") or {}
-                )
-                bot_name = linked.get("robloxAccountName") or linked.get("username") or linked.get("name")
-                if trade_id:
-                    order.starpets_custom_id = str(trade_id)
-                    order.bot_name = bot_name
-                    order.starpets_status = None
-                    order.delivery_status = DeliveryStatus.dispatched
-                    order.error_reason = None
-                    order.updated_at = datetime.utcnow()
-                    try:
-                        await starpets.send_friendship(trade_id=int(trade_id))
-                    except Exception as e:
-                        print(f"[admin] redeliver friendship failed order={order_id}: {e}", flush=True)
-                    result = (
-                        f"✅ Создан новый трейд {trade_id}, бот {bot_name or '?'} — "
-                        f"предмет был у нас (НЕ доставлено), выдача перезапущена"
-                    )
-                else:
-                    result = f"⚠️ create_trade без trade_id: {str(trade_resp)[:200]}"
-            except httpx.HTTPStatusError as exc:
-                body = ""
-                code = None
-                try:
-                    j = exc.response.json()
-                    code = j.get("code")
-                    body = str(j)
-                except Exception:
-                    body = (exc.response.text or "")[:200]
-                icon, verdict = classify_create_trade_error(code, body)
-                result = f"{icon} create_trade {exc.response.status_code} code={code}: {verdict} · {body[:200]}"
-            except Exception as e:
-                result = f"⚪ ошибка create_trade: {e}"
-
-        order.last_redeliver_result = result
-        order.updated_at = datetime.utcnow()
+        result = await redeliver_same_item(db, order)
         await db.commit()
 
     print(f"[admin] order_id={order_id} redeliver: {result}", flush=True)
+    return _flash_redirect(request, order_id)
+
+
+@router.post("/admin/reissue-new-login")
+async def admin_reissue_new_login(
+    request: Request,
+    _user: str = Depends(require_admin),
+    order_id: int = Form(...),
+    username: str = Form(...),
+    reason_type: str = Form("wrong_account_specified"),
+    reason_custom: str = Form(""),
+):
+    """Cancel the current trade and recreate it on a NEW login (buyer error).
+
+    Chain: DELETE /withdrawal (cancel) -> set new username -> redeliver_same_item.
+    Reset trade_retry_count so the operator's manual attempt gets a fresh budget.
+    """
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+    from app.workers.redeliver import redeliver_same_item
+
+    username = username.strip()
+    reason_custom = (reason_custom or "").strip()
+    if reason_type not in _REASON_VALUES:
+        reason_type = "other"
+    reason = None
+    if reason_type == "other":
+        reason = reason_custom[:144] or "reissue to correct account"
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            raise HTTPException(404, f"order {order_id} not found")
+
+        if not username:
+            order.last_redeliver_result = "⚪ новый логин не указан — операция отменена"
+            order.updated_at = datetime.utcnow()
+            await db.commit()
+            return _flash_redirect(request, order_id)
+
+        parts = []
+        old_trade = order.starpets_custom_id
+        if old_trade:
+            try:
+                await starpets.cancel_trade(old_trade, reason_type, reason)
+                parts.append(f"трейд {old_trade} отменён ({reason_type})")
+            except httpx.HTTPStatusError as exc:
+                code = None
+                try:
+                    code = exc.response.json().get("code")
+                except Exception:
+                    pass
+                parts.append(
+                    f"⚠️ отмена трейда {old_trade} не удалась "
+                    f"({exc.response.status_code} code={code}) — продолжаю"
+                )
+            except Exception as e:
+                parts.append(f"⚠️ отмена трейда {old_trade} ошибка: {str(e)[:80]} — продолжаю")
+
+        old_username = order.roblox_username
+        order.roblox_username = username
+        order.trade_retry_count = 0
+        result = await redeliver_same_item(db, order)
+
+        order.last_redeliver_result = (
+            f"[новый логин {old_username!r}->{username!r}] " + "; ".join(parts + [result])
+        )
+        order.updated_at = datetime.utcnow()
+        await db.commit()
+
+    print(f"[admin] order_id={order_id} reissue-new-login -> {order.last_redeliver_result}", flush=True)
     return _flash_redirect(request, order_id)
 
 

@@ -187,6 +187,41 @@ class StarPetsClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def cancel_trade(
+        self, trade_id: int | str, reason_type: str, reason: str | None = None
+    ) -> dict:
+        """DELETE /trades/ex-buyers/withdrawal — cancel a created trade.
+
+        Per the Business API docs the payload is a JSON body:
+            {tradeId, reasonType, [reason], timestamp, recvWindow}
+        `reason` (free text 1..144) is required only when reasonType == "other".
+        reasonType enum: other, change_mind_about_picking_up, seller_not_friending,
+        seller_left_game, seller_cancel_trade, roblox_join_error_279,
+        roblox_join_error_773, roblox_join_infinite_connecting, seller_no_join_button,
+        cannot_start_trade_with_seller, seller_not_offering_item, wrong_account_specified.
+        Response: {"status": true}.
+        """
+        payload = {
+            **self._base_params(),
+            "tradeId": str(trade_id),
+            "reasonType": reason_type,
+        }
+        if reason_type == "other" and reason:
+            payload["reason"] = reason
+        async with httpx.AsyncClient(
+            headers=self._headers(self._sign(payload)), timeout=15
+        ) as client:
+            resp = await client.request(
+                "DELETE", f"{self.base_url}/trades/ex-buyers/withdrawal", json=payload
+            )
+            if not resp.is_success:
+                print(
+                    f"[cancel_trade] FAILED status={resp.status_code} body={resp.text}",
+                    flush=True,
+                )
+            resp.raise_for_status()
+            return resp.json()
+
     async def get_trade_updates(self, custom_id: str) -> dict:
         params = {
             **self._base_params(),

@@ -122,6 +122,10 @@ class Order(Base):
     ggsel_marked_delivered_at = Column(DateTime(timezone=True), nullable=True)
     paid_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+    # Stable anchor for the 10-min delivery timer: set to the moment the current
+    # trade's friendship request was fired (dispatch / redeliver). Unlike updated_at
+    # (bumped on every change), this is only reset when a NEW trade window opens.
+    dispatched_at = Column(DateTime(timezone=True), nullable=True)
     error_reason = Column(Text, nullable=True)
     last_redeliver_result = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
