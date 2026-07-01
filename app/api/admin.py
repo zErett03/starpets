@@ -183,6 +183,14 @@ table.hist th,table.hist td{font-size:12px;padding:6px 8px}
 pre.summary{margin:0;white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#c9d1d9}
 .copy-btn{position:absolute;right:10px;bottom:10px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:4px 8px;cursor:pointer}
 .copy-btn:hover{border-color:#8b949e}
+.reissue-btn{margin-top:6px;width:100%}
+.nick-err{display:none;color:#f85149;font-size:11px;margin-top:4px;line-height:1.3}
+.fld-label{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:12px 0 4px}
+.nick-view{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-size:14px;font-weight:600;color:#c9d1d9;word-break:break-all}
+.modal-select,.modal-input{width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-size:13px}
+.modal-err{color:#f85149;font-size:12px;margin-top:10px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+.modal-actions .act-btn{width:auto;min-width:96px;height:32px;padding:0 14px}
 """
 
 _JS = """
@@ -218,6 +226,44 @@ function copyHistory(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeHistory(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='hist-overlay') closeHistory(); });
+function openReissue(orderId){
+  var inp=document.getElementById('nick-'+orderId);
+  var nick=(inp&&inp.value||'').trim();
+  var err=document.getElementById('nickerr-'+orderId);
+  if(!nick){
+    if(err){ err.textContent='Укажите новый логин в поле ника выше'; err.style.display='block';
+             setTimeout(function(){err.style.display='none';},4000); }
+    if(inp) inp.focus();
+    return;
+  }
+  if(err) err.style.display='none';
+  document.getElementById('reissue-order-id').value=orderId;
+  document.getElementById('reissue-username').value=nick;
+  document.getElementById('reissue-nick-view').textContent=nick;
+  document.getElementById('reissue-title').textContent='Новый логин — заказ #'+orderId;
+  var sel=document.getElementById('reissue-reason'); sel.selectedIndex=0;
+  document.getElementById('reissue-custom').value='';
+  document.getElementById('reissue-err').style.display='none';
+  toggleReissueCustom();
+  document.getElementById('reissue-overlay').style.display='flex';
+}
+function closeReissue(){ document.getElementById('reissue-overlay').style.display='none'; }
+function toggleReissueCustom(){
+  var v=document.getElementById('reissue-reason').value;
+  document.getElementById('reissue-custom-wrap').style.display=(v==='other')?'block':'none';
+}
+function validateReissue(){
+  var e=document.getElementById('reissue-err');
+  var u=(document.getElementById('reissue-username').value||'').trim();
+  if(!u){ e.textContent='Новый логин пуст — закройте окно и заполните поле ника'; e.style.display='block'; return false; }
+  if(document.getElementById('reissue-reason').value==='other'){
+    var c=(document.getElementById('reissue-custom').value||'').trim();
+    if(!c){ e.textContent='Введите текст причины для «Другое»'; e.style.display='block'; return false; }
+  }
+  return true;
+}
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeReissue(); });
+document.addEventListener('click',function(e){ if(e.target&&e.target.id==='reissue-overlay') closeReissue(); });
 """
 
 
@@ -240,10 +286,12 @@ def _order_row(o) -> str:
   <td>
     <form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">
       <input type="hidden" name="order_id" value="{o.id}">
-      <input type="text" name="username" value="{uname}" placeholder="ник"
+      <input type="text" name="username" id="nick-{o.id}" value="{uname}" placeholder="ник"
              style="width:110px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
       <button type="submit" class="act-btn" style="width:30px" title="Сохранить ник">✓</button>
     </form>
+    <button type="button" class="act-btn b-amber reissue-btn" onclick="openReissue({o.id})" title="Отменить текущий трейд и пересоздать на новый логин">Новый логин</button>
+    <div id="nickerr-{o.id}" class="nick-err"></div>
   </td>
   <td>{_badge(cur)}</td>
   <td>{_esc(o.starpets_status or "—")}</td>
@@ -267,16 +315,6 @@ def _order_row(o) -> str:
             onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
         <input type="hidden" name="order_id" value="{o.id}">
         <button type="submit" class="act-btn b-ggsel">Отправить на ggsel</button>
-      </form>
-      <form class="actform reissue" method="post" action="/admin/reissue-new-login"
-            onsubmit="return confirm('Отменить текущий трейд заказа {o.id} и пересоздать его на новый логин? Убедитесь, что предмет ещё НЕ доставлен.')">
-        <input type="hidden" name="order_id" value="{o.id}">
-        <input type="text" name="username" placeholder="новый логин"
-               style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
-        <select name="reason_type" style="width:100%;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:0 6px;font-size:12px">{_reason_options()}</select>
-        <input type="text" name="reason_custom" placeholder="свой текст (для «Другое»)"
-               style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
-        <button type="submit" class="act-btn b-amber">Новый логин</button>
       </form>
       <button type="button" class="act-btn b-blue" onclick="openHistory({o.id})">История доставки</button>
     </div>
@@ -410,6 +448,31 @@ async def admin_orders(
   </div>
 </div>
 
+<div id="reissue-overlay" class="overlay">
+  <div class="modal" style="max-width:460px">
+    <button class="modal-close" onclick="closeReissue()" title="Закрыть">✕</button>
+    <h2 id="reissue-title">Новый логин</h2>
+    <p class="sub" style="margin-bottom:6px">Текущий трейд будет <b>отменён</b>, предмет пересоздан на указанный логин. Убедитесь, что предмет ещё <b>НЕ доставлен</b>.</p>
+    <form id="reissue-form" method="post" action="/admin/reissue-new-login" onsubmit="return validateReissue()">
+      <input type="hidden" name="order_id" id="reissue-order-id">
+      <input type="hidden" name="username" id="reissue-username">
+      <span class="fld-label">Новый логин</span>
+      <div id="reissue-nick-view" class="nick-view"></div>
+      <span class="fld-label">Причина отмены</span>
+      <select name="reason_type" id="reissue-reason" class="modal-select" onchange="toggleReissueCustom()">{_reason_options()}</select>
+      <div id="reissue-custom-wrap" style="display:none">
+        <span class="fld-label">Свой текст (для «Другое»)</span>
+        <input type="text" name="reason_custom" id="reissue-custom" class="modal-input" maxlength="144" placeholder="1–144 символа">
+      </div>
+      <div id="reissue-err" class="modal-err" style="display:none"></div>
+      <div class="modal-actions">
+        <button type="button" class="act-btn" onclick="closeReissue()">Отмена</button>
+        <button type="submit" class="act-btn b-amber">Подтвердить</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>{_JS}</script>
 </body></html>""")
 
@@ -525,7 +588,7 @@ async def admin_reissue_new_login(
     request: Request,
     _user: str = Depends(require_admin),
     order_id: int = Form(...),
-    username: str = Form(...),
+    username: str = Form(""),
     reason_type: str = Form("wrong_account_specified"),
     reason_custom: str = Form(""),
 ):
