@@ -183,7 +183,7 @@ table.hist th,table.hist td{font-size:12px;padding:6px 8px}
 pre.summary{margin:0;white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#c9d1d9}
 .copy-btn{position:absolute;right:10px;bottom:10px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:4px 8px;cursor:pointer}
 .copy-btn:hover{border-color:#8b949e}
-.reissue-btn{margin-top:6px;width:100%}
+.reissue-btn{margin-top:6px;width:145px}
 .nick-err{display:none;color:#f85149;font-size:11px;margin-top:4px;line-height:1.3}
 .fld-label{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:12px 0 4px}
 .nick-view{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-size:14px;font-weight:600;color:#c9d1d9;word-break:break-all}
