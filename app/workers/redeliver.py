@@ -14,9 +14,24 @@ strongest delivery signal:
 from datetime import datetime
 
 import httpx
+from sqlalchemy import select
 
 from app.clients.starpets import starpets
-from app.db.models import DeliveryStatus, Task, TaskKind
+from app.db.models import DeliveryStatus, Task, TaskKind, TradeEvent
+
+
+async def _order_reached_in_progress(db, order_id) -> bool:
+    """True if any trade for this order ever reached IN_PROGRESS(5) or FINISHED(8),
+    per the persisted audit trail — our proof the in-game exchange actually executed.
+    Used to make the 130 -> 'delivered' inference safe (a 130 without reaching 5 usually
+    means the item is locked in a concurrent/active trade, NOT delivered)."""
+    row = (await db.execute(
+        select(TradeEvent.id).where(
+            TradeEvent.order_id == order_id,
+            TradeEvent.status.in_([5, 8]),
+        ).limit(1)
+    )).first()
+    return row is not None
 
 
 def _extract_trade(trade_resp: dict):
@@ -101,17 +116,34 @@ async def redeliver_same_item(db, order) -> str:
 
         now = datetime.utcnow()
         if code == 130:
-            # Item is gone from our inventory -> it was delivered. Auto-close.
-            order.delivery_status = DeliveryStatus.done
-            if order.delivered_at is None:
-                order.delivered_at = now
-            order.error_reason = None
-            order.updated_at = now
-            db.add(Task(kind=TaskKind.MARK_DELIVERED, priority=1, payload={"order_id": order.id}))
-            result = (
-                "🟢 create_trade 130 NOT_FOUND: предмет ушёл — ДОСТАВЛЕНО; "
-                "заказ закрыт, MARK_DELIVERED поставлен"
-            )
+            # 130 NOT_FOUND = item not in our purchasable inventory. That means DELIVERED
+            # ONLY if the trade actually executed (reached IN_PROGRESS=5). If the exchange
+            # never started, a 130 more likely means the item is locked in a concurrent /
+            # active trade — NOT delivered — so we must NOT auto-close (that would release
+            # the buyer's payment for nothing). Flag for the operator instead.
+            delivered = await _order_reached_in_progress(db, order.id)
+            if delivered:
+                order.delivery_status = DeliveryStatus.done
+                if order.delivered_at is None:
+                    order.delivered_at = now
+                order.error_reason = None
+                order.updated_at = now
+                db.add(Task(kind=TaskKind.MARK_DELIVERED, priority=1, payload={"order_id": order.id}))
+                result = (
+                    "🟢 create_trade 130 NOT_FOUND + обмен исполнялся (статус 5) — "
+                    "ДОСТАВЛЕНО; заказ закрыт, MARK_DELIVERED поставлен"
+                )
+            else:
+                order.delivery_status = DeliveryStatus.needs_attention
+                order.error_reason = (
+                    "130 NOT_FOUND, обмен не начинался (статус <5) — предмет "
+                    "залочен/недоступен, НЕ доставлено, проверить"
+                )
+                order.updated_at = now
+                result = (
+                    "🟡 create_trade 130 NOT_FOUND, но обмен не начинался — НЕ помечаю "
+                    "доставленным; needs_attention (предмет залочен в активном трейде?)"
+                )
         elif code == 210:
             order.delivery_status = DeliveryStatus.needs_attention
             order.error_reason = f"redeliver 210 NO_ACCESS: {body[:120]}"

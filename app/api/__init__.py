@@ -575,7 +575,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         <div class="card">
             <div class="icon">✅</div>
             <h1>Предмет доставлен!</h1>
-            <p class="sub">Спасибо за покупку. Проверьте свой инвентарь в Adopt Me.</p>
+            <p class="sub">Спасибо за покупку.<br>Проверьте свой инвентарь в Adopt Me.</p>
         </div>"""
         extra_js = ""
 
@@ -602,23 +602,32 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         timer_init = f"{_mm:02d}:{_ss:02d}"
         from app.clients.roblox import bot_profile_url
         profile_url = await bot_profile_url(bot_name)
+        # Support link → the buyer's GGSEL order page (has the chat with us). The
+        # uniquecode is the order UUID GGSEL appends when redirecting to /delivery.
+        support_url = (
+            f"https://payment.ggsel.com/order/{order.uniquecode}"
+            if (order and order.uniquecode) else "https://ggsel.net"
+        )
         body_html = f"""
         <div class="card">
             <div class="icon">🤖</div>
             <p class="label">Имя бота для трейда</p>
             <a class="bot-name" href="{profile_url}" target="_blank" rel="noopener">{bot_name}</a>
             <p class="profile-hint">👆 нажмите на имя, чтобы открыть профиль бота</p>
+            <p class="warn warn-top">⚠️ У Вас <strong>10 минут</strong> — успейте совершить трейд!</p>
             <div class="timer-box">
                 <span class="timer-label">Осталось времени</span>
                 <div class="timer" id="timer">{timer_init}</div>
             </div>
             <div class="steps">
-                <div class="step"><span class="num">1</span>Добавьте бота <strong>{bot_name}</strong> в друзья на Roblox и дождитесь, пока он примет заявку (~1 минута)</div>
-                <div class="step"><span class="num">2</span>Откройте <a href="{profile_url}" target="_blank" rel="noopener" class="steplink">профиль бота</a> и нажмите зелёную кнопку <strong>Join</strong></div>
-                <div class="step"><span class="num">3</span>Дождитесь загрузки в <strong>Adopt Me</strong> на сервере бота <em>(не телепортируйтесь к другу из игры — будет ошибка)</em></div>
-                <div class="step"><span class="num">4</span>Примите входящий трейд от бота</div>
+                <div class="step"><span class="num">1</span><span class="step-text">Добавьте <a href="{profile_url}" target="_blank" rel="noopener" class="steplink">{bot_name}</a> в друзья на Roblox и дождитесь, пока он примет заявку (~1 минута)</span></div>
+                <div class="step"><span class="num">2</span><span class="step-text">После добавления в друзья обновите страницу и нажмите появившуюся кнопку <strong>«Join»</strong>, чтобы подключиться к сессии бота</span></div>
+                <div class="step"><span class="num">3</span><span class="step-text">После загрузки игры найдите бота в списке друзей и телепортируйтесь к нему</span></div>
+                <div class="step"><span class="num">4</span><span class="step-text">Нажмите на кнопку взаимодействия с ботом и выберите <strong>«Trade»</strong> (нижняя кнопка из меню)</span></div>
+                <div class="step"><span class="num">5</span><span class="step-text">Бот примет запрос на трейд и в течение ~1 минуты добавит питомца в обмен — примите трейд</span></div>
+                <div class="step"><span class="num">6</span><span class="step-text">Готово! Проверьте инвентарь — питомец был передан вам 🤗</span></div>
             </div>
-            <p class="warn">⚠️ У вас <strong>10 минут</strong> — будьте готовы заранее!</p>
+            <p class="support">Если бот не добавил Вас в течение 5 минут — <a href="{support_url}" target="_blank" rel="noopener" class="steplink">обратитесь в чат поддержки</a></p>
         </div>"""
         extra_js = f"""
         (function() {{
@@ -645,7 +654,10 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         extra_js = ""
 
     if status in (DeliveryStatus.done, DeliveryStatus.finalized, DeliveryStatus.failed):
-        refresh_meta = ""
+        # Keep polling even on terminal screens so that if the operator re-issues the
+        # order ("Новый логин"/"Новый трейд" → back to dispatched), the buyer's already
+        # open page auto-updates to the new bot + fresh timer without a manual refresh.
+        refresh_meta = '<meta http-equiv="refresh" content="10">'
     elif bot_name:
         # Dispatched: refresh every 20s so a foregrounded tab re-triggers the friendship
         # re-send above. Desktop-reliable; on mobile the server-side monitor loop is the
@@ -705,6 +717,10 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
   .bot-name:hover {{ filter: brightness(1.15); text-decoration: underline; }}
   .profile-hint {{ font-size: 0.8rem; color: rgba(255,255,255,0.55); margin-bottom: 22px; }}
   .steplink {{ color: #a78bfa; font-weight: 700; text-decoration: underline; }}
+  .steplink:hover {{ filter: brightness(1.15); }}
+  .step-text {{ flex: 1; min-width: 0; }}
+  .warn-top {{ margin-bottom: 20px; }}
+  .support {{ font-size: 0.85rem; color: rgba(255,255,255,0.6); line-height: 1.5; margin-top: 2px; }}
   .timer-box {{
     background: rgba(0,0,0,0.3);
     border-radius: 12px;
@@ -727,7 +743,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
     padding: 12px 0;
     border-bottom: 1px solid rgba(255,255,255,0.08);
     font-size: 0.95rem;
-    line-height: 1.4;
+    line-height: 1.5;
     color: rgba(255,255,255,0.88);
   }}
   .step:last-child {{ border-bottom: none; }}

@@ -215,11 +215,16 @@ async def monitor_all_deliveries() -> None:
                     flush=True,
                 )
 
-        # ---- 3b. Server-side 10-min delivery timer: auto-recreate expired trades ----
-        # The bot's online window (~10 min) has passed without delivery. Recreate the
-        # trade (new bot, same purchased item) up to _MAX_AUTO_RETRIES times; the buyer's
-        # /delivery page (20s auto-refresh) then shows the new bot + a fresh timer.
-        # A create_trade code=130 means the item already left us -> auto-close as done.
+        # ---- 3b. Server-side 10-min delivery timer ----
+        # The bot's online window (~10 min) elapsed. What we do depends on how far the
+        # trade progressed, to avoid two bugs seen in testing:
+        #   * status 5 (exchange executed) but no terminal event → probe via redeliver;
+        #     it closes as 'done' ONLY if the audit trail proves status 5 (safe auto-close).
+        #   * status 3/4 (buyer already in the bot's session) → DON'T recreate (would abort
+        #     a live trade) → needs_attention.
+        #   * status None/0/1/2 (bot never got the buyer into a session) → CANCEL the stuck
+        #     trade first (so trades don't stack on the same item and cause a misleading
+        #     130), then recreate with a fresh bot, up to _MAX_AUTO_RETRIES times.
         from app.workers.redeliver import redeliver_same_item
         for order in orders:
             if order.delivery_status != DeliveryStatus.dispatched:
@@ -228,9 +233,49 @@ async def monitor_all_deliveries() -> None:
             anchor = anchor.replace(tzinfo=None) if anchor else None
             if anchor is None or (now - anchor) <= _DELIVERY_TIMEOUT:
                 continue  # timer not expired yet
+
+            st = str(order.starpets_status or "")
+            if st == "5":
+                # Exchange executed but StarPets went silent — probe to auto-close. redeliver
+                # only marks done if the audit trail confirms status 5, else needs_attention.
+                result = await redeliver_same_item(db, order)
+                print(
+                    f"[MonitorDelivery] order_id={order.id} timer expired at status 5 "
+                    f"→ probe {result}",
+                    flush=True,
+                )
+                continue
+            if st in ("3", "4"):
+                # Buyer is inside the bot's game session but stalled — don't disrupt it.
+                order.delivery_status = DeliveryStatus.needs_attention
+                if not order.error_reason:
+                    order.error_reason = f"застрял на статусе {st} (в сессии бота) — проверить"
+                order.updated_at = now
+                print(
+                    f"[MonitorDelivery] order_id={order.id} timer expired at session status={st} "
+                    f"→ needs_attention",
+                    flush=True,
+                )
+                continue
+
             retries = order.trade_retry_count or 0
             if retries < _MAX_AUTO_RETRIES:
                 order.trade_retry_count = retries + 1
+                old_tid = order.starpets_custom_id
+                if old_tid:
+                    try:
+                        await starpets.cancel_trade(old_tid, "seller_not_friending")
+                        print(
+                            f"[MonitorDelivery] order_id={order.id} cancelled stuck trade "
+                            f"{old_tid} before retry",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        print(
+                            f"[MonitorDelivery] order_id={order.id} cancel before retry "
+                            f"failed trade={old_tid}: {e}",
+                            flush=True,
+                        )
                 result = await redeliver_same_item(db, order)
                 print(
                     f"[MonitorDelivery] order_id={order.id} timer expired "
@@ -240,7 +285,7 @@ async def monitor_all_deliveries() -> None:
             else:
                 order.delivery_status = DeliveryStatus.needs_attention
                 if not order.error_reason:
-                    order.error_reason = "delivery timeout: max auto-retries reached"
+                    order.error_reason = "delivery timeout: бот не смог передать (лимит ретраев)"
                 order.updated_at = now
                 print(
                     f"[MonitorDelivery] order_id={order.id} timer expired, "

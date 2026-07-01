@@ -60,6 +60,7 @@ _ERR_SHORT = {
     "no_roblox_username": "нет ника",
     "price_too_high": "цена выросла",
     "canceled by admin": "отменён",
+    "Заказ отменён вручную": "🗑 отменён вручную",
 }
 
 
@@ -172,6 +173,8 @@ td{color:#c9d1d9}
 .b-amber{background:#e28015;border-color:#bb8009;color:#fff}
 .b-ggsel{background:#238636;border-color:#238636;color:#fff}
 .b-blue{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.b-red{background:#da3633;border-color:#da3633;color:#fff;flex:0 0 25px;width:25px;padding:0}
+.row-pair{display:flex;gap:6px}
 .overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(1,4,9,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px}
 .modal{position:relative;background:#161b22;border:1px solid #30363d;border-radius:14px;max-width:760px;width:100%;max-height:86vh;overflow:auto;padding:22px 24px;box-shadow:0 12px 48px rgba(0,0,0,.6)}
 .modal h2{margin:0 30px 14px 0;font-size:16px}
@@ -264,6 +267,18 @@ function validateReissue(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeReissue(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='reissue-overlay') closeReissue(); });
+// Strip flash_order from the URL on load: the flash is server-rendered once from the
+// post-action redirect; removing the param means a plain refresh won't re-show it,
+// while a new action re-adds the param and shows a fresh flash.
+(function(){
+  try {
+    var u=new URL(window.location.href);
+    if(u.searchParams.has('flash_order')){
+      u.searchParams.delete('flash_order');
+      window.history.replaceState({}, '', u.pathname + u.search + u.hash);
+    }
+  } catch(e){}
+})();
 """
 
 
@@ -311,11 +326,18 @@ def _order_row(o) -> str:
         <input type="hidden" name="order_id" value="{o.id}">
         <button type="submit" class="act-btn b-amber">Новый трейд</button>
       </form>
-      <form class="actform" method="post" action="/admin/mark-delivered"
-            onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
-        <input type="hidden" name="order_id" value="{o.id}">
-        <button type="submit" class="act-btn b-ggsel">Отправить на ggsel</button>
-      </form>
+      <div class="row-pair">
+        <form class="actform" method="post" action="/admin/mark-delivered" style="flex:1"
+              onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
+          <input type="hidden" name="order_id" value="{o.id}">
+          <button type="submit" class="act-btn b-ggsel">Отправить на ggsel</button>
+        </form>
+        <form class="actform" method="post" action="/admin/cancel-order"
+              onsubmit="return confirm('Отменить заказ {o.id}? Трейд будет закрыт, выдача остановлена. Возврат/отказ денег оформите на ggsel вручную.')">
+          <input type="hidden" name="order_id" value="{o.id}">
+          <button type="submit" class="act-btn b-red" title="Отменить заказ (закрыть трейд)">🗑</button>
+        </form>
+      </div>
       <button type="button" class="act-btn b-blue" onclick="openHistory({o.id})">История доставки</button>
     </div>
   </td>
@@ -580,6 +602,60 @@ async def admin_redeliver(
         await db.commit()
 
     print(f"[admin] order_id={order_id} redeliver: {result}", flush=True)
+    return _flash_redirect(request, order_id)
+
+
+@router.post("/admin/cancel-order")
+async def admin_cancel_order(
+    request: Request,
+    _user: str = Depends(require_admin),
+    order_id: int = Form(...),
+):
+    """Cancel an order at the buyer's request (changed mind / wrong item).
+
+    Cancels the StarPets trade (stops delivery, frees the item) and marks the order
+    failed with a distinct reason ("Заказ отменён вручную"), so the auto-retry timer
+    won't recreate it and the badge is distinguishable from real delivery failures.
+    The money refund/decline is handled MANUALLY in the ggsel cabinet — there is no
+    ggsel refund API.
+    """
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            raise HTTPException(404, f"order {order_id} not found")
+
+        parts = []
+        trade_id = order.starpets_custom_id
+        if trade_id:
+            try:
+                await starpets.cancel_trade(trade_id, "change_mind_about_picking_up")
+                parts.append(f"трейд {trade_id} закрыт")
+            except httpx.HTTPStatusError as exc:
+                code = None
+                try:
+                    code = exc.response.json().get("code")
+                except Exception:
+                    pass
+                parts.append(
+                    f"⚠️ закрыть трейд {trade_id} не удалось "
+                    f"({exc.response.status_code} code={code})"
+                )
+            except Exception as e:
+                parts.append(f"⚠️ закрыть трейд {trade_id} ошибка: {str(e)[:80]}")
+
+        order.delivery_status = DeliveryStatus.failed
+        order.error_reason = "Заказ отменён вручную"
+        order.updated_at = datetime.utcnow()
+        order.last_redeliver_result = (
+            "🗑 " + "; ".join(parts + ["заказ отменён — оформите возврат/отказ на ggsel вручную"])
+        )
+        await db.commit()
+
+    print(f"[admin] order_id={order_id} cancelled: {order.last_redeliver_result}", flush=True)
     return _flash_redirect(request, order_id)
 
 

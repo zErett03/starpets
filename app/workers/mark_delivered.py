@@ -8,6 +8,15 @@ from app.clients.ggsel import ggsel_office
 
 
 async def mark_delivered(order_id: int) -> None:
+    """Finalize a delivered order.
+
+    NOTE: ggsel has NO "confirm delivery" API for auto/link-delivery offers. Once the
+    buyer pays and is redirected to the post-payment URL, ggsel completes the order on
+    its side automatically (status stays "Оплачен", payout is credited on ggsel's own
+    hold schedule). The previous POST /orders/{id}/deliveries/delivered call hit a
+    non-existent endpoint and always 404'd. So we only finalize locally and restock
+    the offer (a real v2 endpoint) so it stays sellable after the sale.
+    """
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Order).where(Order.id == order_id))
         order = result.scalar_one_or_none()
@@ -17,11 +26,14 @@ async def mark_delivered(order_id: int) -> None:
         result2 = await db.execute(select(Offer).where(Offer.id == order.offer_id))
         offer = result2.scalar_one_or_none()
 
-        await ggsel_office.mark_delivered(order.ggsel_order_id)
         order.delivery_status = DeliveryStatus.finalized
         order.ggsel_marked_delivered_at = datetime.utcnow()
         await db.commit()
-        print(f"[MarkDelivered] order_id={order_id} finalized", flush=True)
+        print(
+            f"[MarkDelivered] order_id={order_id} finalized "
+            f"(ggsel auto-completes auto-delivery; no confirm API call)",
+            flush=True,
+        )
 
         if offer and offer.ggsel_offer_id:
             try:
