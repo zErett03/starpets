@@ -1,8 +1,11 @@
+import asyncio
+
 import httpx
 
 from app.config import settings
 
 SELLER_OFFICE_V2_URL = settings.ggsel_base_url
+_GGSEL_RETRY_STATUS = frozenset({429, 502, 503, 504})
 
 
 class GgselSellerOfficeClient:
@@ -13,6 +16,19 @@ class GgselSellerOfficeClient:
             "Content-Type": "application/json",
             "Authorization": settings.ggsel_api_key,
         }
+
+    async def _request_retry(self, client, method, url, retries=3, **kwargs):
+        """Send request, retrying transient gateway errors (429/502/503/504) with backoff.
+        ggsel's gateway occasionally 502s under concurrent load; a couple of retries with
+        small backoff recovers almost all of them within the same run."""
+        resp = None
+        for attempt in range(retries + 1):
+            resp = await client.request(method, url, **kwargs)
+            if resp.status_code in _GGSEL_RETRY_STATUS and attempt < retries:
+                await asyncio.sleep(0.4 * (2 ** attempt))  # 0.4s, 0.8s, 1.6s
+                continue
+            return resp
+        return resp
 
     async def create_offer(
         self,
@@ -76,7 +92,7 @@ class GgselSellerOfficeClient:
         }
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.patch(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body)
+            resp = await self._request_retry(client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body)
             if not resp.is_success:
                 print(f"[patch_offer] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
@@ -145,8 +161,8 @@ class GgselSellerOfficeClient:
 
     async def set_post_payment_url(self, offer_id: int, url: str) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.patch(
-                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"post_payment_url": url},
             )
             resp.raise_for_status()
@@ -154,8 +170,8 @@ class GgselSellerOfficeClient:
 
     async def set_quantity(self, offer_id: int, quantity: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.patch(
-                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"quantity": quantity},
             )
             resp.raise_for_status()
@@ -163,8 +179,8 @@ class GgselSellerOfficeClient:
 
     async def update_price(self, offer_id: int, price: float) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.patch(
-                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"price": price},
             )
             resp.raise_for_status()
@@ -172,8 +188,8 @@ class GgselSellerOfficeClient:
 
     async def pause_offer(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.patch(
-                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"status": "paused"},
             )
             resp.raise_for_status()
@@ -206,8 +222,8 @@ class GgselSellerOfficeClient:
 
     async def pause_offer(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
-            resp = await client.patch(
-                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"status": "paused"},
             )
             print(f"[pause_offer] id={offer_id} status={resp.status_code} response={resp.text[:200]}", flush=True)
