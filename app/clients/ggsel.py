@@ -77,7 +77,8 @@ class GgselSellerOfficeClient:
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await client.patch(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body)
-            print(f"[patch_offer] status={resp.status_code} response={resp.text[:500]}", flush=True)
+            if not resp.is_success:
+                print(f"[patch_offer] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
@@ -97,7 +98,8 @@ class GgselSellerOfficeClient:
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await client.post(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options", json=body)
-            print(f"[create_option] status={resp.status_code} response={resp.text[:500]}", flush=True)
+            if not resp.is_success:
+                print(f"[create_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
