@@ -1,6 +1,6 @@
 import httpx
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from app.api.webhooks import router as webhooks_router
 from app.api.admin import router as admin_router
@@ -11,6 +11,38 @@ from app.config import settings
 app = FastAPI(title="starpets-layer")
 app.include_router(webhooks_router)
 app.include_router(admin_router)
+
+
+import base64 as _b64
+import secrets as _sec
+
+# Public paths (no operator auth): buyer delivery page, ggsel webhooks (authed by ?secret),
+# and health root. EVERYTHING ELSE (test-*, fix-*, sync-*, trigger-*, /admin, …) requires
+# the admin Basic Auth — closes the previously-public ops/test endpoints.
+_PUBLIC_EXACT = {"/", "/delivery"}
+_PUBLIC_PREFIXES = ("/hooks/",)
+
+
+@app.middleware("http")
+async def _require_operator_auth(request, call_next):
+    path = request.url.path
+    if path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+    auth = request.headers.get("authorization", "")
+    ok = False
+    if auth.startswith("Basic "):
+        try:
+            _user, _, _pw = _b64.b64decode(auth[6:]).decode("utf-8").partition(":")
+            ok = (
+                _sec.compare_digest(_user, settings.admin_user)
+                and bool(settings.admin_password)
+                and _sec.compare_digest(_pw, settings.admin_password)
+            )
+        except Exception:
+            ok = False
+    if not ok:
+        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="starpets-ops"'})
+    return await call_next(request)
 
 
 @app.get("/")
