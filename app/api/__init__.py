@@ -627,7 +627,8 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 <div class="step"><span class="num">5</span><span class="step-text">Бот примет запрос на трейд и в течение ~1 минуты добавит питомца в обмен — примите трейд</span></div>
                 <div class="step"><span class="num">6</span><span class="step-text">Готово! Проверьте инвентарь — питомец был передан вам 🤗</span></div>
             </div>
-            <p class="support">Если бот не добавил Вас в течение 5 минут — <a href="{support_url}" target="_blank" rel="noopener" class="steplink">обратитесь в чат поддержки</a></p>
+            <p class="support">Если в течение 5 минут бот не принял заявку в друзья — дождитесь завершения таймера с его перезапуском и проверьте статус запроса.</p>
+            <p class="support support-bottom">Остались вопросы? Обратитесь в <a href="{support_url}" target="_blank" rel="noopener" class="steplink">Чат поддержки</a></p>
         </div>"""
         extra_js = f"""
         (function() {{
@@ -721,6 +722,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
   .step-text {{ flex: 1; min-width: 0; }}
   .warn-top {{ margin-bottom: 20px; }}
   .support {{ font-size: 0.85rem; color: rgba(255,255,255,0.6); line-height: 1.5; margin-top: 2px; }}
+  .support-bottom {{ margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); }}
   .timer-box {{
     background: rgba(0,0,0,0.3);
     border-radius: 12px;

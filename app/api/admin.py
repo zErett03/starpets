@@ -162,6 +162,7 @@ tr:hover td{background:#161b2233}
 td{color:#c9d1d9}
 .badge{padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap;cursor:default}
 .col-err{white-space:normal;max-width:160px}
+.col-bot{max-width:120px;overflow:hidden;text-overflow:ellipsis}
 .actions{display:flex;flex-direction:column;gap:6px;width:168px;margin-left:auto}
 .actions .reissue{display:flex;flex-direction:column;gap:4px;margin-top:2px;padding-top:6px;border-top:1px dashed #30363d}
 .actions .row1{display:flex;gap:6px;margin:0}
@@ -312,7 +313,7 @@ def _order_row(o) -> str:
   <td>{_esc(o.starpets_status or "—")}</td>
   <td>{_esc(o.starpets_custom_id or "—")}</td>
   <td>{_esc(o.starpets_purchase_id or "—")}</td>
-  <td>{_esc(o.bot_name or "—")}</td>
+  <td class="col-bot" title="{_esc(o.bot_name or '')}">{_esc(o.bot_name or "—")}</td>
   <td class="col-err">{_err_badge(o.error_reason or "")}</td>
   <td>
     <div class="actions">
