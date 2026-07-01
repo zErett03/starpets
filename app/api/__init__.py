@@ -1300,6 +1300,53 @@ async def _run_fix_webhooks():
     print(f"[FixWebhooks] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
 
 
+@app.get("/fix-descriptions")
+async def fix_descriptions():
+    import asyncio
+    asyncio.create_task(_run_fix_descriptions())
+    return {"started": True}
+
+
+async def _run_fix_descriptions():
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+    from app.workers.offer_creator import _build_description
+
+    async with AsyncSessionLocal() as db:
+        offers = (await db.execute(
+            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
+        )).scalars().all()
+
+    total = len(offers)
+    print(f"[FixDescriptions] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
+    counters = {"updated": 0, "errors": 0}
+    sem = asyncio.Semaphore(settings.sync_concurrency)
+
+    async def _fix(offer):
+        async with sem:
+            try:
+                desc_ru, desc_en, instr_ru, instr_en = _build_description(offer)
+                await ggsel_office.update_content(
+                    offer.ggsel_offer_id, desc_ru, desc_en, instr_ru, instr_en
+                )
+                counters["updated"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[FixDescriptions] ggsel_offer_id={offer.ggsel_offer_id} error: {e}", flush=True)
+
+    for i in range(0, total, 500):
+        await asyncio.gather(*[_fix(o) for o in offers[i:i + 500]])
+        print(
+            f"[FixDescriptions] progress {min(i + 500, total)}/{total} "
+            f"updated={counters['updated']} errors={counters['errors']}",
+            flush=True,
+        )
+
+    print(f"[FixDescriptions] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
+
+
 @app.get("/create-offers")
 async def create_offers():
     from sqlalchemy import select

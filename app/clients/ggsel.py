@@ -98,6 +98,23 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_content(self, offer_id: int, description_ru: str, description_en: str,
+                             instructions_ru: str, instructions_en: str) -> dict:
+        body = {
+            "description_ru": description_ru,
+            "description_en": description_en,
+            "instructions_ru": instructions_ru,
+            "instructions_en": instructions_en,
+        }
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body
+            )
+            if not resp.is_success:
+                print(f"[update_content] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
     async def create_option(self, offer_id: int) -> dict:
         body = {
             "options": [

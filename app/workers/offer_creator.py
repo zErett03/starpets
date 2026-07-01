@@ -41,6 +41,11 @@ def _resolve_category(item_type: str | None, rare: str | None) -> int | None:
     return _TYPE_CATEGORY.get(t)
 
 
+_INSTRUCTIONS_RU = '⚠️ После оплаты у тебя будет ~10 минут на принятие трейда у бота. Запускай игру до оплаты заказа ⚠️\n\n🌸Инструкция по получению:\n\n1. После оплаты откроется страница с заказом и инструкцией\n2. Добавь бота в друзья на сайте Roblox (запрос примется через ~1 минуту)\n3. Обнови страницу профиля. Нажми на кнопку "Join"\n4. После подключения к серверу с ботом, найди его в списке друзей и телепортируйся к нему\n5. Нажми на бота → кнопка Trade (если занят — дождись своей очереди)\n6. Бот примет запрос на трейд и добавит предмет в течение ~1 минуты\n7. Прими трейд\n8. Готово! Проверь свой инвентарь ;)\n_____________________________________________\n\n⚠️ Не пытайтесь телепортироваться к боту до нажатия кнопки Join на странице профиля бота\n⚠️ Если бот не принял запрос в друзья в течение ~5-ти минут — дождитесь окончания и перезапуска таймера, после чего повторите попытку\n⚠️ Если указали неверный логин при оформлении — обратитесь в чат поддержки на странице заказа, мы поможем :)\n⚠️ Если таймер на странице заказа истёк — дождитесь его обновления и повторите весь процесс сначала\n\n🌸Если у тебя возникли вопросы или столкнулись с проблемами — обращайся в чат поддержки на странице с заказом, мы всегда готовы Вам помочь! 🤗'
+
+_INSTRUCTIONS_EN = '⚠️ After payment you\'ll have ~10 minutes to accept the trade from the bot. Launch the game BEFORE paying for the order ⚠️\n\n🌸 How to receive your item:\n\n1. After payment, the order page with instructions will open\n2. Add the bot as a friend on the Roblox website (the request is accepted in ~1 minute)\n3. Refresh the profile page. Click the "Join" button\n4. Once you\'ve connected to the bot\'s server, find it in your friends list and teleport to it\n5. Click on the bot → "Trade" button (if it\'s busy, wait for your turn)\n6. The bot will accept the trade request and add the item within ~1 minute\n7. Accept the trade\n8. Done! Check your inventory ;)\n_____________________________________________\n\n⚠️ Do not try to teleport to the bot before clicking the "Join" button on the bot\'s profile page\n⚠️ If the bot hasn\'t accepted your friend request within ~5 minutes, wait for the timer to finish and restart, then try again\n⚠️ If you entered the wrong login at checkout, contact the support chat on your order page and we\'ll help :)\n⚠️ If the timer on the order page has expired, wait for it to refresh and repeat the whole process from the start\n\n🌸 If you have any questions or run into any problems, reach out to the support chat on your order page — we\'re always glad to help! 🤗'
+
+
 def _build_description(offer: Offer) -> tuple[str, str, str, str]:
     parts_ru = [f"Питомец: {offer.name}"]
     parts_en = [f"Pet: {offer.name}"]
@@ -61,10 +66,12 @@ def _build_description(offer: Offer) -> tuple[str, str, str, str]:
         parts_ru.append(f"Возраст: {offer.age}")
         parts_en.append(f"Age: {offer.age}")
 
-    desc_ru = "\n".join(parts_ru)
-    desc_en = "\n".join(parts_en)
-    instructions_ru = "ВАЖНО: После оплаты у вас будет 5 минут для получения предмета. Шаги: 1) Откройте страницу после оплаты — там появится имя бота. 2) Добавьте бота в друзья на Roblox. 3) Зайдите в Adopt Me. 4) Найдите бота в друзьях, телепортируйтесь к нему. 5) Примите трейд. Будьте готовы ПЕРЕД покупкой: откройте Roblox и Adopt Me заранее."
-    instructions_en = "IMPORTANT: You have 5 minutes after payment to receive the item. Steps: 1) Open the page after payment — the bot name will appear. 2) Add the bot as a friend on Roblox. 3) Join Adopt Me. 4) Find the bot in friends, teleport to it. 5) Accept the trade. Be ready BEFORE purchase: open Roblox and Adopt Me in advance."
+    # Put the receiving instructions into the DESCRIPTION too (shown BEFORE purchase),
+    # not only in instructions (shown after payment), so buyers see the process upfront.
+    desc_ru = "\n".join(parts_ru) + "\n\n" + _INSTRUCTIONS_RU
+    desc_en = "\n".join(parts_en) + "\n\n" + _INSTRUCTIONS_EN
+    instructions_ru = _INSTRUCTIONS_RU
+    instructions_en = _INSTRUCTIONS_EN
     return desc_ru, desc_en, instructions_ru, instructions_en
 
 
