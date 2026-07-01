@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Price-sync parallelism: how many offers to process concurrently. Higher = faster
     # sync but more load / risk of 429 from StarPets/ggsel. Tune via env SYNC_CONCURRENCY.
     sync_concurrency: int = 10
+    # Per-offer price-sync logging. False (default) logs only progress + final summary
+    # + errors (keeps Railway logs clean). Set SYNC_LOG_VERBOSE=true to see every offer.
+    sync_log_verbose: bool = False
     min_price_rub: float = 100.0
     starpets_category_id: int = 0
 

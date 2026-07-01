@@ -1047,7 +1047,8 @@ async def _run_sync_prices():
                                 await ggsel_office.pause_offer(ggsel_id)
                                 pause_ids.append(offer_id)
                                 counters["paused"] += 1
-                                print(f"[SyncPrices] paused ggsel_id={ggsel_id} name={name!r}", flush=True)
+                                if settings.sync_log_verbose:
+                                    print(f"[SyncPrices] paused ggsel_id={ggsel_id} name={name!r}", flush=True)
                             except Exception as e:
                                 counters["errors"] += 1
                                 print(f"[SyncPrices] pause error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
@@ -1070,11 +1071,12 @@ async def _run_sync_prices():
                     await ggsel_office.update_price(ggsel_id, new_rub)
                     price_updates.append((offer_id, price_usd, new_rub))
                     counters["updated"] += 1
-                    print(
-                        f"[SyncPrices] updated ggsel_id={ggsel_id} name={name!r} "
-                        f"old_rub={current_rub} → new_rub={new_rub} price_usd={price_usd}",
-                        flush=True,
-                    )
+                    if settings.sync_log_verbose:
+                        print(
+                            f"[SyncPrices] updated ggsel_id={ggsel_id} name={name!r} "
+                            f"old_rub={current_rub} → new_rub={new_rub} price_usd={price_usd}",
+                            flush=True,
+                        )
                 except Exception as e:
                     counters["errors"] += 1
                     print(f"[SyncPrices] error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
