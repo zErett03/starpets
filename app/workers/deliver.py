@@ -7,7 +7,7 @@ from app.db import AsyncSessionLocal
 from app.db.models import Order, Offer, DeliveryStatus
 from app.clients.starpets import starpets
 from app.config import settings
-from app.fx import get_usd_rub
+from app.fx import get_usd_rub, item_cost_ok
 
 _BUY_MAX_RETRIES = 3
 
@@ -15,7 +15,7 @@ _BUY_MAX_RETRIES = 3
 async def _buy_with_retry(
     item_id: str,
     price_usd: float,
-    offer_price_rub: float,
+    sale_price_rub: float,
 ) -> tuple[str, float]:
     """Buy item, retrying up to 3x on code=330 (PRICES_HAVE_CHANGED).
 
@@ -56,18 +56,19 @@ async def _buy_with_retry(
                 raise exc
 
             fx_rate = await get_usd_rub()
-            new_price_rub = new_price_usd * settings.markup * fx_rate
+            ok, new_cost_rub = item_cost_ok(new_price_usd, fx_rate, sale_price_rub, settings.max_cost_ratio)
 
             print(
                 f"[Buy] code=330 PRICES_HAVE_CHANGED attempt={attempt}/{_BUY_MAX_RETRIES} "
                 f"item_id={current_id} old_usd={current_price} new_usd={new_price_usd} "
-                f"new_rub={new_price_rub:.2f} offer_rub={offer_price_rub}",
+                f"new_cost_rub={new_cost_rub:.2f} sale_rub={sale_price_rub} ratio={settings.max_cost_ratio}",
                 flush=True,
             )
 
-            if new_price_rub > offer_price_rub:
+            if not ok:
                 print(
-                    f"[Buy] price_too_high: {new_price_rub:.2f} > {offer_price_rub} — aborting",
+                    f"[Buy] price_too_high: cost {new_cost_rub:.2f} > "
+                    f"{settings.max_cost_ratio}×{sale_price_rub} — aborting",
                     flush=True,
                 )
                 raise RuntimeError("price_too_high")
@@ -101,6 +102,8 @@ async def deliver_order(order_id: int) -> None:
 
         roblox_username = order.roblox_username or ""
         offer_price_rub = float(offer.price_rub or 0)
+        # what we actually receive for this order (buyer's payment; fallback to listed price)
+        sale_rub = float(order.amount_rub or offer.price_rub or 0)
         print(
             f"[Deliver] start order_id={order_id} offer_id={offer.id} "
             f"product_id={product_id} roblox_username={roblox_username!r}",
@@ -148,10 +151,27 @@ async def deliver_order(order_id: int) -> None:
             price_usd = float(top_item.get("price_usd") or 0)
             print(f"[Deliver] top_item id={item_id} price_usd={price_usd}", flush=True)
 
+            # 1b. Profitability guard — never buy at a loss. The offer price is only
+            # refreshed every ~30 min, so between syncs the live floor can spike above it.
+            fx_rate = await get_usd_rub()
+            ok, cost_rub = item_cost_ok(price_usd, fx_rate, sale_rub, settings.max_cost_ratio)
+            if not ok:
+                order.delivery_status = DeliveryStatus.failed
+                order.error_reason = "price_too_high"
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(
+                    f"[Deliver] order_id={order_id} BLOCKED unprofitable: "
+                    f"cost_rub={cost_rub:.2f} > {settings.max_cost_ratio}×{sale_rub} "
+                    f"(price_usd={price_usd} fx={fx_rate})",
+                    flush=True,
+                )
+                return
+
             # 2. Buy the item (with retry on code=330 PRICES_HAVE_CHANGED)
             try:
                 purchased_item_id, exec_price = await _buy_with_retry(
-                    item_id, price_usd, offer_price_rub
+                    item_id, price_usd, sale_rub
                 )
             except RuntimeError as e:
                 if str(e) == "price_too_high":

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     admin_password: str = ""
 
     markup: float = 1.20
+    # Profitability guard: refuse to buy an item whose live cost (raw price × FX, no
+    # markup) exceeds this fraction of the sale price. 0.9 = never spend >90% of what the
+    # buyer paid on the item, leaving ≥10% for ggsel commission + margin. Protects against
+    # unprofitable trades when the live floor spiked above our (30-min-stale) offer price.
+    max_cost_ratio: float = 0.9
     min_price_rub: float = 100.0
     starpets_category_id: int = 0
 

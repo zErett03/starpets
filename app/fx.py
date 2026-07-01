@@ -28,6 +28,22 @@ async def get_usd_rub() -> float:
         raise RuntimeError("FX rate unavailable") from e
 
 
+def item_cost_ok(price_usd: float, fx_rate: float, sale_price_rub: float, max_cost_ratio: float):
+    """Profitability guard. Returns (ok, raw_cost_rub).
+
+    raw_cost_rub = live item price in RUB WITHOUT markup (the money we actually spend).
+    ok = raw_cost_rub <= sale_price_rub * max_cost_ratio. ok=False means the deal would
+    be unprofitable (live cost too high vs the price the buyer paid)."""
+    try:
+        raw_cost_rub = float(price_usd) * float(fx_rate)
+        sale = float(sale_price_rub or 0)
+    except (TypeError, ValueError):
+        return False, 0.0
+    if sale <= 0:
+        return False, raw_cost_rub  # unknown sale price -> refuse (safe)
+    return raw_cost_rub <= sale * float(max_cost_ratio), raw_cost_rub
+
+
 def calc_price_rub(price_usd: float, markup: float, fx_rate: float) -> float:
     from app.config import settings
 

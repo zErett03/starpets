@@ -108,6 +108,7 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         _product_id = offer.starpets_product_id
         _offer_name = offer.name
         _starpets_qty = offer.starpets_qty
+        _offer_price_rub = float(offer.price_rub or 0)
 
     # Live availability check — don't rely on stale starpets_qty from DB (updated every 30 min)
     if _product_id:
@@ -116,6 +117,18 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         if _top is None:
             print(f"[precheck] live check: no items for product_id={_product_id} offer={_offer_name!r}", flush=True)
             return {"error": "Товар временно недоступен"}
+        # Profitability guard — block the sale if the live floor spiked above our (stale)
+        # offer price, so the buyer never pays for an order we'd fulfil at a loss.
+        from app.fx import get_usd_rub, item_cost_ok
+        _fx = await get_usd_rub()
+        _ok, _cost = item_cost_ok(float(_top.get("price_usd") or 0), _fx, _offer_price_rub, settings.max_cost_ratio)
+        if not _ok:
+            print(
+                f"[precheck] BLOCKED unprofitable id_i={id_i} product_id={_product_id} "
+                f"cost_rub={_cost:.2f} > {settings.max_cost_ratio}×{_offer_price_rub} offer={_offer_name!r}",
+                flush=True,
+            )
+            return {"error": "Товар временно недоступен — идёт обновление цены, попробуйте позже"}
     elif _starpets_qty == 0:
         return {"error": "Товар временно недоступен"}
 
