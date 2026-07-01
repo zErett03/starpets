@@ -1266,38 +1266,38 @@ async def _run_fix_webhooks():
         offer_ids = [r[0] for r in result.all()]
 
     total = len(offer_ids)
-    print(f"[FixWebhooks] starting — {total} offers", flush=True)
+    print(f"[FixWebhooks] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
 
-    updated = skipped = errors = 0
     secret = settings.webhook_shared_secret
-    for i, gid in enumerate(offer_ids, 1):
-        try:
-            current = await ggsel_office.get_offer(gid)
-            precheck_url = (current.get("pre_payment_settings") or {}).get("url") or ""
-            notif_url = (current.get("notification_settings") or {}).get("url") or ""
-            if secret in precheck_url and secret in notif_url:
-                skipped += 1
-                continue
-        except Exception:
-            pass  # GET failed — proceed with PATCH anyway
+    counters = {"updated": 0, "errors": 0}
+    sem = asyncio.Semaphore(settings.sync_concurrency)
 
-        try:
-            await ggsel_office.patch_offer(
-                offer_id=gid,
-                precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={secret}",
-                notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={secret}",
-            )
-            updated += 1
-        except Exception as e:
-            print(f"[FixWebhooks] ggsel_offer_id={gid} error: {e}", flush=True)
-            errors += 1
+    async def _fix(gid):
+        async with sem:
+            try:
+                await ggsel_office.patch_offer(
+                    offer_id=gid,
+                    precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={secret}",
+                    notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={secret}",
+                )
+                counters["updated"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[FixWebhooks] ggsel_offer_id={gid} error: {e}", flush=True)
 
-        if i % 100 == 0:
-            print(f"[FixWebhooks] progress {i}/{total} updated={updated} skipped={skipped} errors={errors}", flush=True)
+    # Concurrent PATCH (bounded by SYNC_CONCURRENCY). We patch every offer directly — for a
+    # secret rotation all URLs must change anyway — dropping the per-offer get_offer check
+    # (it was also broken: ggsel wraps the offer in "data", so the skip never triggered).
+    for chunk_start in range(0, total, 500):
+        chunk = offer_ids[chunk_start:chunk_start + 500]
+        await asyncio.gather(*[_fix(gid) for gid in chunk])
+        print(
+            f"[FixWebhooks] progress {min(chunk_start + 500, total)}/{total} "
+            f"updated={counters['updated']} errors={counters['errors']}",
+            flush=True,
+        )
 
-        await asyncio.sleep(0.3)
-
-    print(f"[FixWebhooks] done — updated={updated} skipped={skipped} errors={errors} total={total}", flush=True)
+    print(f"[FixWebhooks] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
 
 
 @app.get("/create-offers")
