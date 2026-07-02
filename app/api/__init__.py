@@ -1407,6 +1407,83 @@ async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
     )
 
 
+@app.get("/debug-options")
+async def debug_options(ggsel_offer_id: int):
+    """Dump the raw options JSON for one offer (to inspect the checkbox/variant structure)."""
+    try:
+        data = await ggsel_office.get_options(ggsel_offer_id)
+        return {"ggsel_offer_id": ggsel_offer_id, "options": data}
+    except Exception as e:
+        return {"ggsel_offer_id": ggsel_offer_id, "error": str(e)}
+
+
+@app.get("/remove-consent-option")
+async def remove_consent_option(limit: int = 0, ggsel_offer_id: int = 0, active_only: bool = False):
+    """Remove the (broken) consent option from offers so checkout works again.
+    ?active_only=true  -> only currently-active offers (the live, blocked ones) first
+    ?ggsel_offer_id=N  -> single card
+    ?limit=N           -> first N. Idempotent: offers without it are skipped."""
+    import asyncio
+    asyncio.create_task(_run_remove_consent_option(limit, ggsel_offer_id, active_only))
+    return {"started": True, "limit": limit, "ggsel_offer_id": ggsel_offer_id, "active_only": active_only}
+
+
+async def _run_remove_consent_option(limit: int = 0, ggsel_offer_id: int = 0, active_only: bool = False):
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.clients.ggsel import _CONSENT_TITLE_RU
+
+    async with AsyncSessionLocal() as db:
+        q = select(Offer).where(Offer.ggsel_offer_id.isnot(None))
+        if active_only:
+            q = q.where(Offer.status == OfferStatus.active)
+        offers = (await db.execute(q)).scalars().all()
+
+    if ggsel_offer_id:
+        offers = [o for o in offers if o.ggsel_offer_id == ggsel_offer_id]
+    elif limit and limit > 0:
+        offers = offers[:limit]
+
+    total = len(offers)
+    conc = min(settings.sync_concurrency, 4)
+    print(f"[RemoveConsent] starting — {total} offers active_only={active_only} concurrency={conc}", flush=True)
+    counters = {"removed": 0, "skipped": 0, "errors": 0}
+    sem = asyncio.Semaphore(conc)
+
+    async def _rm(offer):
+        async with sem:
+            try:
+                data = await ggsel_office.get_options(offer.ggsel_offer_id)
+                opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+                ids = [
+                    o.get("id") for o in opts
+                    if (o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU and o.get("id") is not None
+                ]
+                if not ids:
+                    counters["skipped"] += 1
+                    return
+                await ggsel_office.delete_options(offer.ggsel_offer_id, ids)
+                counters["removed"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[RemoveConsent] ggsel_offer_id={offer.ggsel_offer_id} error: {e}", flush=True)
+
+    for i in range(0, total, 500):
+        await asyncio.gather(*[_rm(o) for o in offers[i:i + 500]])
+        print(
+            f"[RemoveConsent] progress {min(i + 500, total)}/{total} "
+            f"removed={counters['removed']} skipped={counters['skipped']} errors={counters['errors']}",
+            flush=True,
+        )
+    print(
+        f"[RemoveConsent] done — removed={counters['removed']} skipped={counters['skipped']} "
+        f"errors={counters['errors']} total={total}",
+        flush=True,
+    )
+
+
 @app.get("/activate-batch")
 async def activate_batch(limit: int = 0, max_price_rub: float = 0, dry_run: bool = False):
     """Activate a controlled batch of PAUSED offers with a live StarPets stock check.
