@@ -153,11 +153,57 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def create_consent_option(self, offer_id: int) -> dict:
-        """Add the mandatory pre-purchase consent checkbox to an offer.
+    async def _consent_option_id(self, offer_id: int) -> int | None:
+        """Return the id of the consent checkbox option on this offer (matched by title),
+        or None. Used to attach a variant right after creating the option."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+        for o in opts:
+            if (o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU and o.get("id") is not None:
+                return o.get("id")
+        return None
 
-        Buyer must tick it before they can pay, so nobody can claim they didn't
-        know about the 10-minute accept window."""
+    async def add_option_variant(self, offer_id: int, option_id: int) -> dict:
+        """Attach the single 'Подтверждаю' variant to a consent checkbox option
+        (ggsel rejects `variants` on option creation — variants have their own endpoint)."""
+        body = {
+            "variants": [
+                {
+                    "title_ru": "Подтверждаю",
+                    "title_en": "Confirm",
+                    "price": 0,
+                    "discount_type": "fixed",
+                    "impact_type": "increase",
+                    "is_default": False,
+                    "status": "active",
+                    "position": 0,
+                }
+            ]
+        }
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST",
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options/{option_id}/variants",
+                json=body,
+            )
+            if not resp.is_success:
+                print(f"[add_option_variant] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception:
+                return {"ok": True}
+
+    async def create_consent_option(self, offer_id: int) -> dict:
+        """Add the mandatory pre-purchase consent checkbox in TWO steps:
+          1) create the check_box option (WITHOUT variants — ggsel 422s otherwise),
+          2) attach its single 'Подтверждаю' variant via the variants endpoint.
+        Without a variant the checkbox renders as a label with no tickable box."""
         body = {
             "options": [
                 {
@@ -167,18 +213,6 @@ class GgselSellerOfficeClient:
                     "is_required": True,
                     "is_price_modifier_hidden": True,
                     "position": 2,
-                    "variants": [
-                        {
-                            "title_ru": "Подтверждаю",
-                            "title_en": "Confirm",
-                            "price": 0.0,
-                            "position": 0,
-                            "status": "active",
-                            "discount_type": "fixed",
-                            "impact_type": "increase",
-                            "is_default": False,
-                        }
-                    ],
                 }
             ]
         }
@@ -189,7 +223,11 @@ class GgselSellerOfficeClient:
             if not resp.is_success:
                 print(f"[create_consent_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
-            return resp.json()
+
+        option_id = await self._consent_option_id(offer_id)
+        if option_id is None:
+            raise RuntimeError(f"consent option created but id not found offer_id={offer_id}")
+        return await self.add_option_variant(offer_id, option_id)
 
     async def has_consent_option(self, offer_id: int) -> bool:
         """True if the consent checkbox is already present (idempotency guard so a
