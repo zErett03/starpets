@@ -174,8 +174,14 @@ class GgselSellerOfficeClient:
 
     async def has_consent_option(self, offer_id: int) -> bool:
         """True if the consent checkbox is already present (idempotency guard so a
-        re-run doesn't add a duplicate)."""
-        data = await self.get_options(offer_id)
+        re-run doesn't add a duplicate). Uses the retrying request helper so a
+        transient 503 on the check doesn't count as a hard error."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
+            )
+            resp.raise_for_status()
+            data = resp.json()
         opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
         for o in opts:
             if (o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU:

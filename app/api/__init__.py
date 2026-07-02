@@ -1375,9 +1375,10 @@ async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
         offers = offers[:limit]
 
     total = len(offers)
-    print(f"[AddConsent] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
+    conc = min(settings.sync_concurrency, 4)  # 2 requests/offer (GET+POST) — keep gentle on ggsel gateway
+    print(f"[AddConsent] starting — {total} offers (concurrency={conc})", flush=True)
     counters = {"added": 0, "skipped": 0, "errors": 0}
-    sem = asyncio.Semaphore(settings.sync_concurrency)
+    sem = asyncio.Semaphore(conc)
 
     async def _add(offer):
         async with sem:
