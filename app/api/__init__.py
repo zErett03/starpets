@@ -1407,6 +1407,123 @@ async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
     )
 
 
+@app.get("/activate-batch")
+async def activate_batch(limit: int = 0, max_price_rub: float = 0, dry_run: bool = False):
+    """Activate a controlled batch of PAUSED offers with a live StarPets stock check.
+    ?limit=N            -> at most N offers (cheapest first)
+    ?max_price_rub=X    -> only offers listed at <= X rub
+    ?dry_run=true       -> only report what WOULD activate, change nothing
+    Only activates offers that are (a) in stock on StarPets right now and (b) still
+    profitable at the listed price. Works regardless of maintenance mode."""
+    import asyncio
+    asyncio.create_task(_run_activate_batch(limit, max_price_rub, dry_run))
+    return {"started": True, "limit": limit, "max_price_rub": max_price_rub, "dry_run": dry_run}
+
+
+async def _run_activate_batch(limit: int = 0, max_price_rub: float = 0.0, dry_run: bool = False):
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+    from app.fx import get_usd_rub, item_cost_ok
+
+    async with AsyncSessionLocal() as db:
+        q = select(Offer).where(
+            Offer.ggsel_offer_id.isnot(None),
+            Offer.status == OfferStatus.paused,
+            Offer.starpets_product_id.isnot(None),
+            Offer.price_rub > 0,
+        )
+        if max_price_rub and max_price_rub > 0:
+            q = q.where(Offer.price_rub <= max_price_rub)
+        q = q.order_by(Offer.price_rub.asc())
+        if limit and limit > 0:
+            q = q.limit(limit)
+        offers = (await db.execute(q)).scalars().all()
+        snap = [
+            (o.id, o.ggsel_offer_id, str(o.starpets_product_id), o.name, float(o.price_rub or 0))
+            for o in offers
+        ]
+
+    total = len(snap)
+    fx_rate = await get_usd_rub()
+    print(
+        f"[ActivateBatch] candidates={total} max_price_rub={max_price_rub} "
+        f"dry_run={dry_run} fx={fx_rate} concurrency={settings.sync_concurrency}",
+        flush=True,
+    )
+
+    counters = {"in_stock": 0, "no_stock": 0, "unprofitable": 0, "errors": 0}
+    to_activate: list[tuple[int, int, str, float]] = []   # (offer_id, ggsel_id, name, price_usd)
+    sem = asyncio.Semaphore(settings.sync_concurrency)
+
+    async def _check(http, rec):
+        offer_id, ggsel_id, product_id, name, price_rub = rec
+        async with sem:
+            try:
+                top = await starpets.get_top_item(http, product_id)
+                if not top:
+                    counters["no_stock"] += 1
+                    return
+                price_usd = float(top.get("price_usd") or 0)
+                ok, cost_rub = item_cost_ok(price_usd, fx_rate, price_rub, settings.max_cost_ratio)
+                if not ok:
+                    counters["unprofitable"] += 1
+                    return
+                counters["in_stock"] += 1
+                to_activate.append((offer_id, ggsel_id, name, price_usd))
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[ActivateBatch] check error ggsel_id={ggsel_id} name={name!r}: {e}", flush=True)
+
+    _limits = httpx.Limits(max_connections=settings.sync_concurrency + 5)
+    async with httpx.AsyncClient(timeout=15, limits=_limits) as http:
+        for i in range(0, total, 500):
+            await asyncio.gather(*[_check(http, r) for r in snap[i:i + 500]])
+            print(
+                f"[ActivateBatch] checked {min(i + 500, total)}/{total} "
+                f"in_stock={counters['in_stock']} no_stock={counters['no_stock']} "
+                f"unprofitable={counters['unprofitable']} errors={counters['errors']}",
+                flush=True,
+            )
+
+    if dry_run:
+        print(
+            f"[ActivateBatch] DRY RUN — would activate {len(to_activate)} offers "
+            f"(in_stock={counters['in_stock']} no_stock={counters['no_stock']} "
+            f"unprofitable={counters['unprofitable']} errors={counters['errors']}); no changes made",
+            flush=True,
+        )
+        return
+
+    activated = 0
+    act_errors = 0
+    for i in range(0, len(to_activate), 100):
+        batch = to_activate[i:i + 100]
+        gids = [t[1] for t in batch]
+        oids = [t[0] for t in batch]
+        try:
+            await ggsel_office.batch_activate(gids)
+            async with AsyncSessionLocal() as db:
+                rows = (await db.execute(select(Offer).where(Offer.id.in_(oids)))).scalars().all()
+                for o in rows:
+                    o.status = OfferStatus.active
+                await db.commit()
+            activated += len(batch)
+            print(f"[ActivateBatch] activated {activated}/{len(to_activate)}", flush=True)
+        except Exception as e:
+            act_errors += len(batch)
+            print(f"[ActivateBatch] activate batch error: {e}", flush=True)
+        await asyncio.sleep(0.5)
+
+    print(
+        f"[ActivateBatch] done — activated={activated} act_errors={act_errors} "
+        f"in_stock={counters['in_stock']} no_stock={counters['no_stock']} "
+        f"unprofitable={counters['unprofitable']} check_errors={counters['errors']} candidates={total}",
+        flush=True,
+    )
+
+
 @app.get("/create-offers")
 async def create_offers():
     from sqlalchemy import select
