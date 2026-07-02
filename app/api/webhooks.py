@@ -46,7 +46,11 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
 
         roblox_username = None
         for opt in options:
-            val = (opt.get("value") or "").strip()
+            # Only the free-text field carries the Roblox username; skip checkbox/radio
+            # consent options (they send an int variant-id as "value").
+            if opt.get("type") != "text":
+                continue
+            val = str(opt.get("value") or "").strip()
             if val:
                 roblox_username = val
                 break
@@ -218,7 +222,9 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
 
         if not roblox_username:
             for opt in options:
-                val = (opt.get("value") or "").strip()
+                if opt.get("type") != "text":
+                    continue  # skip checkbox/radio consent options
+                val = str(opt.get("value") or "").strip()
                 if val:
                     roblox_username = val
                     break

@@ -1407,6 +1407,70 @@ async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
     )
 
 
+@app.get("/fix-consent-option")
+async def fix_consent_option(limit: int = 0, ggsel_offer_id: int = 0, active_only: bool = False):
+    """Put the CORRECT consent checkbox (with variant) on offers, cleaning up any old/broken one.
+    ?active_only=true  -> only currently-active offers first
+    ?ggsel_offer_id=N  -> single card (smoke test)
+    ?limit=N           -> first N. Idempotent: offers already correct are skipped."""
+    import asyncio
+    asyncio.create_task(_run_fix_consent_option(limit, ggsel_offer_id, active_only))
+    return {"started": True, "limit": limit, "ggsel_offer_id": ggsel_offer_id, "active_only": active_only}
+
+
+async def _run_fix_consent_option(limit: int = 0, ggsel_offer_id: int = 0, active_only: bool = False):
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        q = select(Offer).where(Offer.ggsel_offer_id.isnot(None))
+        if active_only:
+            q = q.where(Offer.status == OfferStatus.active)
+        offers = (await db.execute(q)).scalars().all()
+
+    if ggsel_offer_id:
+        offers = [o for o in offers if o.ggsel_offer_id == ggsel_offer_id]
+    elif limit and limit > 0:
+        offers = offers[:limit]
+
+    total = len(offers)
+    conc = min(settings.sync_concurrency, 4)  # up to 3 requests/offer (GET+DELETE+POST)
+    print(f"[FixConsent] starting — {total} offers active_only={active_only} concurrency={conc}", flush=True)
+    counters = {"fixed": 0, "skipped": 0, "errors": 0}
+    sem = asyncio.Semaphore(conc)
+
+    async def _fix(offer):
+        gid = offer.ggsel_offer_id
+        async with sem:
+            try:
+                has_correct, stale_ids = await ggsel_office.consent_option_state(gid)
+                if stale_ids:
+                    await ggsel_office.delete_options(gid, stale_ids)
+                if has_correct:
+                    counters["skipped"] += 1
+                    return
+                await ggsel_office.create_consent_option(gid)
+                counters["fixed"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[FixConsent] ggsel_offer_id={gid} error: {type(e).__name__}: {e!r}", flush=True)
+
+    for i in range(0, total, 500):
+        await asyncio.gather(*[_fix(o) for o in offers[i:i + 500]])
+        print(
+            f"[FixConsent] progress {min(i + 500, total)}/{total} "
+            f"fixed={counters['fixed']} skipped={counters['skipped']} errors={counters['errors']}",
+            flush=True,
+        )
+    print(
+        f"[FixConsent] done — fixed={counters['fixed']} skipped={counters['skipped']} "
+        f"errors={counters['errors']} total={total}",
+        flush=True,
+    )
+
+
 @app.get("/debug-options")
 async def debug_options(ggsel_offer_id: int):
     """Dump the raw options JSON for one offer (to inspect the checkbox/variant structure)."""

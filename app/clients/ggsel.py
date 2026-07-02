@@ -8,7 +8,15 @@ SELLER_OFFICE_V2_URL = settings.ggsel_base_url
 _GGSEL_RETRY_STATUS = frozenset({429, 502, 503, 504})
 
 
-_CONSENT_TITLE_RU = "Я понимаю, что должен принять трейд в течение 10 минут с момента оплаты заказа"
+# Current (correct) consent-checkbox title — buyer must tick it before paying.
+_CONSENT_TITLE_RU = "Я подтверждаю, что ознакомился с описанием товара перед его оплатой"
+_CONSENT_TITLE_EN = "I confirm that I have read the product description before paying"
+# Every consent-checkbox title we've ever created — used to find & clean up OUR options
+# (including the earlier broken, variant-less version) before re-adding the correct one.
+_CONSENT_TITLES_ALL = {
+    _CONSENT_TITLE_RU,
+    "Я понимаю, что должен принять трейд в течение 10 минут с момента оплаты заказа",
+}
 
 class GgselSellerOfficeClient:
     """Seller Office API v2 — создание офферов, управление, доставка."""
@@ -155,11 +163,22 @@ class GgselSellerOfficeClient:
                 {
                     "type": "check_box",
                     "title_ru": _CONSENT_TITLE_RU,
-                    "title_en": "I understand I must accept the trade within 10 minutes of payment",
-                    "comment_ru": "Обязательно к подтверждению перед покупкой",
-                    "comment_en": "Must be confirmed before purchase",
+                    "title_en": _CONSENT_TITLE_EN,
                     "is_required": True,
+                    "is_price_modifier_hidden": True,
                     "position": 2,
+                    "variants": [
+                        {
+                            "title_ru": "Подтверждаю",
+                            "title_en": "Confirm",
+                            "price": 0.0,
+                            "position": 0,
+                            "status": "active",
+                            "discount_type": "fixed",
+                            "impact_type": "increase",
+                            "is_default": False,
+                        }
+                    ],
                 }
             ]
         }
@@ -187,6 +206,35 @@ class GgselSellerOfficeClient:
             if (o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU:
                 return True
         return False
+
+    async def consent_option_state(self, offer_id: int) -> tuple[bool, list[int]]:
+        """Inspect an offer's options in one call. Returns (has_correct, stale_ids):
+          has_correct — a proper consent check_box (our title + >=1 variant) is present;
+          stale_ids   — ids of ANY of our consent options that are broken/old (variant-less
+                        or the old title) and must be deleted before (re)creating the good one."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+        has_correct = False
+        stale_ids: list[int] = []
+        for o in opts:
+            title = (o.get("title_ru") or "").strip()
+            if title not in _CONSENT_TITLES_ALL:
+                continue
+            is_good = (
+                title == _CONSENT_TITLE_RU
+                and o.get("type") == "check_box"
+                and bool(o.get("variants"))
+            )
+            if is_good and not has_correct:
+                has_correct = True
+            elif o.get("id") is not None:
+                stale_ids.append(o.get("id"))
+        return has_correct, stale_ids
 
     async def get_active_offer_ids(self) -> list[int]:
         """Fetch all active offer IDs from GGSel, filter by status in response."""
