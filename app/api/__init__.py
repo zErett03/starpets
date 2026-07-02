@@ -1468,7 +1468,7 @@ async def _run_remove_consent_option(limit: int = 0, ggsel_offer_id: int = 0, ac
                 counters["removed"] += 1
             except Exception as e:
                 counters["errors"] += 1
-                print(f"[RemoveConsent] ggsel_offer_id={offer.ggsel_offer_id} error: {e}", flush=True)
+                print(f"[RemoveConsent] ggsel_offer_id={offer.ggsel_offer_id} error: {type(e).__name__}: {e!r}", flush=True)
 
     for i in range(0, total, 500):
         await asyncio.gather(*[_rm(o) for o in offers[i:i + 500]])

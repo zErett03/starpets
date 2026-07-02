@@ -213,20 +213,25 @@ class GgselSellerOfficeClient:
             return resp.json()
 
     async def get_options(self, offer_id: int) -> dict:
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
-            resp = await client.get(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options")
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
+            )
             resp.raise_for_status()
             return resp.json()
 
     async def delete_options(self, offer_id: int, option_ids: list[int]) -> dict:
-        async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
-            resp = await client.request(
-                "DELETE",
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "DELETE",
                 f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options",
                 json={"option_ids": option_ids, "delete_all": "false"},
             )
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except Exception:
+                return {"ok": True}
 
     async def set_post_payment_url(self, offer_id: int, url: str) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
