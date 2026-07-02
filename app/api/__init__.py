@@ -1347,6 +1347,65 @@ async def _run_fix_descriptions():
     print(f"[FixDescriptions] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
 
 
+@app.get("/add-consent-option")
+async def add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
+    """Add the mandatory pre-purchase consent checkbox to offers.
+    ?ggsel_offer_id=N  -> single card (smoke test)
+    ?limit=N           -> first N offers
+    (no params)        -> all offers. Idempotent: skips offers that already have it."""
+    import asyncio
+    asyncio.create_task(_run_add_consent_option(limit, ggsel_offer_id))
+    return {"started": True, "limit": limit, "ggsel_offer_id": ggsel_offer_id}
+
+
+async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
+    import asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer
+
+    async with AsyncSessionLocal() as db:
+        offers = (await db.execute(
+            select(Offer).where(Offer.ggsel_offer_id.isnot(None))
+        )).scalars().all()
+
+    if ggsel_offer_id:
+        offers = [o for o in offers if o.ggsel_offer_id == ggsel_offer_id]
+    elif limit and limit > 0:
+        offers = offers[:limit]
+
+    total = len(offers)
+    print(f"[AddConsent] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
+    counters = {"added": 0, "skipped": 0, "errors": 0}
+    sem = asyncio.Semaphore(settings.sync_concurrency)
+
+    async def _add(offer):
+        async with sem:
+            try:
+                if await ggsel_office.has_consent_option(offer.ggsel_offer_id):
+                    counters["skipped"] += 1
+                    return
+                await ggsel_office.create_consent_option(offer.ggsel_offer_id)
+                counters["added"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[AddConsent] ggsel_offer_id={offer.ggsel_offer_id} error: {e}", flush=True)
+
+    for i in range(0, total, 500):
+        await asyncio.gather(*[_add(o) for o in offers[i:i + 500]])
+        print(
+            f"[AddConsent] progress {min(i + 500, total)}/{total} "
+            f"added={counters['added']} skipped={counters['skipped']} errors={counters['errors']}",
+            flush=True,
+        )
+
+    print(
+        f"[AddConsent] done — added={counters['added']} skipped={counters['skipped']} "
+        f"errors={counters['errors']} total={total}",
+        flush=True,
+    )
+
+
 @app.get("/create-offers")
 async def create_offers():
     from sqlalchemy import select

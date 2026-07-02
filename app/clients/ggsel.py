@@ -8,6 +8,8 @@ SELLER_OFFICE_V2_URL = settings.ggsel_base_url
 _GGSEL_RETRY_STATUS = frozenset({429, 502, 503, 504})
 
 
+_CONSENT_TITLE_RU = "Я понимаю, что должен принять трейд в течение 10 минут с момента оплаты заказа"
+
 class GgselSellerOfficeClient:
     """Seller Office API v2 — создание офферов, управление, доставка."""
 
@@ -142,6 +144,43 @@ class GgselSellerOfficeClient:
                 print(f"[create_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
             return resp.json()
+
+    async def create_consent_option(self, offer_id: int) -> dict:
+        """Add the mandatory pre-purchase consent checkbox to an offer.
+
+        Buyer must tick it before they can pay, so nobody can claim they didn't
+        know about the 10-minute accept window."""
+        body = {
+            "options": [
+                {
+                    "type": "check_box",
+                    "title_ru": _CONSENT_TITLE_RU,
+                    "title_en": "I understand I must accept the trade within 10 minutes of payment",
+                    "comment_ru": "Обязательно к подтверждению перед покупкой",
+                    "comment_en": "Must be confirmed before purchase",
+                    "is_required": True,
+                    "position": 2,
+                }
+            ]
+        }
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options", json=body
+            )
+            if not resp.is_success:
+                print(f"[create_consent_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def has_consent_option(self, offer_id: int) -> bool:
+        """True if the consent checkbox is already present (idempotency guard so a
+        re-run doesn't add a duplicate)."""
+        data = await self.get_options(offer_id)
+        opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+        for o in opts:
+            if (o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU:
+                return True
+        return False
 
     async def get_active_offer_ids(self) -> list[int]:
         """Fetch all active offer IDs from GGSel, filter by status in response."""
