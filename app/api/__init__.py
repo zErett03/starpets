@@ -1226,23 +1226,27 @@ async def _run_fix_post_payment_url():
         offer_ids = [r[0] for r in result.all()]
 
     total = len(offer_ids)
-    print(f"[FixPostPaymentUrl] starting — {total} offers, url={url}", flush=True)
+    print(f"[FixPostPaymentUrl] starting — {total} offers url={url} (concurrency={settings.sync_concurrency})", flush=True)
+    counters = {"updated": 0, "errors": 0}
+    sem = asyncio.Semaphore(settings.sync_concurrency)
 
-    updated = errors = 0
-    for i, gid in enumerate(offer_ids, 1):
-        try:
-            await ggsel_office.set_post_payment_url(gid, url)
-            updated += 1
-        except Exception as e:
-            print(f"[FixPostPaymentUrl] ggsel_offer_id={gid} error: {e}", flush=True)
-            errors += 1
+    async def _fix(gid):
+        async with sem:
+            try:
+                await ggsel_office.set_post_payment_url(gid, url)
+                counters["updated"] += 1
+            except Exception as e:
+                counters["errors"] += 1
+                print(f"[FixPostPaymentUrl] ggsel_offer_id={gid} error: {e}", flush=True)
 
-        if i % 50 == 0:
-            print(f"[FixPostPaymentUrl] progress {i}/{total} updated={updated} errors={errors}", flush=True)
-
-        await asyncio.sleep(0.3)
-
-    print(f"[FixPostPaymentUrl] done — updated={updated} errors={errors} total={total}", flush=True)
+    for i in range(0, total, 500):
+        await asyncio.gather(*[_fix(g) for g in offer_ids[i:i + 500]])
+        print(
+            f"[FixPostPaymentUrl] progress {min(i + 500, total)}/{total} "
+            f"updated={counters['updated']} errors={counters['errors']}",
+            flush=True,
+        )
+    print(f"[FixPostPaymentUrl] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
 
 
 @app.get("/fix-webhooks")
