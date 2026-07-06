@@ -1432,6 +1432,13 @@ async def debug_item_updates(cursor: int = None, date_ms: int = None):
         return {"ok": False, "error": f"{type(e).__name__}: {e!r}"}
 
 
+@app.get("/fast-forward-cursor")
+async def fast_forward_cursor_ep():
+    """Jump the items-feed cursor near the current tip (skip replaying history)."""
+    from app.workers.price_sync import fast_forward_cursor
+    return await fast_forward_cursor()
+
+
 @app.get("/price-sync-once")
 async def price_sync_once():
     """Run one pass of the event-driven price sync immediately (manual test)."""

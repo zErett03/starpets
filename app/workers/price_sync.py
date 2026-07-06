@@ -323,3 +323,53 @@ async def seed_store_items(limit: int = 0) -> dict:
         flush=True,
     )
     return counters
+
+
+async def fast_forward_cursor() -> dict:
+    """Jump the items-feed cursor near the current tip WITHOUT replaying history.
+
+    The seed (store_items via items/top) already holds current floors, so we don't need to
+    apply millions of old events. Probe forward (exponential) until a cursor returns empty
+    (past the tip), then binary-search for the tip. O(log N) requests instead of O(N) paging.
+    Sets the cursor to just before the tip; the next normal pass consumes the last <100 events.
+    """
+    async def _empty(c: int) -> bool:
+        batch = await starpets.get_item_updates(limit=1, cursor=c)
+        return not batch
+
+    async with AsyncSessionLocal() as db:
+        start = await _get_cursor(db) or 0
+
+    # 1. exponential probe forward until we overshoot the tip (empty response)
+    lo = start if start > 0 else 1
+    hi = None
+    probe = lo
+    step = 100000
+    for _ in range(100):
+        if await _empty(probe):
+            hi = probe
+            break
+        lo = probe
+        probe += step
+        step *= 2
+
+    if hi is None:
+        async with AsyncSessionLocal() as db:
+            await _set_cursor(db, lo)
+            await db.commit()
+        print(f"[FastForward] tip not found in probe range; cursor set to lo={lo}", flush=True)
+        return {"tip_cursor": lo, "note": "tip not found in probe range"}
+
+    # 2. binary search: lo has events after it, hi is empty (past tip)
+    while hi - lo > 100:
+        mid = (lo + hi) // 2
+        if await _empty(mid):
+            hi = mid
+        else:
+            lo = mid
+
+    async with AsyncSessionLocal() as db:
+        await _set_cursor(db, lo)
+        await db.commit()
+    print(f"[FastForward] cursor set near tip: lo={lo} hi={hi}", flush=True)
+    return {"tip_cursor": lo, "hi": hi}
