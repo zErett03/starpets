@@ -160,7 +160,12 @@ async def sync_item_updates() -> dict:
             try:
                 batch = await starpets.get_item_updates(limit=_PAGE, cursor=new_cursor)
             except Exception as e:
-                print(f"[PriceSync] get_item_updates error: {e}", flush=True)
+                import traceback
+                print(
+                    f"[PriceSync] get_item_updates error: {type(e).__name__}: {e!r}\n"
+                    f"{traceback.format_exc()}",
+                    flush=True,
+                )
                 break
             if not batch:
                 break
