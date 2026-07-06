@@ -148,6 +148,7 @@ class StarPetsClient:
             params["date"] = date_ms if date_ms is not None else int(
                 (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp() * 1000
             )
+        print(f"[starpets] get_item_updates params={params}", flush=True)
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
             resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
             if not resp.is_success:
@@ -162,9 +163,13 @@ class StarPetsClient:
                 )
             resp.raise_for_status()
             data = resp.json()
+        print(f"[starpets] get_item_updates raw response: {str(data)[:400]}", flush=True)
         if isinstance(data, list):
             return data
-        return data.get("updates") or []
+        return (
+            data.get("updates") or data.get("data") or data.get("items")
+            or data.get("events") or []
+        )
 
     async def get_items(self, item_ids: list[str] = None) -> dict:
         params = self._base_params()
