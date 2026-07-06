@@ -3,7 +3,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Text, DateTime,
+    Column, Integer, BigInteger, String, Numeric, Text, DateTime,
     ForeignKey, SmallInteger, Enum as SAEnum, JSON, Boolean, UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
@@ -206,3 +206,16 @@ class TradeEvent(Base):
     data_json = Column(JSON, nullable=True)
     occurred_at = Column(DateTime(timezone=True), nullable=True)   # from event data.updatedAt
     recorded_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class StoreItem(Base):
+    """Mirror of StarPets store items for OUR products, kept live via the
+    /ex-buyers/updates event feed. The floor of a product = the minimum price_usd
+    among its items with reserve_level == 0 (FREE / actually buyable)."""
+    __tablename__ = "store_items"
+
+    id = Column(BigInteger, primary_key=True)            # StarPets store item id
+    product_id = Column(Integer, index=True, nullable=False)
+    price_usd = Column(Numeric(10, 3), nullable=True)
+    reserve_level = Column(SmallInteger, default=0)      # 0 FREE, 1 CART, 2 PURCHASE, 3 FREEZE
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)

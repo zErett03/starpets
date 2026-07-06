@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # + errors (keeps Railway logs clean). Set SYNC_LOG_VERBOSE=true to see every offer.
     sync_log_verbose: bool = False
     min_price_rub: float = 100.0
+
+    # When True: prices are kept live by the event-driven price_sync worker (reads the
+    # StarPets /ex-buyers/updates feed) and the legacy 30-min top-per-product sync_prices
+    # is disabled. Flip via env EVENT_PRICE_SYNC after seeding store_items.
+    event_price_sync: bool = False
     starpets_category_id: int = 0
 
     class Config:

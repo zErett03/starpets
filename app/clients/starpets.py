@@ -111,10 +111,43 @@ class StarPetsClient:
             headers=self._headers(self._sign(params)),
             params=params,
         )
-        if not resp.is_success:
-            return None
-        items = resp.json().get("items") or []
-        return items[0] if items else None
+    async def get_item_updates(
+        self, limit: int = 50, cursor: int | None = None, date_ms: int | None = None
+    ) -> list:
+        """GET /ex-buyers/updates — incremental item price/stock event feed.
+
+        `cursor` (event id) and `date` are mutually exclusive: pass `cursor` to get events
+        AFTER an event id (incremental), or `date` to bootstrap from a timestamp. Returns the
+        raw `updates` list; each entry is:
+          {"id": <event id>, "event": 0, "data": [ {id, productId, price_usd, reserveLevel}, ... ]}  # created
+          {"id": <event id>, "event": 1, "data": {"ids": [...], "data": {price_usd, reserveLevel}}}   # updated
+          {"id": <event id>, "event": 2, "data": [id, id, ...]}                                        # deleted
+        """
+        from datetime import datetime, timezone, timedelta
+        params = {**self._base_params(), "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            params["date"] = date_ms if date_ms is not None else int(
+                (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp() * 1000
+            )
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
+            resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
+            if not resp.is_success:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
+                print(
+                    f"[starpets] get_item_updates FAILED status={resp.status_code} "
+                    f"url={resp.request.url} body={err_body}",
+                    flush=True,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        if isinstance(data, list):
+            return data
+        return data.get("updates") or []
 
     async def get_items(self, item_ids: list[str] = None) -> dict:
         params = self._base_params()

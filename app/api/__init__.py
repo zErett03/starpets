@@ -1407,6 +1407,22 @@ async def _run_add_consent_option(limit: int = 0, ggsel_offer_id: int = 0):
     )
 
 
+@app.get("/seed-store-items")
+async def seed_store_items_ep(limit: int = 0):
+    """One-time seed of store_items (floors) for our products before the event feed takes over."""
+    import asyncio
+    from app.workers.price_sync import seed_store_items
+    asyncio.create_task(seed_store_items(limit))
+    return {"started": True, "limit": limit}
+
+
+@app.get("/price-sync-once")
+async def price_sync_once():
+    """Run one pass of the event-driven price sync immediately (manual test)."""
+    from app.workers.price_sync import sync_item_updates
+    return await sync_item_updates()
+
+
 @app.get("/fix-consent-option")
 async def fix_consent_option(limit: int = 0, ggsel_offer_id: int = 0, active_only: bool = False):
     """Put the CORRECT consent checkbox (with variant) on offers, cleaning up any old/broken one.

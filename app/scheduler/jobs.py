@@ -166,11 +166,25 @@ async def monitor_delivery_safe():
 
 
 async def sync_prices_safe():
+    from app.config import settings
+    if settings.event_price_sync:
+        return  # legacy top-per-product polling disabled — event feed keeps prices live
     try:
         from app.api import _run_sync_prices
         await _run_sync_prices()
     except Exception as e:
         print(f"[Scheduler] sync_prices error: {e}", flush=True)
+
+
+async def price_sync_safe():
+    from app.config import settings
+    if not settings.event_price_sync:
+        return  # event-driven price sync not enabled yet (seed store_items, then set EVENT_PRICE_SYNC)
+    try:
+        from app.workers.price_sync import sync_item_updates
+        await sync_item_updates()
+    except Exception as e:
+        print(f"[Scheduler] price_sync error: {e}", flush=True)
 
 
 def start_scheduler() -> AsyncIOScheduler:
@@ -181,6 +195,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
     scheduler.add_job(sync_prices_safe, "interval", minutes=30, id="sync_prices")
+    scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler
