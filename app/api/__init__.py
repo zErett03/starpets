@@ -1420,6 +1420,18 @@ async def seed_store_items_ep(limit: int = 0):
     return {"started": True, "limit": limit}
 
 
+@app.get("/debug-item-updates")
+async def debug_item_updates(cursor: int = None, date_ms: int = None):
+    """Probe StarPets /ex-buyers/updates directly. ?cursor=0 tests the cursor path;
+    ?date_ms=<ms> tests a specific date; no params = default (last 10s date)."""
+    from app.clients.starpets import starpets
+    try:
+        batch = await starpets.get_item_updates(limit=50, cursor=cursor, date_ms=date_ms)
+        return {"ok": True, "count": len(batch), "sample": batch[:3]}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e!r}"}
+
+
 @app.get("/price-sync-once")
 async def price_sync_once():
     """Run one pass of the event-driven price sync immediately (manual test)."""
