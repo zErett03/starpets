@@ -146,10 +146,10 @@ class StarPetsClient:
             params["cursor"] = cursor
         else:
             params["date"] = date_ms if date_ms is not None else int(
-                (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp() * 1000
+                (datetime.now(timezone.utc) - timedelta(seconds=30)).timestamp() * 1000
             )
         print(f"[starpets] get_item_updates params={params}", flush=True)
-        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
+        async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
             resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
             if not resp.is_success:
                 try:
