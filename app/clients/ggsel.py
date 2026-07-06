@@ -346,14 +346,9 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
-    async def pause_offer(self, offer_id: int) -> dict:
-        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await self._request_retry(
-                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
-                json={"status": "paused"},
-            )
-            resp.raise_for_status()
-            return resp.json()
+    async def _pause_offer_legacy_patch(self, offer_id: int) -> dict:
+        # deprecated: PATCH status is rejected by ggsel (422). Kept out of the pause path.
+        return await self.pause_offers([offer_id])
 
     async def activate_offer(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=10) as client:
@@ -381,14 +376,10 @@ class GgselSellerOfficeClient:
             return resp.json()
 
     async def pause_offer(self, offer_id: int) -> dict:
-        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
-            resp = await self._request_retry(
-                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
-                json={"status": "paused"},
-            )
-            print(f"[pause_offer] id={offer_id} status={resp.status_code} response={resp.text[:200]}", flush=True)
-            resp.raise_for_status()
-            return resp.json()
+        """Pause a single offer via the batch endpoint. ggsel rejects a status change through
+        PATCH /offers/{id} (422 'unpermitted parameter: status') — status transitions must use
+        the dedicated batch_pause / batch_activate endpoints."""
+        return await self.pause_offers([offer_id])
 
     async def pause_offers(self, offer_ids: list[int]) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
