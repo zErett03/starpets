@@ -223,8 +223,22 @@ class GgselSellerOfficeClient:
             if not resp.is_success:
                 print(f"[create_consent_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
+            # Prefer the new option id from the create response (saves a GET); fall back to lookup.
+            option_id = None
+            try:
+                rd = resp.json()
+                _opts = rd if isinstance(rd, list) else (rd.get("options") or rd.get("data") or [])
+                for _o in _opts:
+                    if (_o.get("title_ru") or "").strip() == _CONSENT_TITLE_RU and _o.get("id") is not None:
+                        option_id = _o.get("id")
+                        break
+                if option_id is None and isinstance(rd, dict) and rd.get("id") is not None:
+                    option_id = rd.get("id")
+            except Exception:
+                option_id = None
 
-        option_id = await self._consent_option_id(offer_id)
+        if option_id is None:
+            option_id = await self._consent_option_id(offer_id)
         if option_id is None:
             raise RuntimeError(f"consent option created but id not found offer_id={offer_id}")
         return await self.add_option_variant(offer_id, option_id)

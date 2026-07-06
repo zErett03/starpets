@@ -1456,7 +1456,7 @@ async def _run_fix_consent_option(limit: int = 0, ggsel_offer_id: int = 0, activ
         offers = offers[:limit]
 
     total = len(offers)
-    conc = min(settings.sync_concurrency, 4)  # up to 3 requests/offer (GET+DELETE+POST)
+    conc = min(settings.sync_concurrency, 8)  # up to 4-5 requests/offer; retries absorb 503s
     print(f"[FixConsent] starting — {total} offers active_only={active_only} concurrency={conc}", flush=True)
     counters = {"fixed": 0, "skipped": 0, "errors": 0}
     sem = asyncio.Semaphore(conc)
