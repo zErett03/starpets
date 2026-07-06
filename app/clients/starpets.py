@@ -111,6 +111,23 @@ class StarPetsClient:
             headers=self._headers(self._sign(params)),
             params=params,
         )
+        if not resp.is_success:
+            print(f"[get_top_item] product_id={product_id} HTTP {resp.status_code} body={resp.text[:200]}", flush=True)
+            return None
+        items = resp.json().get("items") or []
+        # Only FREE items are buyable (reserveLevel: 0 FREE, 1 CART, 2 SOLD, 3 FREEZE).
+        # Missing field -> treated as FREE (int(None or 0)==0), so this never over-filters.
+        avail = [it for it in items if int(it.get("reserveLevel") or 0) == 0]
+        if not avail:
+            if items:
+                print(
+                    f"[get_top_item] product_id={product_id} no FREE items "
+                    f"total={len(items)} reserve_levels={[it.get('reserveLevel') for it in items[:5]]}",
+                    flush=True,
+                )
+            return None
+        return min(avail, key=lambda it: float(it.get("price_usd") or 1e9))
+
     async def get_item_updates(
         self, limit: int = 50, cursor: int | None = None, date_ms: int | None = None
     ) -> list:
