@@ -144,10 +144,12 @@ class StarPetsClient:
         params = {**self._base_params(), "limit": limit}
         if cursor is not None:
             params["cursor"] = cursor
+        elif date_ms is not None:
+            params["date"] = date_ms   # explicit date — diagnostics only (StarPets' date path 500s)
         else:
-            params["date"] = date_ms if date_ms is not None else int(
-                (datetime.now(timezone.utc) - timedelta(seconds=10)).timestamp() * 1000
-            )
+            # StarPets' date-based bootstrap returns 500 for the items feed, but cursor
+            # pagination works. Bootstrap from the oldest retained event and page forward.
+            params["cursor"] = 0
         print(f"[starpets] get_item_updates params={params}", flush=True)
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
             resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
