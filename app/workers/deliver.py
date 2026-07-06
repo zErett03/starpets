@@ -45,13 +45,22 @@ async def _buy_with_retry(
             if err_body.get("code") != 330:
                 raise exc
 
-            resp_items = err_body.get("items") or []
-            if not resp_items:
-                raise exc
-
-            new_price_usd = float(
-                resp_items[0].get("price_usd") or resp_items[0].get("price") or 0
-            )
+            # code=330 returns items as a dict {item_id: new_price_usd} (per API docs),
+            # NOT a list of objects. Parse both shapes defensively.
+            items_map = err_body.get("items")
+            new_price_usd = None
+            new_id = current_id
+            if isinstance(items_map, dict) and items_map:
+                key = str(current_id) if str(current_id) in items_map else next(iter(items_map))
+                new_id = str(key)
+                try:
+                    new_price_usd = float(items_map[key] or 0)
+                except (TypeError, ValueError):
+                    new_price_usd = None
+            elif isinstance(items_map, list) and items_map:
+                first = items_map[0]
+                new_id = str(first.get("id") or current_id)
+                new_price_usd = float(first.get("price_usd") or first.get("price") or 0)
             if not new_price_usd:
                 raise exc
 
@@ -79,9 +88,7 @@ async def _buy_with_retry(
                 )
 
             current_price = new_price_usd
-            new_id = str(resp_items[0].get("id") or "")
-            if new_id:
-                current_id = new_id
+            current_id = new_id
 
 
 async def deliver_order(order_id: int) -> None:
