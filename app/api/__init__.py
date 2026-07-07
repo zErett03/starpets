@@ -2809,7 +2809,7 @@ async def cleanup_sku_by_name(name: str, dry_run: bool = True):
     rebuilds fresh. Does NOT touch ggsel (cards already gone) or per-combo offers."""
     from sqlalchemy import select, delete as sql_delete
     from app.db import AsyncSessionLocal
-    from app.db.models import SkuProduct, SkuVariant, Offer
+    from app.db.models import SkuProduct, SkuVariant, Offer, Order
 
     async with AsyncSessionLocal() as db:
         pids = [int(p) for (p,) in (await db.execute(
@@ -2831,13 +2831,30 @@ async def cleanup_sku_by_name(name: str, dry_run: bool = True):
             return {"dry_run": True, "name": name, "product_ids": len(pids),
                     "sku_variant_rows": n_variants, "backing_offer_gids": gids}
 
+        # 1. Drop variant rows — this alone un-skip-guards the group so it rebuilds.
         await db.execute(sql_delete(SkuVariant).where(SkuVariant.starpets_product_id.in_(pids)))
+
+        # 2. Delete backing __sku__ offers, but FK-safe: skip any still referenced by an order
+        #    (test orders point at them). Those are harmless orphans; the neon one is repointed
+        #    on rebuild (same composite key), a stale default one just lingers unused.
         deleted_offers = 0
+        kept_with_orders = []
         if gids:
-            res = await db.execute(
-                sql_delete(Offer).where(Offer.age == "__sku__", Offer.ggsel_offer_id.in_(gids))
-            )
-            deleted_offers = res.rowcount or 0
+            backing = (await db.execute(
+                select(Offer.id, Offer.ggsel_offer_id).where(
+                    Offer.age == "__sku__", Offer.ggsel_offer_id.in_(gids)
+                )
+            )).all()
+            for off_id, gid in backing:
+                has_order = (await db.execute(
+                    select(Order.id).where(Order.offer_id == off_id).limit(1)
+                )).first()
+                if has_order:
+                    kept_with_orders.append(gid)
+                    continue
+                await db.execute(sql_delete(Offer).where(Offer.id == off_id))
+                deleted_offers += 1
         await db.commit()
     return {"name": name, "deleted_sku_variant_rows": n_variants,
-            "deleted_backing_offers": deleted_offers, "gids": gids}
+            "deleted_backing_offers": deleted_offers,
+            "kept_backing_offers_with_orders": kept_with_orders, "gids": gids}
