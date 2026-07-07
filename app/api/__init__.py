@@ -1439,6 +1439,35 @@ async def fast_forward_cursor_ep():
     return await fast_forward_cursor()
 
 
+@app.get("/proto-cover")
+async def proto_cover(product_id: int):
+    """Preview the generated SKU cover for a product (rarity bg + pet + pumping badge)."""
+    from fastapi.responses import Response
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct
+    from app.images.cover import make_cover
+
+    async with AsyncSessionLocal() as db:
+        p = (await db.execute(select(SkuProduct).where(SkuProduct.product_id == product_id))).scalar_one_or_none()
+    if not p:
+        return {"error": f"product {product_id} not found in sku_products"}
+
+    pet_bytes = b""
+    if p.image_uri:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(p.image_uri)
+                if r.is_success:
+                    pet_bytes = r.content
+                else:
+                    print(f"[proto-cover] image fetch {r.status_code} {p.image_uri}", flush=True)
+        except Exception as e:
+            print(f"[proto-cover] image fetch error: {e}", flush=True)
+    png = make_cover(pet_bytes, p.rare, p.pumping)
+    return Response(content=png, media_type="image/png")
+
+
 @app.get("/sync-sku-products")
 async def sync_sku_products():
     """Populate sku_products from StarPets get_all_products (full catalog WITH pumping)."""
