@@ -61,8 +61,10 @@ _STATUS_FAILED = {6, 7}
 _CURSOR_KEY = "trades_cursor"
 _MAX_PAGES = 40                       # safety cap: 40 * 50 = 2000 events per cycle
 _FRIENDSHIP_WINDOW = timedelta(minutes=10)
-# starpets_status values meaning "bot already accepted / trade moving" → stop re-pinging
-_FRIENDSHIP_OPEN_STATES = (None, "", "0")
+# Pre-acceptance states where the friendship still needs driving. Includes 2 PENDING_FRIEND
+# (the state that oscillates 0↔2 until the bot accepts) — excluding it left orders stuck.
+# Stop at 3 PENDING_START+ (friendship established, trade moving) to avoid needless re-pings.
+_FRIENDSHIP_OPEN_STATES = (None, "", "0", "1", "2")
 
 # Server-side delivery timer: how long a single trade's bot-online window lasts before
 # we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the
