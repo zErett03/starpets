@@ -28,8 +28,17 @@ _BADGE = {"default": (150, 155, 165), "neon": (88, 196, 45), "mega_neon": (150, 
 
 
 def _font(sz):
+    for p in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "DejaVuSans-Bold.ttf",
+    ):
+        try:
+            return ImageFont.truetype(p, sz)
+        except Exception:
+            continue
     try:
-        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", sz)
+        return ImageFont.load_default(size=sz)   # scalable default (Pillow >= 10.1)
     except Exception:
         return ImageFont.load_default()
 
