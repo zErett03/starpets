@@ -590,7 +590,10 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         status == DeliveryStatus.dispatched
         and order
         and order.starpets_custom_id
-        and order.starpets_status in (None, "", "0")  # gate: bot hasn't accepted yet → avoid 400 spam
+        # Re-poke friendship through the whole pre-acceptance phase (statuses 0/1/2 oscillate
+        # before the bot accepts), not just "0" — otherwise a buyer stuck at 2 never gets the
+        # bot to accept. Stop at 3+ (buyer in-session / in-progress) to avoid 400 spam.
+        and (order.starpets_status or "").strip() in ("", "0", "1", "2")
     ):
         from datetime import datetime as _dt
         _now = _dt.utcnow()
