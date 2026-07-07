@@ -2737,3 +2737,31 @@ async def cleanup_sku_card(ggsel_offer_id: int, remove_option: bool = True, paus
         await db.commit()
     result["variant_rows_deleted"] = True
     return result
+
+
+@app.get("/close-order")
+async def close_order(order_id: int):
+    """Operator override: mark a confirmed-delivered order as done. For false-positive
+    needs_attention (e.g. timer expired at status 4 while the trade actually completed).
+    Accepts internal Order.id or the ggsel order id."""
+    from datetime import datetime
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            order = (await db.execute(
+                select(Order).where(Order.ggsel_order_id == order_id)
+            )).scalar_one_or_none()
+        if not order:
+            return {"error": f"order {order_id} not found (tried internal id and ggsel_order_id)"}
+        prev = order.delivery_status.value if order.delivery_status else None
+        order.delivery_status = DeliveryStatus.done
+        if order.delivered_at is None:
+            order.delivered_at = datetime.utcnow()
+        order.error_reason = None
+        await db.commit()
+        return {"ok": True, "order_id": order.id, "ggsel_order_id": order.ggsel_order_id,
+                "previous_status": prev, "delivery_status": "done"}
