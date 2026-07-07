@@ -196,14 +196,23 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
             gid, title_ru="Вариант", title_en="Variant", position=3
         )
 
+        # `combos` is in DISPLAY order (age/fly-ride); position=display index. But ggsel needs
+        # the option's DEFAULT variant created FIRST (a required radio must always have a
+        # default), so we create the cheapest one first, then the rest in display order —
+        # display order is preserved by the explicit `position`.
+        creation = sorted(
+            enumerate(combos),
+            key=lambda ip: 0 if ip[1][0].product_id == base_p.product_id else 1,
+        )
         variants = []
-        for i, (p, price) in enumerate(combos):
+        for pos, (p, price) in creation:
             delta = round(price - base_price, 2)
             label = _variant_label(p)
             vtitle = f"{label} — {int(round(price))}₽"
+            is_def = (p.product_id == base_p.product_id)
             vid = await ggsel_office.add_variant(
                 gid, option_id, title_ru=vtitle, title_en=label,
-                price_delta=delta, is_default=(p.product_id == base_p.product_id), position=i,
+                price_delta=delta, is_default=is_def, position=pos,
             )
             async with AsyncSessionLocal() as db:
                 db.add(SkuVariant(
@@ -211,9 +220,10 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
                     starpets_product_id=p.product_id, label=label, price_rub=price,
                 ))
                 await db.commit()
-            variants.append({"label": label, "variant_id": vid,
+            variants.append({"label": label, "variant_id": vid, "position": pos,
                              "product_id": p.product_id, "price_rub": price,
-                             "delta": delta, "default": p.product_id == base_p.product_id})
+                             "delta": delta, "default": is_def})
+        variants.sort(key=lambda v: v["position"])
 
         await ggsel_office.patch_offer(
             offer_id=gid,

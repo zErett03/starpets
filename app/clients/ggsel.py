@@ -82,7 +82,7 @@ class GgselSellerOfficeClient:
         print(f"[create_offer] body: {_json.dumps(body, ensure_ascii=False)}", flush=True)
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.post(f"{SELLER_OFFICE_V2_URL}/offers", json=body)
+            resp = await self._request_retry(client, "POST", f"{SELLER_OFFICE_V2_URL}/offers", json=body)
             print(f"[create_offer] status={resp.status_code} response={resp.text[:500]}", flush=True)
             if not resp.is_success:
                 raise httpx.HTTPStatusError(
@@ -355,7 +355,9 @@ class GgselSellerOfficeClient:
             )
             if not resp.is_success:
                 print(f"[add_variant] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
-            resp.raise_for_status()
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code} {resp.text[:400]}", request=resp.request, response=resp
+                )
         for o in await self._options_list(offer_id):
             if o.get("id") == option_id:
                 for v in (o.get("variants") or []):
