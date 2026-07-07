@@ -22,8 +22,8 @@ from app.config import settings
 from app.images.cover import make_cover
 from app.workers.offer_creator import _resolve_category, _INSTRUCTIONS_RU, _INSTRUCTIONS_EN
 
-# pumping value -> RU suffix appended to the card title (default = no suffix).
-_PUMPING_TITLE = {"neon": "Неон", "mega_neon": "Мега Неон"}
+# pumping value -> label used in the title tag "Name | Rarity, Pumping".
+_PUMPING_TITLE = {"default": "Default", "neon": "Neon", "mega_neon": "Mega Neon"}
 
 
 def _variant_label(p: SkuProduct) -> str:
@@ -38,9 +38,11 @@ def _variant_label(p: SkuProduct) -> str:
     return " · ".join(parts) or "Стандарт"
 
 
-def _card_title(name: str, pumping: str) -> str:
-    suffix = _PUMPING_TITLE.get((pumping or "").lower())
-    return f"{name} ({suffix})" if suffix else name
+def _card_title(name: str, rare: str, pumping: str) -> str:
+    rarity = (rare or "").replace("_", " ").strip().title()          # legendary -> Legendary
+    pump = _PUMPING_TITLE.get((pumping or "").lower(), "Default")
+    tags = ", ".join(t for t in (rarity, pump) if t)
+    return f"{name} | {tags}" if tags else name
 
 
 def _card_description(name: str, rare: str, pumping: str) -> tuple[str, str]:
@@ -131,7 +133,7 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
     cover_b64 = base64.b64encode(cover_png).decode()
 
     desc_ru, desc_en = _card_description(name, rare, pumping)
-    title = _card_title(name, pumping)
+    title = _card_title(name, rare, pumping)
 
     # 3. Create the card, then username + consent + Вариант radio, then webhooks.
     try:
