@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import AsyncSessionLocal
-from app.db.models import Offer, Order, Task, WebhookEvent, TaskKind, DeliveryStatus, WebhookKind
+from app.db.models import Offer, Order, Task, WebhookEvent, TaskKind, DeliveryStatus, WebhookKind, SkuVariant
 from app.clients.starpets import starpets
 
 router = APIRouter()
@@ -15,6 +15,26 @@ router = APIRouter()
 def check_secret(secret: str):
     if not hmac.compare_digest(secret, settings.webhook_shared_secret):
         raise HTTPException(status_code=403, detail="Invalid secret")
+
+
+async def _resolve_sku_product_id(db, ggsel_offer_id: int, options: list) -> int | None:
+    """SKU-master: if this card is a SKU base card, resolve the selected radio variant
+    (its value == our ggsel_variant_id) to the target StarPets product_id."""
+    rows = (await db.execute(
+        select(SkuVariant.ggsel_variant_id, SkuVariant.starpets_product_id)
+        .where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
+    )).all()
+    if not rows:
+        return None
+    mapping = {int(vid): pid for vid, pid in rows}
+    for opt in options or []:
+        try:
+            v = int(opt.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if v in mapping:
+            return mapping[v]
+    return None
 
 
 @router.post("/hooks/ggsel/precheck/{ggsel_offer_id}")
@@ -81,6 +101,10 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
                     starpets_custom_id=str(id_i),
                 )
                 db.add(order)
+            _sku_pid = await _resolve_sku_product_id(db, ggsel_offer_id, options)
+            if _sku_pid is not None:
+                order.sku_product_id = _sku_pid
+                print(f"[precheck] SKU variant → product_id={_sku_pid}", flush=True)
             print(
                 f"[precheck] order saved: ggsel_order_id={id_i} offer_id={internal_offer_id} "
                 f"roblox_username={roblox_username!r}",
@@ -320,6 +344,11 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                 paid_at=paid_at,
             )
             db.add(order)
+
+        _sku_pid = await _resolve_sku_product_id(db, offer_id, options)
+        if _sku_pid is not None:
+            order.sku_product_id = _sku_pid
+            print(f"[notification] SKU variant → product_id={_sku_pid}", flush=True)
 
         await db.flush()
 

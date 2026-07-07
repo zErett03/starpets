@@ -112,6 +112,7 @@ class Order(Base):
 
     starpets_purchase_id = Column(String, nullable=True)
     starpets_custom_id = Column(String, nullable=True)
+    sku_product_id = Column(Integer, nullable=True)  # SKU-master: resolved product for the selected variant
     starpets_status = Column(String, nullable=True)
     starpets_error_code = Column(String, nullable=True)
 
@@ -219,3 +220,19 @@ class StoreItem(Base):
     price_usd = Column(Numeric(10, 3), nullable=True)
     reserve_level = Column(SmallInteger, default=0)      # 0 FREE, 1 CART, 2 PURCHASE, 3 FREEZE
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SkuVariant(Base):
+    """SKU-master (prototype): maps a ggsel radio-option variant to a StarPets product.
+    One base card carries a 'Вариант' radio option; each variant = one property combo,
+    resolved to its starpets_product_id at purchase time via the webhook `options` value."""
+    __tablename__ = "sku_variants"
+
+    id = Column(Integer, primary_key=True)
+    ggsel_offer_id = Column(Integer, index=True, nullable=False)
+    ggsel_option_id = Column(Integer, nullable=True)
+    ggsel_variant_id = Column(Integer, index=True, nullable=False)
+    starpets_product_id = Column(Integer, nullable=False)
+    label = Column(String, nullable=True)
+    price_rub = Column(Numeric(10, 2), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

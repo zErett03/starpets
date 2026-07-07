@@ -288,6 +288,68 @@ class GgselSellerOfficeClient:
                 stale_ids.append(o.get("id"))
         return has_correct, stale_ids
 
+    async def _options_list(self, offer_id: int) -> list:
+        async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
+            resp = await self._request_retry(
+                client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+
+    async def create_radio_option(self, offer_id: int, title_ru: str, title_en: str = "Variant",
+                                  position: int = 3) -> int:
+        """Create a radio_button option on an offer; return its option id."""
+        body = {"options": [{
+            "type": "radio_button",
+            "title_ru": title_ru,
+            "title_en": title_en,
+            "is_required": True,
+            "is_price_modifier_hidden": False,
+            "position": position,
+        }]}
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options", json=body
+            )
+            if not resp.is_success:
+                print(f"[create_radio_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+        for o in await self._options_list(offer_id):
+            if (o.get("title_ru") or "").strip() == title_ru and o.get("type") == "radio_button" and o.get("id") is not None:
+                return o.get("id")
+        raise RuntimeError(f"radio option created but id not found offer_id={offer_id}")
+
+    async def add_variant(self, offer_id: int, option_id: int, title_ru: str, title_en: str,
+                          price_delta: float, is_default: bool = False, position: int = 0) -> int:
+        """Add one variant to an option. price_delta = +/- rub modifier from base. Returns variant id."""
+        impact = "increase" if price_delta >= 0 else "decrease"
+        body = {"variants": [{
+            "title_ru": title_ru,
+            "title_en": title_en,
+            "price": round(abs(price_delta), 2),
+            "discount_type": "fixed",
+            "impact_type": impact,
+            "is_default": is_default,
+            "status": "active",
+            "position": position,
+        }]}
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST",
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options/{option_id}/variants",
+                json=body,
+            )
+            if not resp.is_success:
+                print(f"[add_variant] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+        for o in await self._options_list(offer_id):
+            if o.get("id") == option_id:
+                for v in (o.get("variants") or []):
+                    if (v.get("title_ru") or "").strip() == title_ru and v.get("id") is not None:
+                        return v.get("id")
+        raise RuntimeError(f"variant created but id not found offer_id={offer_id} option_id={option_id} title={title_ru!r}")
+
     async def get_active_offer_ids(self) -> list[int]:
         """Fetch all active offer IDs from GGSel, filter by status in response."""
         ids = []

@@ -103,7 +103,8 @@ async def deliver_order(order_id: int) -> None:
         if not offer:
             raise RuntimeError(f"Offer {order.offer_id} not found for order {order_id}")
 
-        product_id = str(offer.starpets_product_id or "")
+        # SKU-master: a resolved variant product takes precedence over the base offer product
+        product_id = str(order.sku_product_id or offer.starpets_product_id or "")
         if not product_id:
             raise RuntimeError(f"Offer {offer.id} has no starpets_product_id")
 

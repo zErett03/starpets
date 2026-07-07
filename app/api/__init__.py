@@ -1439,6 +1439,78 @@ async def fast_forward_cursor_ep():
     return await fast_forward_cursor()
 
 
+@app.get("/proto-sku-card")
+async def proto_sku_card(name: str, limit: int = 8):
+    """SKU-master prototype (Phase 0): turn several combos of one pet into a single card
+    with a 'Вариант' radio option (one variant per combo), mapping each variant to its product."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        offers = (await db.execute(
+            select(Offer).where(
+                Offer.name == name,
+                Offer.ggsel_offer_id.isnot(None),
+                Offer.starpets_product_id.isnot(None),
+                Offer.price_rub > 0,
+            ).order_by(Offer.price_rub.asc()).limit(limit)
+        )).scalars().all()
+    if not offers:
+        return {"error": f"no offers for name={name!r}"}
+
+    base = offers[0]
+    base_gid = base.ggsel_offer_id
+    base_price = float(base.price_rub or 0)
+
+    def _label(o):
+        parts = []
+        if o.rare:
+            parts.append(str(o.rare).replace("_", " ").title())
+        if o.flyable:
+            parts.append("Летает")
+        if o.rideable:
+            parts.append("Ездовой")
+        if o.age:
+            parts.append(str(o.age).replace("_", " ").title())
+        return " · ".join(parts) or "Стандарт"
+
+    try:
+        option_id = await ggsel_office.create_radio_option(base_gid, title_ru="Вариант", title_en="Variant")
+    except Exception as e:
+        return {"error": f"create_radio_option failed: {e}"}
+
+    created = []
+    for i, o in enumerate(offers):
+        price = float(o.price_rub or 0)
+        delta = round(price - base_price, 2)
+        label = _label(o)
+        title = f"{label} — {int(round(price))}\u20bd"
+        try:
+            vid = await ggsel_office.add_variant(
+                base_gid, option_id, title_ru=title, title_en=label,
+                price_delta=delta, is_default=(i == 0), position=i,
+            )
+        except Exception as e:
+            created.append({"label": label, "error": str(e)})
+            continue
+        async with AsyncSessionLocal() as db:
+            db.add(SkuVariant(
+                ggsel_offer_id=base_gid, ggsel_option_id=option_id, ggsel_variant_id=vid,
+                starpets_product_id=o.starpets_product_id, label=label, price_rub=price,
+            ))
+            await db.commit()
+        created.append({
+            "label": label, "variant_id": vid, "product_id": o.starpets_product_id,
+            "price_rub": price, "delta": delta, "default": i == 0,
+        })
+
+    return {
+        "base_ggsel_offer_id": base_gid, "option_id": option_id,
+        "base_price": base_price, "count": len(created), "variants": created,
+    }
+
+
 @app.get("/price-sync-once")
 async def price_sync_once():
     """Run one pass of the event-driven price sync immediately (manual test)."""
