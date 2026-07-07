@@ -162,7 +162,9 @@ class GgselSellerOfficeClient:
         }
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await client.post(f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options", json=body)
+            resp = await self._request_retry(
+                client, "POST", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options", json=body
+            )
             if not resp.is_success:
                 print(f"[create_option] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
