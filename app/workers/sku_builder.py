@@ -25,6 +25,27 @@ from app.workers.offer_creator import _resolve_category, _INSTRUCTIONS_RU, _INST
 # pumping value -> label used in the title tag "Name | Rarity, Pumping".
 _PUMPING_TITLE = {"default": "Default", "neon": "Neon", "mega_neon": "Mega Neon"}
 
+# Age display order (youngest -> oldest). Default and neon stage names don't collide, so one
+# map covers both; a card is single-pumping, so only one family's ranks ever apply.
+_AGE_ORDER = {
+    # default pet ages
+    "newborn": 0, "junior": 1, "pre_teen": 2, "teen": 3, "post_teen": 4, "full_grown": 5,
+    # neon stages
+    "reborn": 0, "twinkle": 1, "sparkle": 2, "flare": 3, "sunshine": 4, "luminous": 5,
+}
+
+
+def _norm_age(age) -> str:
+    return (age or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _variant_sort_key(p):
+    """Group by age (youngest->oldest), then by fly/ride combo in the order:
+    base -> ездовой(ride) -> летает(fly) -> ездовой·летает."""
+    age_rank = _AGE_ORDER.get(_norm_age(p.age), 99)
+    fly_ride = (2 if p.flyable else 0) + (1 if p.rideable else 0)
+    return (age_rank, fly_ride)
+
 
 def _variant_label(p: SkuProduct) -> str:
     """Age + fly/ride label for one combo (rarity is constant across a pet's variants)."""
@@ -108,8 +129,10 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
     if not combos:
         return {"error": f"no priced combos for name={name!r} pumping={pumping!r} "
                          f"(products={len(prods)}, none have a live offer price)"}
-    combos.sort(key=lambda cp: cp[1])
-    base_p, base_price = combos[0]
+    # Pricing base = cheapest combo (card headline + additive deltas).
+    base_p, base_price = min(combos, key=lambda cp: cp[1])
+    # Display order = by age (youngest->oldest), then fly/ride combo.
+    combos.sort(key=lambda cp: _variant_sort_key(cp[0]))
 
     rare = base_p.rare or ""
     category_id = _resolve_category(base_p.item_type, rare)
@@ -180,7 +203,7 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
             vtitle = f"{label} — {int(round(price))}₽"
             vid = await ggsel_office.add_variant(
                 gid, option_id, title_ru=vtitle, title_en=label,
-                price_delta=delta, is_default=(i == 0), position=i,
+                price_delta=delta, is_default=(p.product_id == base_p.product_id), position=i,
             )
             async with AsyncSessionLocal() as db:
                 db.add(SkuVariant(
@@ -190,7 +213,7 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
                 await db.commit()
             variants.append({"label": label, "variant_id": vid,
                              "product_id": p.product_id, "price_rub": price,
-                             "delta": delta, "default": i == 0})
+                             "delta": delta, "default": p.product_id == base_p.product_id})
 
         await ggsel_office.patch_offer(
             offer_id=gid,
