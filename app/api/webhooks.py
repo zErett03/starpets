@@ -80,6 +80,10 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         if not roblox_username:
             return {"error": "Укажите Roblox Username"}
 
+        sku_product_id = await _resolve_sku_product_id(db, ggsel_offer_id, options)
+        if sku_product_id is not None:
+            print(f"[precheck] SKU variant → product_id={sku_product_id}", flush=True)
+
         if id_i is not None:
             result = await db.execute(select(Order).where(Order.ggsel_order_id == id_i))
             order = result.scalar_one_or_none()
@@ -101,10 +105,8 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
                     starpets_custom_id=str(id_i),
                 )
                 db.add(order)
-            _sku_pid = await _resolve_sku_product_id(db, ggsel_offer_id, options)
-            if _sku_pid is not None:
-                order.sku_product_id = _sku_pid
-                print(f"[precheck] SKU variant → product_id={_sku_pid}", flush=True)
+            if sku_product_id is not None:
+                order.sku_product_id = sku_product_id
             print(
                 f"[precheck] order saved: ggsel_order_id={id_i} offer_id={internal_offer_id} "
                 f"roblox_username={roblox_username!r}",
@@ -118,14 +120,15 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         )
         existing_event = result.scalar_one_or_none()
 
+        _pc_payload = {"roblox_username": roblox_username, "sku_product_id": sku_product_id}
         if existing_event:
-            existing_event.payload = {"roblox_username": roblox_username}
+            existing_event.payload = _pc_payload
             existing_event.processed_at = datetime.utcnow()
         else:
             db.add(WebhookEvent(
                 kind=WebhookKind.precheck,
                 external_id=precheck_ext_id,
-                payload={"roblox_username": roblox_username},
+                payload=_pc_payload,
                 response_code=200,
             ))
 
@@ -345,7 +348,18 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             )
             db.add(order)
 
+        # SKU-master: notification body has no options, so fall back to the sku_product_id
+        # stored on the precheck WebhookEvent (mirrors the roblox_username resolution).
         _sku_pid = await _resolve_sku_product_id(db, offer_id, options)
+        if _sku_pid is None:
+            for _ext in (f"precheck-{offer_id}-{id_i}", f"precheck-{offer_id}"):
+                _ev = (await db.execute(select(WebhookEvent).where(
+                    WebhookEvent.kind == WebhookKind.precheck,
+                    WebhookEvent.external_id == _ext,
+                ))).scalar_one_or_none()
+                if _ev and (_ev.payload or {}).get("sku_product_id") is not None:
+                    _sku_pid = _ev.payload["sku_product_id"]
+                    break
         if _sku_pid is not None:
             order.sku_product_id = _sku_pid
             print(f"[notification] SKU variant → product_id={_sku_pid}", flush=True)
