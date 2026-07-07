@@ -2416,3 +2416,55 @@ async def build_sku_card_ep(name: str, pumping: str = "default"):
     radio (age×fly×ride variants), webhooks, SkuVariant rows. Additive — per-combo cards untouched."""
     from app.workers.sku_builder import build_sku_card
     return await build_sku_card(name, pumping)
+
+
+@app.get("/regenerate-cover")
+async def regenerate_cover(ggsel_offer_id: int = 0, all_sku: bool = False):
+    """Re-composite and PATCH the cover for SKU card(s) in place (no rebuild).
+    ?ggsel_offer_id=N -> one card. ?all_sku=true -> every distinct SKU card."""
+    import base64
+    from sqlalchemy import select, func
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant, SkuProduct
+    from app.images.cover import make_cover
+
+    async with AsyncSessionLocal() as db:
+        if all_sku:
+            gids = [int(g) for (g,) in (await db.execute(
+                select(SkuVariant.ggsel_offer_id).distinct()
+            )).all()]
+        elif ggsel_offer_id:
+            gids = [ggsel_offer_id]
+        else:
+            return {"error": "pass ggsel_offer_id=N or all_sku=true"}
+
+    results = []
+    for gid in gids:
+        async with AsyncSessionLocal() as db:
+            # any variant of this card -> its product -> rare/pumping/image
+            row = (await db.execute(
+                select(SkuProduct.rare, SkuProduct.pumping, SkuProduct.image_uri)
+                .join(SkuVariant, SkuVariant.starpets_product_id == SkuProduct.product_id)
+                .where(SkuVariant.ggsel_offer_id == gid)
+                .limit(1)
+            )).first()
+        if not row:
+            results.append({"ggsel_offer_id": gid, "error": "no variant/product"})
+            continue
+        rare, pumping, image_uri = row
+        pet_bytes = b""
+        if image_uri:
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                    r = await c.get(image_uri)
+                    if r.is_success:
+                        pet_bytes = r.content
+            except Exception as e:
+                print(f"[regenerate-cover] image fetch error gid={gid}: {e}", flush=True)
+        png = make_cover(pet_bytes, rare, pumping)
+        try:
+            await ggsel_office.update_cover(gid, base64.b64encode(png).decode(), "image/png")
+            results.append({"ggsel_offer_id": gid, "ok": True, "bytes": len(png)})
+        except Exception as e:
+            results.append({"ggsel_offer_id": gid, "error": f"{type(e).__name__}: {e}"})
+    return {"count": len(results), "results": results}

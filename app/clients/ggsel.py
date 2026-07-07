@@ -132,6 +132,19 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_cover(self, offer_id: int, cover_base64: str, cover_mime: str = "image/png") -> dict:
+        """PATCH just the cover image of an existing offer (same field as create_offer)."""
+        data_uri = f"data:{cover_mime};base64,{cover_base64}" if cover_base64 else None
+        body = {"cover_image_ru": data_uri}
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body
+            )
+            if not resp.is_success:
+                print(f"[update_cover] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
     async def create_option(self, offer_id: int) -> dict:
         body = {
             "options": [

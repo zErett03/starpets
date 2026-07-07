@@ -1,16 +1,19 @@
 """SKU-master card cover generation.
 
 Composites a pet PNG onto a rarity-colored background (StarPets-style concentric white
-rings + rarity-tinted radial + sparkles) with a pumping-type badge in the top-right corner.
+rings + rarity-tinted radial + sparkles) with a pumping-type badge in the top-LEFT corner
+(top-right collides with ggsel's favourite/♥ button).
 
-Config-driven: tweak RARITY_COLORS / _BADGE and re-run /regenerate-covers to restyle every
-card — the card structure (variants, mapping) is untouched, only the cover image changes.
+Rendered at 1000px (ggsel accepts up to 1000×1000) so the vector elements stay crisp and
+ggsel doesn't re-compress a small image into artifacts. All sizes are SZ fractions, so
+changing SZ rescales the whole composition. Config-driven: tweak RARITY_COLORS / _BADGE and
+re-run /regenerate-covers to restyle every card — the card structure is untouched.
 """
 from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-SZ = 512
+SZ = 1000
 
 # rare value -> (inner, outer, sparkle) RGB. Unknown rarities fall back to "common".
 RARITY_COLORS = {
@@ -49,13 +52,14 @@ def _background(rare: str) -> Image.Image:
         t = r / maxr
         col = tuple(int(inner[i] + (outer[i] - inner[i]) * t) for i in range(3))
         gd.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col + (255,))
-    grad = grad.filter(ImageFilter.GaussianBlur(6))
+    grad = grad.filter(ImageFilter.GaussianBlur(int(SZ * 0.012)))
     img.alpha_composite(grad)
     d = ImageDraw.Draw(img)
+    ring_w = max(2, int(SZ * 0.024))
     for rr in (int(SZ * 0.40), int(SZ * 0.33)):
-        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=(255, 255, 255, 255), width=12)
-    for (sx, sy, sr) in ((0.80, 0.22, 20), (0.88, 0.33, 13), (0.15, 0.82, 17)):
-        _sparkle(d, int(SZ * sx), int(SZ * sy), sr, spark + (255,))
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=(255, 255, 255, 255), width=ring_w)
+    for (sx, sy, sr) in ((0.80, 0.22, 0.039), (0.88, 0.33, 0.026), (0.15, 0.82, 0.033)):
+        _sparkle(d, int(SZ * sx), int(SZ * sy), int(SZ * sr), spark + (255,))
     return img
 
 
@@ -64,17 +68,20 @@ def _badge(img: Image.Image, pumping: str) -> Image.Image:
     if kind not in _BADGE:
         return img
     d = ImageDraw.Draw(img)
-    r = 46
-    cx = SZ - r - 22
-    cy = r + 22
-    d.rounded_rectangle([cx - r, cy - r, cx + r, cy + r], radius=20,
-                        fill=_BADGE[kind] + (255,), outline=(255, 255, 255, 255), width=6)
+    r = int(SZ * 0.09)
+    margin = int(SZ * 0.043)
+    cx = r + margin          # top-LEFT (top-right overlaps ggsel's ♥ button)
+    cy = r + margin
+    rad = int(SZ * 0.039)
+    d.rounded_rectangle([cx - r, cy - r, cx + r, cy + r], radius=rad,
+                        fill=_BADGE[kind] + (255,), outline=(255, 255, 255, 255),
+                        width=max(2, int(SZ * 0.012)))
     if kind == "default":
         bw, bh = int(r * 0.5), max(4, int(r * 0.13))
         d.rounded_rectangle([cx - bw, cy - bh, cx + bw, cy + bh], radius=bh, fill=(255, 255, 255, 255))
     else:
         sym = "N" if kind == "neon" else "M"
-        f = _font(52)
+        f = _font(int(SZ * 0.10))
         tb = d.textbbox((0, 0), sym, font=f)
         d.text((cx - (tb[2] - tb[0]) / 2 - tb[0], cy - (tb[3] - tb[1]) / 2 - tb[1]),
                sym, font=f, fill=(255, 255, 255, 255))
@@ -87,10 +94,9 @@ def make_cover(pet_png: bytes, rare: str, pumping: str) -> bytes:
     if pet_png:
         try:
             pet = Image.open(BytesIO(pet_png)).convert("RGBA")
-            # StarPets source is only 110px. Upscaling + sharpening amplifies webp
-            # artifacts (looks harsh), so instead: high-quality LANCZOS upscale of a
-            # pre-smoothed source -> soft, clean edges close to the original look.
-            pet = pet.filter(ImageFilter.GaussianBlur(0.4))
+            # StarPets source is only 110px. Pre-smooth then LANCZOS upscale -> soft, clean
+            # edges (sharpening amplifies webp artifacts and looks harsh at this scale).
+            pet = pet.filter(ImageFilter.GaussianBlur(SZ * 0.0008))
             box = int(SZ * 0.60)
             scale = min(box / pet.width, box / pet.height)
             pet = pet.resize(
