@@ -87,20 +87,16 @@ def make_cover(pet_png: bytes, rare: str, pumping: str) -> bytes:
     if pet_png:
         try:
             pet = Image.open(BytesIO(pet_png)).convert("RGBA")
-            # StarPets source is ~110px, so we UPSCALE (resize, not thumbnail) to fill the ring
-            box = int(SZ * 0.62)
+            # StarPets source is only 110px. Upscaling + sharpening amplifies webp
+            # artifacts (looks harsh), so instead: high-quality LANCZOS upscale of a
+            # pre-smoothed source -> soft, clean edges close to the original look.
+            pet = pet.filter(ImageFilter.GaussianBlur(0.4))
+            box = int(SZ * 0.60)
             scale = min(box / pet.width, box / pet.height)
             pet = pet.resize(
                 (max(1, int(pet.width * scale)), max(1, int(pet.height * scale))),
                 Image.LANCZOS,
             )
-            # 110px source -> upscaled ~3x is soft; unsharp restores edge crispness.
-            # Sharpen only the RGB, keep alpha intact so the halo isn't fringed.
-            r, g, b, a = pet.split()
-            rgb = Image.merge("RGB", (r, g, b)).filter(
-                ImageFilter.UnsharpMask(radius=2.0, percent=110, threshold=2)
-            )
-            pet = Image.merge("RGBA", (*rgb.split(), a))
             bg.alpha_composite(pet, ((SZ - pet.width) // 2, (SZ - pet.height) // 2))
         except Exception as e:
             print(f"[cover] pet composite failed: {e}", flush=True)
