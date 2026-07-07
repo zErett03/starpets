@@ -2690,3 +2690,47 @@ async def retry_delivery(order_id: int):
         return {"ok": True, "order_id": order.id, "ggsel_order_id": order.ggsel_order_id,
                 "requeued": True, "sku_product_id": order.sku_product_id,
                 "roblox_username": order.roblox_username}
+
+
+@app.get("/cleanup-sku-card")
+async def cleanup_sku_card(ggsel_offer_id: int, remove_option: bool = True, pause: bool = False):
+    """Retire an old/prototype SKU card: delete its SkuVariant rows (so the group is no longer
+    skip-guarded) and, by default, remove the bolted-on 'Вариант' radio option from the ggsel
+    card. ?pause=true also pauses the card."""
+    from sqlalchemy import select, delete as sql_delete
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        option_ids = [int(o) for (o,) in (await db.execute(
+            select(SkuVariant.ggsel_option_id).where(
+                SkuVariant.ggsel_offer_id == ggsel_offer_id,
+                SkuVariant.ggsel_option_id.isnot(None),
+            ).distinct()
+        )).all()]
+        n_rows = (await db.execute(
+            select(SkuVariant.id).where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
+        )).all()
+
+    result = {"ggsel_offer_id": ggsel_offer_id, "variant_rows": len(n_rows),
+              "option_ids": option_ids}
+
+    if remove_option and option_ids:
+        try:
+            await ggsel_office.delete_options(ggsel_offer_id, option_ids)
+            result["option_removed"] = True
+        except Exception as e:
+            result["option_remove_error"] = f"{type(e).__name__}: {e}"
+
+    if pause:
+        try:
+            await ggsel_office.pause_offer(ggsel_offer_id)
+            result["paused"] = True
+        except Exception as e:
+            result["pause_error"] = f"{type(e).__name__}: {e}"
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(sql_delete(SkuVariant).where(SkuVariant.ggsel_offer_id == ggsel_offer_id))
+        await db.commit()
+    result["variant_rows_deleted"] = True
+    return result
