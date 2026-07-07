@@ -2542,3 +2542,109 @@ async def _run_build_all(groups):
             print(f"[BuildAllSku] progress {i}/{total} built={built} skipped={skipped} errors={errors}", flush=True)
         await asyncio.sleep(0.3)   # gentle pacing for ggsel
     print(f"[BuildAllSku] DONE — total={total} built={built} skipped={skipped} errors={errors}", flush=True)
+
+
+@app.get("/sku-card-stock")
+async def sku_card_stock(ggsel_offer_id: int):
+    """Live stock per variant of a SKU card — pick an in-stock variant to test end-to-end.
+    For each variant: its label, snapshot price, and whether StarPets has a free item now."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        variants = (await db.execute(
+            select(SkuVariant).where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
+            .order_by(SkuVariant.price_rub.asc())
+        )).scalars().all()
+    if not variants:
+        return {"error": f"no SkuVariant rows for ggsel_offer_id={ggsel_offer_id}"}
+
+    out = []
+    async with httpx.AsyncClient(timeout=10) as http:
+        for v in variants:
+            top = None
+            try:
+                top = await starpets.get_top_item(http, str(v.starpets_product_id))
+            except Exception as e:
+                out.append({"product_id": v.starpets_product_id, "label": v.label,
+                            "error": f"{type(e).__name__}: {e}"})
+                continue
+            out.append({
+                "product_id": v.starpets_product_id, "label": v.label,
+                "price_rub": float(v.price_rub or 0),
+                "in_stock": top is not None,
+                "live_floor_usd": float(top.get("price_usd")) if top else None,
+            })
+    in_stock = [o for o in out if o.get("in_stock")]
+    return {"ggsel_offer_id": ggsel_offer_id, "variants": len(out),
+            "in_stock_count": len(in_stock), "variants_detail": out}
+
+
+@app.get("/debug-sku-order")
+async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
+    """Full forensic dump of a (SKU) order: resolved product, precheck/notification events,
+    and live stock — to see why a paid order hit 'no item'."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Offer, WebhookEvent, WebhookKind
+
+    async with AsyncSessionLocal() as db:
+        if order_id:
+            order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        elif ggsel_order_id:
+            order = (await db.execute(select(Order).where(Order.ggsel_order_id == ggsel_order_id))).scalar_one_or_none()
+        else:
+            return {"error": "pass ggsel_order_id or order_id"}
+        if not order:
+            return {"error": "order not found"}
+
+        offer = (await db.execute(select(Offer).where(Offer.id == order.offer_id))).scalar_one_or_none()
+        gid = offer.ggsel_offer_id if offer else None
+
+        prechecks = (await db.execute(
+            select(WebhookEvent).where(
+                WebhookEvent.kind == WebhookKind.precheck,
+                WebhookEvent.external_id.like(f"precheck-{gid}%"),
+            ).order_by(WebhookEvent.processed_at.desc())
+        )).scalars().all() if gid else []
+        notif = (await db.execute(
+            select(WebhookEvent).where(
+                WebhookEvent.kind == WebhookKind.notification,
+                WebhookEvent.external_id == str(order.ggsel_order_id),
+            )
+        )).scalar_one_or_none()
+
+    resolved_pid = order.sku_product_id or (offer.starpets_product_id if offer else None)
+    live = None
+    if resolved_pid:
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                top = await starpets.get_top_item(http, str(resolved_pid))
+            live = {"in_stock": top is not None,
+                    "floor_usd": float(top.get("price_usd")) if top else None}
+        except Exception as e:
+            live = {"error": f"{type(e).__name__}: {e}"}
+
+    return {
+        "order": {
+            "id": order.id, "ggsel_order_id": order.ggsel_order_id,
+            "offer_id": order.offer_id, "item_name": order.item_name,
+            "sku_product_id": order.sku_product_id,
+            "amount_rub": float(order.amount_rub) if order.amount_rub is not None else None,
+            "roblox_username": order.roblox_username,
+            "delivery_status": order.delivery_status.value if order.delivery_status else None,
+            "error_reason": order.error_reason,
+            "starpets_purchase_id": order.starpets_purchase_id,
+            "paid_at": str(order.paid_at), "created_at": str(order.created_at),
+        },
+        "offer": {"ggsel_offer_id": gid, "name": offer.name if offer else None,
+                  "starpets_product_id": offer.starpets_product_id if offer else None},
+        "resolved_product_id": resolved_pid,
+        "resolved_product_live_stock": live,
+        "notification_seen": notif is not None,
+        "precheck_events": [
+            {"external_id": e.external_id, "processed_at": str(e.processed_at), "payload": e.payload}
+            for e in prechecks
+        ],
+    }

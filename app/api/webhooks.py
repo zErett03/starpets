@@ -358,21 +358,26 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
             )
             db.add(order)
 
-        # SKU-master: notification body has no options, so fall back to the sku_product_id
-        # stored on the precheck WebhookEvent (mirrors the roblox_username resolution).
-        _sku_pid = await _resolve_sku_product_id(db, offer_id, options)
-        if _sku_pid is None:
-            for _ext in (f"precheck-{offer_id}-{id_i}", f"precheck-{offer_id}"):
+        # SKU-master variant resolution. IMPORTANT: never overwrite the product that was
+        # resolved for THIS order at precheck time — that is the buyer's actual selection.
+        # Only when it is missing do we fall back, and ONLY to the strictly id_i-scoped
+        # precheck event. The shared `precheck-{offer_id}` key is clobbered by every variant
+        # attempt on the card, so using it can cross-wire a paid order to the wrong (often
+        # out-of-stock) variant — exactly the "paid but no item" failure mode.
+        if order.sku_product_id is None:
+            _sku_pid = await _resolve_sku_product_id(db, offer_id, options)  # notif has no options
+            if _sku_pid is None and id_i is not None:
                 _ev = (await db.execute(select(WebhookEvent).where(
                     WebhookEvent.kind == WebhookKind.precheck,
-                    WebhookEvent.external_id == _ext,
+                    WebhookEvent.external_id == f"precheck-{offer_id}-{id_i}",
                 ))).scalar_one_or_none()
                 if _ev and (_ev.payload or {}).get("sku_product_id") is not None:
                     _sku_pid = _ev.payload["sku_product_id"]
-                    break
-        if _sku_pid is not None:
-            order.sku_product_id = _sku_pid
-            print(f"[notification] SKU variant → product_id={_sku_pid}", flush=True)
+            if _sku_pid is not None:
+                order.sku_product_id = _sku_pid
+                print(f"[notification] SKU variant → product_id={_sku_pid}", flush=True)
+        else:
+            print(f"[notification] SKU variant kept from precheck → product_id={order.sku_product_id}", flush=True)
 
         await db.flush()
 
