@@ -2648,3 +2648,25 @@ async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
             for e in prechecks
         ],
     }
+
+
+@app.get("/retry-delivery")
+async def retry_delivery(order_id: int):
+    """Re-enqueue delivery for an order that failed on a transient issue (e.g. no_items_available
+    when stock has since returned). Safe: skips orders already dispatched/done/finalized."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            return {"error": f"order {order_id} not found"}
+        if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
+            return {"error": f"order {order_id} is {order.delivery_status.value} — not retrying"}
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
+        await db.commit()
+        return {"ok": True, "order_id": order_id, "requeued": True,
+                "sku_product_id": order.sku_product_id, "roblox_username": order.roblox_username}

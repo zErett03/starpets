@@ -12,6 +12,32 @@ from app.fx import get_usd_rub, item_cost_ok
 _BUY_MAX_RETRIES = 3
 
 
+class TransientDeliveryError(Exception):
+    """A recoverable delivery failure (no stock / price spike). Raised so the task runner
+    retries with backoff; StarPets stock and prices flicker, so a paid order should not be
+    failed permanently on the first miss."""
+
+
+async def _transient_fail(db, order, order_id: int, reason: str, msg: str,
+                          attempt: int, max_attempts: int) -> None:
+    """Escalate to needs_attention on the LAST attempt, otherwise raise to retry.
+    Keeps the order recoverable (nothing bought yet) across the retry window."""
+    order.updated_at = datetime.utcnow()
+    if attempt >= max_attempts:
+        order.delivery_status = DeliveryStatus.needs_attention
+        order.error_reason = reason
+        await db.commit()
+        print(f"[Deliver] order_id={order_id} needs_attention after {attempt} attempts: "
+              f"{reason} ({msg})", flush=True)
+        return
+    order.delivery_status = DeliveryStatus.pending
+    order.error_reason = f"retrying:{reason}"
+    await db.commit()
+    print(f"[Deliver] order_id={order_id} transient {reason} attempt {attempt}/{max_attempts} "
+          f"— will retry ({msg})", flush=True)
+    raise TransientDeliveryError(f"{reason}: {msg}")
+
+
 async def _buy_with_retry(
     item_id: str,
     price_usd: float,
@@ -91,7 +117,7 @@ async def _buy_with_retry(
             current_id = new_id
 
 
-async def deliver_order(order_id: int) -> None:
+async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Order).where(Order.id == order_id))
         order = result.scalar_one_or_none()
@@ -146,13 +172,9 @@ async def deliver_order(order_id: int) -> None:
             async with httpx.AsyncClient(timeout=15) as http:
                 top_item = await starpets.get_top_item(http, product_id)
             if not top_item:
-                order.delivery_status = DeliveryStatus.failed
-                order.error_reason = "no_items_available"
-                order.updated_at = datetime.utcnow()
-                await db.commit()
-                print(
-                    f"[Deliver] order_id={order_id} failed: no_items_available product_id={product_id}",
-                    flush=True,
+                await _transient_fail(
+                    db, order, order_id, "no_items_available",
+                    f"product_id={product_id}", attempt, max_attempts,
                 )
                 return
             item_id = str(top_item["id"])
@@ -164,15 +186,10 @@ async def deliver_order(order_id: int) -> None:
             fx_rate = await get_usd_rub()
             ok, cost_rub = item_cost_ok(price_usd, fx_rate, sale_rub, settings.max_cost_ratio)
             if not ok:
-                order.delivery_status = DeliveryStatus.failed
-                order.error_reason = "price_too_high"
-                order.updated_at = datetime.utcnow()
-                await db.commit()
-                print(
-                    f"[Deliver] order_id={order_id} BLOCKED unprofitable: "
+                await _transient_fail(
+                    db, order, order_id, "price_too_high",
                     f"cost_rub={cost_rub:.2f} > {settings.max_cost_ratio}×{sale_rub} "
-                    f"(price_usd={price_usd} fx={fx_rate})",
-                    flush=True,
+                    f"price_usd={price_usd} fx={fx_rate}", attempt, max_attempts,
                 )
                 return
 
@@ -183,14 +200,10 @@ async def deliver_order(order_id: int) -> None:
                 )
             except RuntimeError as e:
                 if str(e) == "price_too_high":
-                    order.delivery_status = DeliveryStatus.failed
-                    order.error_reason = "price_too_high"
-                    order.updated_at = datetime.utcnow()
-                    await db.commit()
-                    print(
-                        f"[Deliver] order_id={order_id} marked failed: price_too_high "
+                    await _transient_fail(
+                        db, order, order_id, "price_too_high",
                         f"item_id={item_id} price_usd={price_usd} offer_rub={offer_price_rub}",
-                        flush=True,
+                        attempt, max_attempts,
                     )
                     return
                 raise

@@ -31,7 +31,11 @@ async def handle_task(task) -> None:
             await create_offer(payload["offer_id"])
         case TaskKind.DELIVER:
             from app.workers.deliver import deliver_order
-            await deliver_order(payload["order_id"])
+            await deliver_order(
+                payload["order_id"],
+                attempt=getattr(task, "attempts", 1),
+                max_attempts=getattr(task, "max_attempts", 1),
+            )
         case TaskKind.MONITOR_DELIVERY:
             from app.workers.monitor_delivery import monitor_delivery
             await monitor_delivery(payload["order_id"])
