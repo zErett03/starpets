@@ -79,7 +79,9 @@ class GgselSellerOfficeClient:
 
         import json as _json
 
-        print(f"[create_offer] body: {_json.dumps(body, ensure_ascii=False)}", flush=True)
+        _log_body = {**body, "cover_image_ru": (f"<data-uri {len(cover_data_uri)} chars>"
+                                              if cover_data_uri else None)}
+        print(f"[create_offer] body: {_json.dumps(_log_body, ensure_ascii=False)}", flush=True)
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await self._request_retry(client, "POST", f"{SELLER_OFFICE_V2_URL}/offers", json=body)

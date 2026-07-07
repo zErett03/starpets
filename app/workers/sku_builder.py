@@ -12,7 +12,7 @@ import base64
 import traceback
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
 
 from app.db import AsyncSessionLocal
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -231,6 +231,20 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
             notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={settings.webhook_shared_secret}",
         )
     except Exception as e:
+        # Roll back partial state so a re-run rebuilds cleanly instead of skip-guarding a
+        # half-built card: drop any SkuVariant rows created for this gid and pause the orphan.
+        _gid = locals().get("gid")
+        if _gid:
+            try:
+                async with AsyncSessionLocal() as db:
+                    await db.execute(sql_delete(SkuVariant).where(SkuVariant.ggsel_offer_id == _gid))
+                    await db.commit()
+            except Exception as ce:
+                print(f"[SkuBuilder] rollback variant rows failed gid={_gid}: {ce}", flush=True)
+            try:
+                await ggsel_office.pause_offer(_gid)
+            except Exception as pe:
+                print(f"[SkuBuilder] pause orphan card failed gid={_gid}: {pe}", flush=True)
         return {"error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()[-1500:]}
 
     return {

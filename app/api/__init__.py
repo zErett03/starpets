@@ -2765,3 +2765,79 @@ async def close_order(order_id: int):
         await db.commit()
         return {"ok": True, "order_id": order.id, "ggsel_order_id": order.ggsel_order_id,
                 "previous_status": prev, "delivery_status": "done"}
+
+
+@app.get("/activate-sku-cards")
+async def activate_sku_cards(limit: int = 0, dry_run: bool = True):
+    """Publish SKU-card drafts (they're created as drafts, like normal offers). Activates every
+    distinct ggsel card that has SkuVariant rows, in batches of 100 via ggsel batch_activate.
+    ?dry_run=true (default) just lists what would be activated. Per-variant availability is
+    enforced at precheck, so no pre-activation stock gate is needed."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        gids = [int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).distinct()
+        )).all()]
+    gids.sort()
+    if limit and limit > 0:
+        gids = gids[:limit]
+
+    if dry_run:
+        return {"dry_run": True, "sku_card_count": len(gids), "sample": gids[:30]}
+
+    activated = 0
+    errors = []
+    for i in range(0, len(gids), 100):
+        chunk = gids[i:i + 100]
+        try:
+            await ggsel_office.batch_activate(chunk)
+            activated += len(chunk)
+        except Exception as e:
+            errors.append({"chunk_start": i, "error": f"{type(e).__name__}: {e}"})
+        import asyncio
+        await asyncio.sleep(0.3)
+    return {"activated": activated, "total": len(gids), "errors": errors}
+
+
+@app.get("/cleanup-sku-by-name")
+async def cleanup_sku_by_name(name: str, dry_run: bool = True):
+    """Clear the DB traces of a pet's SKU cards (SkuVariant rows + backing __sku__ offers) when
+    the ggsel cards were deleted manually and the ids weren't kept. Un-skip-guards the pet so it
+    rebuilds fresh. Does NOT touch ggsel (cards already gone) or per-combo offers."""
+    from sqlalchemy import select, delete as sql_delete
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct, SkuVariant, Offer
+
+    async with AsyncSessionLocal() as db:
+        pids = [int(p) for (p,) in (await db.execute(
+            select(SkuProduct.product_id).where(SkuProduct.name == name)
+        )).all()]
+        if not pids:
+            return {"error": f"no sku_products for name={name!r}"}
+
+        gids = [int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).where(
+                SkuVariant.starpets_product_id.in_(pids)
+            ).distinct()
+        )).all()]
+        n_variants = len((await db.execute(
+            select(SkuVariant.id).where(SkuVariant.starpets_product_id.in_(pids))
+        )).all())
+
+        if dry_run:
+            return {"dry_run": True, "name": name, "product_ids": len(pids),
+                    "sku_variant_rows": n_variants, "backing_offer_gids": gids}
+
+        await db.execute(sql_delete(SkuVariant).where(SkuVariant.starpets_product_id.in_(pids)))
+        deleted_offers = 0
+        if gids:
+            res = await db.execute(
+                sql_delete(Offer).where(Offer.age == "__sku__", Offer.ggsel_offer_id.in_(gids))
+            )
+            deleted_offers = res.rowcount or 0
+        await db.commit()
+    return {"name": name, "deleted_sku_variant_rows": n_variants,
+            "deleted_backing_offers": deleted_offers, "gids": gids}
