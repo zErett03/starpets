@@ -236,3 +236,21 @@ class SkuVariant(Base):
     label = Column(String, nullable=True)
     price_rub = Column(Numeric(10, 2), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class SkuProduct(Base):
+    """SKU-master product catalog mirror (from StarPets get_all_products) WITH pumping —
+    the authoritative source for grouping combos into SKU cards. Unlike `offers`, it does NOT
+    collapse neon/mega (which the offers composite key drops)."""
+    __tablename__ = "sku_products"
+
+    product_id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    rare = Column(String, nullable=True)
+    item_type = Column(String, nullable=True)
+    age = Column(String, nullable=True)
+    pumping = Column(String, nullable=True)
+    flyable = Column(Boolean, default=False)
+    rideable = Column(Boolean, default=False)
+    image_uri = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)

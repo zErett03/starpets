@@ -1439,6 +1439,68 @@ async def fast_forward_cursor_ep():
     return await fast_forward_cursor()
 
 
+@app.get("/sync-sku-products")
+async def sync_sku_products():
+    """Populate sku_products from StarPets get_all_products (full catalog WITH pumping)."""
+    import asyncio
+    asyncio.create_task(_run_sync_sku_products())
+    return {"started": True}
+
+
+async def _run_sync_sku_products():
+    from datetime import datetime
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct
+
+    products = await starpets.get_all_products()
+    total = len(products)
+    print(f"[SyncSkuProducts] starting — {total} products from StarPets", flush=True)
+
+    now = datetime.utcnow()
+    rows = []
+    for p in products:
+        pid = p.get("id")
+        if not pid:
+            continue
+        rows.append({
+            "product_id": int(pid),
+            "name": p.get("name") or "",
+            "rare": p.get("rare") or p.get("rarity"),
+            "item_type": p.get("type") or p.get("item_type"),
+            "age": p.get("age"),
+            "pumping": p.get("pumping"),
+            "flyable": bool(p.get("flyable", False)),
+            "rideable": bool(p.get("rideable", False)),
+            "image_uri": p.get("imageUri") or p.get("image_uri") or p.get("image"),
+            "updated_at": now,
+        })
+
+    upserted = 0
+    async with AsyncSessionLocal() as db:
+        for i in range(0, len(rows), 1000):
+            batch = rows[i:i + 1000]
+            stmt = pg_insert(SkuProduct).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["product_id"],
+                set_={
+                    "name": stmt.excluded.name,
+                    "rare": stmt.excluded.rare,
+                    "item_type": stmt.excluded.item_type,
+                    "age": stmt.excluded.age,
+                    "pumping": stmt.excluded.pumping,
+                    "flyable": stmt.excluded.flyable,
+                    "rideable": stmt.excluded.rideable,
+                    "image_uri": stmt.excluded.image_uri,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            await db.execute(stmt)
+            upserted += len(batch)
+        await db.commit()
+    print(f"[SyncSkuProducts] done — upserted={upserted} total={total}", flush=True)
+
+
 @app.get("/proto-sku-card")
 async def proto_sku_card(name: str, limit: int = 8):
     """SKU-master prototype (Phase 0): turn several combos of one pet into a single card
