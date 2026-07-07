@@ -551,17 +551,25 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 result = await db.execute(select(Order).where(Order.uniquecode == uniquecode))
                 order = result.scalar_one_or_none()
             if order is None and uniquecode is not None:
-                # Первый визит: ищем свежий order без uniquecode (notification webhook
-                # срабатывает до редиректа, поэтому order уже есть в БД)
-                cutoff = datetime.utcnow() - timedelta(minutes=10)
+                # Первый визит: привязываем uniquecode к свежему order без него (notification
+                # webhook срабатывает до редиректа, order уже в БД). Окно считаем по САМОМУ
+                # позднему из created_at / dispatched_at — чтобы восстановленный заказ
+                # (retry-delivery, пересоздание трейда спустя время) снова стал привязываемым,
+                # а не завис на "обрабатывается". Берём и needs_attention (recovered orders).
+                from sqlalchemy import func as _func
+                cutoff = datetime.utcnow() - timedelta(minutes=60)
+                _recent = _func.coalesce(Order.dispatched_at, Order.created_at)
                 result = await db.execute(
                     select(Order)
                     .where(
                         Order.uniquecode.is_(None),
-                        Order.delivery_status.in_([DeliveryStatus.pending, DeliveryStatus.dispatched]),
-                        Order.created_at >= cutoff,
+                        Order.delivery_status.in_([
+                            DeliveryStatus.pending, DeliveryStatus.dispatched,
+                            DeliveryStatus.needs_attention,
+                        ]),
+                        _recent >= cutoff,
                     )
-                    .order_by(Order.created_at.desc())
+                    .order_by(_recent.desc())
                     .limit(1)
                 )
                 order = result.scalar_one_or_none()
@@ -2635,6 +2643,12 @@ async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
             "roblox_username": order.roblox_username,
             "delivery_status": order.delivery_status.value if order.delivery_status else None,
             "error_reason": order.error_reason,
+            "uniquecode": order.uniquecode,
+            "bot_name": order.bot_name,
+            "starpets_custom_id": order.starpets_custom_id,
+            "starpets_status": order.starpets_status,
+            "dispatched_at": str(order.dispatched_at),
+            "last_redeliver_result": order.last_redeliver_result,
             "starpets_purchase_id": order.starpets_purchase_id,
             "paid_at": str(order.paid_at), "created_at": str(order.created_at),
         },
@@ -2660,13 +2674,4 @@ async def retry_delivery(order_id: int):
 
     async with AsyncSessionLocal() as db:
         order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
-        if not order:
-            return {"error": f"order {order_id} not found"}
-        if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
-            return {"error": f"order {order_id} is {order.delivery_status.value} — not retrying"}
-        order.delivery_status = DeliveryStatus.pending
-        order.error_reason = None
-        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
-        await db.commit()
-        return {"ok": True, "order_id": order_id, "requeued": True,
-                "sku_product_id": order.sku_product_id, "roblox_username": order.roblox_username}
+        

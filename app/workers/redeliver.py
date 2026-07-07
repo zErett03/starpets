@@ -70,6 +70,23 @@ async def redeliver_same_item(db, order) -> str:
         order.updated_at = datetime.utcnow()
         return result
 
+    # Cancel the previous (hung) trade FIRST so the item is released — otherwise create_trade
+    # returns 130/210 because the item is still locked in the active trade. Skip the cancel if
+    # the exchange already reached IN_PROGRESS(5), where the item may be mid-delivery.
+    prev_trade_id = (order.starpets_custom_id or "").strip()
+    if prev_trade_id:
+        if await _order_reached_in_progress(db, order.id):
+            print(f"[redeliver] order={order.id} reached in_progress(5) — NOT cancelling "
+                  f"prev trade {prev_trade_id}", flush=True)
+        else:
+            try:
+                await starpets.cancel_trade(prev_trade_id, "seller_cancel_trade")
+                print(f"[redeliver] cancelled prev trade {prev_trade_id} to free item "
+                      f"order={order.id}", flush=True)
+            except Exception as e:
+                print(f"[redeliver] cancel prev trade {prev_trade_id} failed (continuing): {e}",
+                      flush=True)
+
     try:
         trade_resp = await starpets.create_trade(
             purchased_item_ids=[purchase_id], roblox_username=username
