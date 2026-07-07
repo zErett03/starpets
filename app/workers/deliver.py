@@ -131,6 +131,29 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
 
         # SKU-master: a resolved variant product takes precedence over the base offer product
         product_id = str(order.sku_product_id or offer.starpets_product_id or "")
+        if not product_id and order.roblox_username and offer.ggsel_offer_id:
+            # Self-heal: a SKU order whose notification didn't persist the variant. Recover it
+            # from the precheck event (username-scoped first, then the shared offer key with a
+            # username check) and persist, so we deliver the buyer's actual selection.
+            from app.db.models import WebhookEvent, WebhookKind
+            _u = order.roblox_username.strip().lower()
+            _shared = f"precheck-{offer.ggsel_offer_id}"
+            for _ext in (f"{_shared}-sku-{_u}", _shared):
+                _ev = (await db.execute(select(WebhookEvent).where(
+                    WebhookEvent.kind == WebhookKind.precheck,
+                    WebhookEvent.external_id == _ext,
+                ))).scalar_one_or_none()
+                if not _ev or (_ev.payload or {}).get("sku_product_id") is None:
+                    continue
+                _ev_u = (_ev.payload.get("roblox_username") or "").strip().lower()
+                if _ext == _shared and _ev_u and _ev_u != _u:
+                    continue
+                order.sku_product_id = _ev.payload["sku_product_id"]
+                product_id = str(order.sku_product_id)
+                await db.commit()
+                print(f"[Deliver] order_id={order_id} self-healed sku_product_id={product_id} "
+                      f"from {_ext}", flush=True)
+                break
         if not product_id:
             raise RuntimeError(f"Offer {offer.id} has no starpets_product_id")
 

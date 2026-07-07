@@ -141,6 +141,22 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
                 response_code=200,
             ))
 
+        # SKU: also store the selection under a USERNAME-scoped key. ggsel calls precheck
+        # WITHOUT id_i, so the variant otherwise lives only under the shared offer key, which
+        # a concurrent buyer on the same card would clobber. The username key ties the variant
+        # to THIS buyer so notification can resolve it unambiguously.
+        if sku_product_id is not None and roblox_username:
+            _u_key = f"precheck-{ggsel_offer_id}-sku-{roblox_username.strip().lower()}"
+            _u_ev = (await db.execute(
+                select(WebhookEvent).where(WebhookEvent.external_id == _u_key)
+            )).scalar_one_or_none()
+            if _u_ev:
+                _u_ev.payload = _pc_payload
+                _u_ev.processed_at = datetime.utcnow()
+            else:
+                db.add(WebhookEvent(kind=WebhookKind.precheck, external_id=_u_key,
+                                    payload=_pc_payload, response_code=200))
+
         await db.commit()
         print(f"[precheck] WebhookEvent saved: {precheck_ext_id!r} username={roblox_username!r}", flush=True)
 
@@ -366,16 +382,35 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
         # out-of-stock) variant — exactly the "paid but no item" failure mode.
         if order.sku_product_id is None:
             _sku_pid = await _resolve_sku_product_id(db, offer_id, options)  # notif has no options
-            if _sku_pid is None and id_i is not None:
-                _ev = (await db.execute(select(WebhookEvent).where(
-                    WebhookEvent.kind == WebhookKind.precheck,
-                    WebhookEvent.external_id == f"precheck-{offer_id}-{id_i}",
-                ))).scalar_one_or_none()
-                if _ev and (_ev.payload or {}).get("sku_product_id") is not None:
-                    _sku_pid = _ev.payload["sku_product_id"]
+            if _sku_pid is None:
+                _u = (roblox_username or "").strip().lower()
+                _keys = []
+                if id_i is not None:
+                    _keys.append(f"precheck-{offer_id}-{id_i}")   # exact order (if ggsel sent id_i)
+                if _u:
+                    _keys.append(f"precheck-{offer_id}-sku-{_u}")  # this buyer's selection
+                _keys.append(f"precheck-{offer_id}")               # shared (verify username)
+                for _ext in _keys:
+                    _ev = (await db.execute(select(WebhookEvent).where(
+                        WebhookEvent.kind == WebhookKind.precheck,
+                        WebhookEvent.external_id == _ext,
+                    ))).scalar_one_or_none()
+                    if not _ev:
+                        continue
+                    _pl = _ev.payload or {}
+                    if _pl.get("sku_product_id") is None:
+                        continue
+                    # On the shared key, refuse a mismatched username (concurrent other buyer).
+                    _ev_u = (_pl.get("roblox_username") or "").strip().lower()
+                    if _ext == f"precheck-{offer_id}" and _u and _ev_u and _ev_u != _u:
+                        print(f"[notification] shared precheck username {_ev_u!r} != order "
+                              f"{_u!r} — skip (avoid cross-wire)", flush=True)
+                        continue
+                    _sku_pid = _pl["sku_product_id"]
+                    print(f"[notification] SKU variant from {_ext!r} → product_id={_sku_pid}", flush=True)
+                    break
             if _sku_pid is not None:
                 order.sku_product_id = _sku_pid
-                print(f"[notification] SKU variant → product_id={_sku_pid}", flush=True)
         else:
             print(f"[notification] SKU variant kept from precheck → product_id={order.sku_product_id}", flush=True)
 
