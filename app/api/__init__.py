@@ -1439,6 +1439,44 @@ async def fast_forward_cursor_ep():
     return await fast_forward_cursor()
 
 
+@app.get("/probe-image-sizes")
+async def probe_image_sizes(product_id: int):
+    """Probe which StarPets image sizes are available for a product (swap the WxH path folder)."""
+    import re
+    from io import BytesIO
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct
+    from PIL import Image
+
+    async with AsyncSessionLocal() as db:
+        p = (await db.execute(select(SkuProduct).where(SkuProduct.product_id == product_id))).scalar_one_or_none()
+    if not p or not p.image_uri:
+        return {"error": "no image_uri for this product"}
+
+    base = p.image_uri
+    cands = {"as_is": base, "original_nosize": re.sub(r"/\d+x\d+/", "/", base)}
+    for sz in ("220x220", "256x256", "300x300", "512x512", "1024x1024"):
+        cands[sz] = re.sub(r"/\d+x\d+/", f"/{sz}/", base)
+
+    results = {}
+    async with httpx.AsyncClient(timeout=15) as c:
+        for name, url in cands.items():
+            try:
+                r = await c.get(url)
+                info = {"status": r.status_code, "bytes": len(r.content)}
+                if r.is_success:
+                    try:
+                        im = Image.open(BytesIO(r.content))
+                        info["dim"] = f"{im.width}x{im.height}"
+                    except Exception:
+                        info["dim"] = "not-an-image"
+                results[name] = info
+            except Exception as e:
+                results[name] = {"error": f"{type(e).__name__}: {e}"}
+    return {"base": base, "candidates": results}
+
+
 @app.get("/proto-cover")
 async def proto_cover(product_id: int):
     """Preview the generated SKU cover for a product (rarity bg + pet + pumping badge)."""
