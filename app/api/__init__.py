@@ -2468,3 +2468,77 @@ async def regenerate_cover(ggsel_offer_id: int = 0, all_sku: bool = False):
         except Exception as e:
             results.append({"ggsel_offer_id": gid, "error": f"{type(e).__name__}: {e}"})
     return {"count": len(results), "results": results}
+
+
+async def _sku_group_list(min_combos: int, pumping: str = ""):
+    """All (name, pumping) groups with >= min_combos priced combos, richest first."""
+    from sqlalchemy import select, func
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct, Offer
+
+    async with AsyncSessionLocal() as db:
+        q = select(
+            SkuProduct.name, SkuProduct.pumping,
+            func.count(Offer.id).label("priced"),
+        ).join(
+            Offer,
+            (Offer.starpets_product_id == SkuProduct.product_id)
+            & (Offer.price_rub.isnot(None)) & (Offer.price_rub > 0),
+            isouter=True,
+        )
+        if pumping:
+            q = q.where(SkuProduct.pumping == pumping)
+        q = q.group_by(SkuProduct.name, SkuProduct.pumping) \
+             .having(func.count(Offer.id) >= min_combos) \
+             .order_by(func.count(Offer.id).desc())
+        rows = (await db.execute(q)).all()
+    return [(n, pm, int(pc)) for (n, pm, pc) in rows]
+
+
+@app.get("/build-all-sku-cards")
+async def build_all_sku_cards(min_combos: int = 2, pumping: str = "", limit: int = 0,
+                              dry_run: bool = True):
+    """Mass-build SKU cards for every group with >= min_combos priced combos.
+    ?dry_run=true (default) -> just list what WOULD be built (no writes).
+    ?dry_run=false          -> build in background. ?limit=N caps it. ?pumping=neon filters.
+    Each card self-skips if already built, so re-running only fills gaps."""
+    groups = await _sku_group_list(min_combos, pumping)
+    if limit:
+        groups = groups[:limit]
+    if dry_run:
+        return {"dry_run": True, "min_combos": min_combos, "pumping": pumping or "all",
+                "group_count": len(groups),
+                "sample": [{"name": n, "pumping": pm, "priced_combos": pc}
+                           for (n, pm, pc) in groups[:30]]}
+    import asyncio
+    asyncio.create_task(_run_build_all(groups))
+    return {"started": True, "group_count": len(groups)}
+
+
+async def _run_build_all(groups):
+    import asyncio
+    from app.workers.sku_builder import build_sku_card
+
+    total = len(groups)
+    built = skipped = errors = 0
+    print(f"[BuildAllSku] starting — {total} groups", flush=True)
+    for i, (name, pumping, priced) in enumerate(groups, 1):
+        try:
+            res = await build_sku_card(name, pumping)
+        except Exception as e:
+            errors += 1
+            print(f"[BuildAllSku] {i}/{total} {name!r}/{pumping} EXC {type(e).__name__}: {e}", flush=True)
+            continue
+        if res.get("skipped"):
+            skipped += 1
+        elif res.get("error"):
+            errors += 1
+            print(f"[BuildAllSku] {i}/{total} {name!r}/{pumping} ERROR {res['error']}", flush=True)
+        else:
+            built += 1
+            print(f"[BuildAllSku] {i}/{total} {name!r}/{pumping} -> gid={res.get('ggsel_offer_id')} "
+                  f"variants={res.get('count')}", flush=True)
+        if i % 25 == 0:
+            print(f"[BuildAllSku] progress {i}/{total} built={built} skipped={skipped} errors={errors}", flush=True)
+        await asyncio.sleep(0.3)   # gentle pacing for ggsel
+    print(f"[BuildAllSku] DONE — total={total} built={built} skipped={skipped} errors={errors}", flush=True)

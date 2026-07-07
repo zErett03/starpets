@@ -60,8 +60,9 @@ def _card_description(name: str, rare: str, pumping: str) -> tuple[str, str]:
     return desc_ru, desc_en
 
 
-async def build_sku_card(name: str, pumping: str) -> dict:
-    """Create ONE SKU card for (name, pumping). Returns a summary dict (never raises)."""
+async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
+    """Create ONE SKU card for (name, pumping). Returns a summary dict (never raises).
+    Idempotent: if a card already exists for this group it is skipped unless force=True."""
     pumping = (pumping or "default").lower()
 
     # 1. Collect combos in this group and their live prices (from offers.price_rub).
@@ -76,6 +77,17 @@ async def build_sku_card(name: str, pumping: str) -> dict:
             return {"error": f"no sku_products for name={name!r} pumping={pumping!r}"}
 
         pids = [p.product_id for p in prods]
+
+        # Idempotency: skip if this group already has a SKU card (variant rows point to it).
+        if not force:
+            existing = (await db.execute(
+                select(SkuVariant.ggsel_offer_id)
+                .where(SkuVariant.starpets_product_id.in_(pids)).limit(1)
+            )).scalar_one_or_none()
+            if existing is not None:
+                return {"skipped": True, "reason": "already built",
+                        "ggsel_offer_id": int(existing), "name": name, "pumping": pumping}
+
         price_rows = (await db.execute(
             select(Offer.starpets_product_id, Offer.price_rub).where(
                 Offer.starpets_product_id.in_(pids),

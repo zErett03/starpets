@@ -4,7 +4,7 @@ Composites a pet PNG onto a rarity-colored background (StarPets-style concentric
 rings + rarity-tinted radial + sparkles) with a pumping-type badge in the top-LEFT corner
 (top-right collides with ggsel's favourite/♥ button).
 
-Rendered at 1000px (ggsel accepts up to 1000×1000) so the vector elements stay crisp and
+Rendered at 2000px (ggsel accepts up to 2000×2000) so the vector elements stay crisp and
 ggsel doesn't re-compress a small image into artifacts. All sizes are SZ fractions, so
 changing SZ rescales the whole composition. Config-driven: tweak RARITY_COLORS / _BADGE and
 re-run /regenerate-covers to restyle every card — the card structure is untouched.
@@ -13,7 +13,7 @@ from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-SZ = 1000
+SZ = 2000
 
 # rare value -> (inner, outer, sparkle) RGB. Unknown rarities fall back to "common".
 RARITY_COLORS = {
@@ -94,9 +94,10 @@ def make_cover(pet_png: bytes, rare: str, pumping: str) -> bytes:
     if pet_png:
         try:
             pet = Image.open(BytesIO(pet_png)).convert("RGBA")
-            # StarPets source is only 110px. Pre-smooth then LANCZOS upscale -> soft, clean
-            # edges (sharpening amplifies webp artifacts and looks harsh at this scale).
-            pet = pet.filter(ImageFilter.GaussianBlur(SZ * 0.0008))
+            # StarPets source is only 110px. A tiny CONSTANT pre-smooth hides webp blocking
+            # without washing detail (it runs on the 110px source, so it must not scale with
+            # SZ); then LANCZOS upscale -> soft, clean edges. Sharpening looks harsh here.
+            pet = pet.filter(ImageFilter.GaussianBlur(0.4))
             box = int(SZ * 0.60)
             scale = min(box / pet.width, box / pet.height)
             pet = pet.resize(
