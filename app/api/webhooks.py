@@ -81,8 +81,17 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
             return {"error": "Укажите Roblox Username"}
 
         sku_product_id = await _resolve_sku_product_id(db, ggsel_offer_id, options)
+        _sku_price_rub = None
         if sku_product_id is not None:
             print(f"[precheck] SKU variant → product_id={sku_product_id}", flush=True)
+            _sv = (await db.execute(
+                select(SkuVariant.price_rub).where(
+                    SkuVariant.ggsel_offer_id == ggsel_offer_id,
+                    SkuVariant.starpets_product_id == sku_product_id,
+                )
+            )).scalar_one_or_none()
+            if _sv is not None:
+                _sku_price_rub = float(_sv)
 
         if id_i is not None:
             result = await db.execute(select(Order).where(Order.ggsel_order_id == id_i))
@@ -135,11 +144,12 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         await db.commit()
         print(f"[precheck] WebhookEvent saved: {precheck_ext_id!r} username={roblox_username!r}", flush=True)
 
-        # Capture before session closes
-        _product_id = offer.starpets_product_id
+        # Capture before session closes. For SKU cards the product/price come from the
+        # SELECTED variant (resolved above), not the multi-product backing offer row.
+        _product_id = sku_product_id or offer.starpets_product_id
         _offer_name = offer.name
         _starpets_qty = offer.starpets_qty
-        _offer_price_rub = float(offer.price_rub or 0)
+        _offer_price_rub = _sku_price_rub if _sku_price_rub is not None else float(offer.price_rub or 0)
 
     # Live availability check — don't rely on stale starpets_qty from DB (updated every 30 min)
     if _product_id:

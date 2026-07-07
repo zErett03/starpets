@@ -2377,3 +2377,42 @@ async def test_starpets():
             "status_code": resp.status_code,
             "body": resp.json(),
         }
+
+
+@app.get("/sku-groups")
+async def sku_groups(name: str = "", min_combos: int = 2, limit: int = 40):
+    """List candidate (name, pumping) groups for SKU cards, with priced-combo counts.
+    ?name=Frostclaw  -> only that pet. Helps pick a prototype target."""
+    from sqlalchemy import select, func
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct, Offer
+
+    async with AsyncSessionLocal() as db:
+        q = select(
+            SkuProduct.name, SkuProduct.pumping, SkuProduct.rare,
+            func.count(Offer.id).label("priced"),
+            func.count(SkuProduct.product_id).label("combos"),
+        ).join(
+            Offer,
+            (Offer.starpets_product_id == SkuProduct.product_id)
+            & (Offer.price_rub.isnot(None)) & (Offer.price_rub > 0),
+            isouter=True,
+        )
+        if name:
+            q = q.where(SkuProduct.name == name)
+        q = q.group_by(SkuProduct.name, SkuProduct.pumping, SkuProduct.rare) \
+             .having(func.count(Offer.id) >= min_combos) \
+             .order_by(func.count(Offer.id).desc()).limit(limit)
+        rows = (await db.execute(q)).all()
+    return {"groups": [
+        {"name": n, "pumping": pm, "rare": rr, "priced_combos": int(pc), "total_combos": int(tc)}
+        for (n, pm, rr, pc, tc) in rows
+    ]}
+
+
+@app.get("/build-sku-card")
+async def build_sku_card_ep(name: str, pumping: str = "default"):
+    """Build ONE real SKU card for (name, pumping): composited cover, username+consent+Вариант
+    radio (age×fly×ride variants), webhooks, SkuVariant rows. Additive — per-combo cards untouched."""
+    from app.workers.sku_builder import build_sku_card
+    return await build_sku_card(name, pumping)
