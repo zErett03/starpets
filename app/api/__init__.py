@@ -2907,3 +2907,58 @@ async def sku_card_statuses(limit: int = 20):
         rows.append({"ggsel_offer_id": gid, "status": status})
     return {"sku_cards_total": len(gids), "sampled": len(sample),
             "status_distribution": dict(dist), "rows": rows}
+
+
+@app.get("/reset-sku-cards")
+async def reset_sku_cards(dry_run: bool = True):
+    """Wipe ALL SKU cards (delete on ggsel + clear DB traces) so the whole set rebuilds fresh
+    — used when the card layout/labels change. Backing __sku__ offers still referenced by an
+    order are kept (FK-safe); those ggsel cards are still deleted."""
+    from sqlalchemy import select, delete as sql_delete
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant, Offer, Order
+
+    async with AsyncSessionLocal() as db:
+        gids = sorted({int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).distinct()
+        )).all()})
+
+    if dry_run:
+        return {"dry_run": True, "sku_cards": len(gids), "sample": gids[:30]}
+
+    # 1. Delete the cards on ggsel (chunks of 100).
+    deleted_ggsel = 0
+    ggsel_errors = []
+    for i in range(0, len(gids), 100):
+        chunk = gids[i:i + 100]
+        try:
+            await ggsel_office.delete_offers(chunk)
+            deleted_ggsel += len(chunk)
+        except Exception as e:
+            ggsel_errors.append({"chunk_start": i, "error": f"{type(e).__name__}: {e}"})
+        import asyncio
+        await asyncio.sleep(0.3)
+
+    # 2. Clear DB: all SkuVariant rows, and orderless __sku__ backing offers.
+    async with AsyncSessionLocal() as db:
+        n_variants = len((await db.execute(select(SkuVariant.id))).all())
+        await db.execute(sql_delete(SkuVariant))
+        backing = (await db.execute(
+            select(Offer.id, Offer.ggsel_offer_id).where(Offer.age == "__sku__")
+        )).all()
+        deleted_offers = kept = 0
+        for off_id, _gid in backing:
+            has_order = (await db.execute(
+                select(Order.id).where(Order.offer_id == off_id).limit(1)
+            )).first()
+            if has_order:
+                kept += 1
+                continue
+            await db.execute(sql_delete(Offer).where(Offer.id == off_id))
+            deleted_offers += 1
+        await db.commit()
+
+    return {"sku_cards": len(gids), "deleted_on_ggsel": deleted_ggsel,
+            "ggsel_errors": ggsel_errors, "deleted_sku_variant_rows": n_variants,
+            "deleted_backing_offers": deleted_offers,
+            "kept_backing_offers_with_orders": kept}

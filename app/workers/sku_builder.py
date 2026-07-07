@@ -39,6 +39,17 @@ def _norm_age(age) -> str:
     return (age or "").strip().lower().replace(" ", "_").replace("-", "_")
 
 
+# Age -> emoji prefix (only the age is decorated; fly/ride stay as plain words).
+_AGE_EMOJI = {
+    # default ages (growth)
+    "newborn": "🥚", "junior": "🐣", "pre_teen": "🐥", "teen": "🐤",
+    "post_teen": "🐦", "full_grown": "🦅",
+    # neon / mega stages (increasing glow)
+    "reborn": "🌑", "twinkle": "✨", "sparkle": "🎇", "flare": "🔥",
+    "sunshine": "🌞", "luminous": "☄️",
+}
+
+
 def _variant_sort_key(p):
     """Group by age (youngest->oldest), then by fly/ride combo in the order:
     base -> ездовой(ride) -> летает(fly) -> ездовой·летает."""
@@ -51,7 +62,9 @@ def _variant_label(p: SkuProduct) -> str:
     """Age + fly/ride label for one combo (rarity is constant across a pet's variants)."""
     parts = []
     if p.age:
-        parts.append(str(p.age).replace("_", " ").title())
+        emoji = _AGE_EMOJI.get(_norm_age(p.age), "")
+        age_txt = str(p.age).replace("_", " ").title()
+        parts.append(f"{emoji} {age_txt}".strip())
     if p.flyable:
         parts.append("Летает")
     if p.rideable:
