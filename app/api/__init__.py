@@ -2513,16 +2513,34 @@ async def build_all_sku_cards(min_combos: int = 2, pumping: str = "", limit: int
     ?dry_run=true (default) -> just list what WOULD be built (no writes).
     ?dry_run=false          -> build in background. ?limit=N caps it. ?pumping=neon filters.
     Each card self-skips if already built, so re-running only fills gaps."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct, SkuVariant
+
     groups = await _sku_group_list(min_combos, pumping)
+
+    # Exclude groups already built (have SkuVariant rows) BEFORE applying limit — otherwise
+    # limit=N always re-picks the same first N (fixed order) and skips them forever, never
+    # reaching the unbuilt tail.
+    async with AsyncSessionLocal() as db:
+        built = {(n, pm) for (n, pm) in (await db.execute(
+            select(SkuProduct.name, SkuProduct.pumping).join(
+                SkuVariant, SkuVariant.starpets_product_id == SkuProduct.product_id
+            ).distinct()
+        )).all()}
+    remaining = [g for g in groups if (g[0], g[1]) not in built]
+    total_remaining = len(remaining)
     if limit:
-        groups = groups[:limit]
+        remaining = remaining[:limit]
+
     if dry_run:
         return {"dry_run": True, "min_combos": min_combos, "pumping": pumping or "all",
-                "group_count": len(groups),
+                "already_built": len(built), "remaining_unbuilt": total_remaining,
+                "this_batch": len(remaining),
                 "sample": [{"name": n, "pumping": pm, "priced_combos": pc}
-                           for (n, pm, pc) in groups[:30]]}
+                           for (n, pm, pc) in remaining[:30]]}
     import asyncio
-    asyncio.create_task(_run_build_all(groups))
+    asyncio.create_task(_run_build_all(remaining))
     return {"started": True, "group_count": len(groups)}
 
 
@@ -2858,3 +2876,34 @@ async def cleanup_sku_by_name(name: str, dry_run: bool = True):
     return {"name": name, "deleted_sku_variant_rows": n_variants,
             "deleted_backing_offers": deleted_offers,
             "kept_backing_offers_with_orders": kept_with_orders, "gids": gids}
+
+
+@app.get("/sku-card-statuses")
+async def sku_card_statuses(limit: int = 20):
+    """Diagnostic: fetch the real ggsel status of a sample of SKU cards, so we can see whether
+    they're still 'draft' (batch_activate was a no-op → wrong endpoint) or in moderation."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+    from collections import Counter
+
+    async with AsyncSessionLocal() as db:
+        gids = [int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).distinct()
+        )).all()]
+    gids.sort()
+    sample = gids[:limit]
+
+    dist = Counter()
+    rows = []
+    for gid in sample:
+        try:
+            data = await ggsel_office.get_offer(gid)
+            off = data.get("data") if isinstance(data, dict) and "data" in data else data
+            status = (off or {}).get("status")
+        except Exception as e:
+            status = f"ERR {type(e).__name__}"
+        dist[str(status)] += 1
+        rows.append({"ggsel_offer_id": gid, "status": status})
+    return {"sku_cards_total": len(gids), "sampled": len(sample),
+            "status_distribution": dict(dist), "rows": rows}
