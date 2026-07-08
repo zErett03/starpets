@@ -14,7 +14,7 @@ so floors exist before the feed takes over.
 from datetime import datetime
 
 import httpx
-from sqlalchemy import select, func, update as sql_update, delete as sql_delete
+from sqlalchemy import select, update as sql_update, delete as sql_delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import AsyncSessionLocal
@@ -23,6 +23,7 @@ from app.clients.starpets import starpets
 from app.clients.ggsel import ggsel_office
 from app.config import settings
 from app.fx import get_usd_rub, calc_price_rub
+from app.pricing import robust_floors_for
 
 _CURSOR_KEY = "items_cursor"
 _PAGE = 50
@@ -187,20 +188,18 @@ async def sync_item_updates() -> dict:
     if not affected:
         return {"events": events, "affected": 0}
 
-    # 3. Recompute floor for affected products and push price / pause to ggsel
+    # 3. Recompute floor for affected products and push price / pause to ggsel.
+    # Robust floor (freshness + outlier rejection) — same rule the sweep/relive use — so a
+    # stale phantom or a single cheap bait row can't drag the price into an underpriced trap.
     fx = await get_usd_rub()
     updated = paused = 0
     async with AsyncSessionLocal() as db:
+        floors = await robust_floors_for(db, list(affected))
         for pid in affected:
             info = our.get(pid)
             if not info:
                 continue
-            floor = (await db.execute(
-                select(func.min(StoreItem.price_usd)).where(
-                    StoreItem.product_id == pid,
-                    StoreItem.reserve_level == 0,
-                )
-            )).scalar()
+            floor = floors.get(pid)
             offer = (await db.execute(select(Offer).where(Offer.id == info["offer_id"]))).scalar_one_or_none()
             if not offer:
                 continue

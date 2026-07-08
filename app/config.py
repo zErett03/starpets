@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     event_price_sync: bool = False
     sku_price_sync: bool = False   # Phase 3: periodic SKU variant price refresh (SKU_PRICE_SYNC=true)
     sku_stock_sync: bool = False   # hide out-of-stock SKU variants (SKU_STOCK_SYNC=true)
+    floor_reconcile: bool = False  # sweep offers.price_rub from store_items + live relive (FLOOR_RECONCILE=true)
     starpets_category_id: int = 0
 
     class Config:

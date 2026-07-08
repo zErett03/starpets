@@ -1513,7 +1513,7 @@ async def proto_cover(product_id: int):
                     print(f"[proto-cover] image fetch {r.status_code} {p.image_uri}", flush=True)
         except Exception as e:
             print(f"[proto-cover] image fetch error: {e}", flush=True)
-    png = make_cover(pet_bytes, p.rare, p.pumping)
+    png = make_cover(pet_bytes, p.rare, p.pumping, name=p.name)
     return Response(content=png, media_type="image/png")
 
 
@@ -2449,20 +2449,31 @@ async def regenerate_cover(ggsel_offer_id: int = 0, all_sku: bool = False):
         else:
             return {"error": "pass ggsel_offer_id=N or all_sku=true"}
 
+    if len(gids) <= 30:
+        return await _run_regenerate_covers(gids)
+    import asyncio
+    asyncio.create_task(_run_regenerate_covers(gids))
+    return {"started": True, "count": len(gids), "note": "background; see [RegenCovers] in logs"}
+
+
+async def _run_regenerate_covers(gids):
+    import base64, asyncio
+    from sqlalchemy import select, update as sql_update
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant, SkuProduct
+    from app.images.cover import make_cover, is_placeholder_bytes
     results = []
     for gid in gids:
         async with AsyncSessionLocal() as db:
-            # any variant of this card -> its product -> rare/pumping/image
             row = (await db.execute(
-                select(SkuProduct.rare, SkuProduct.pumping, SkuProduct.image_uri)
+                select(SkuProduct.product_id, SkuProduct.rare, SkuProduct.pumping,
+                       SkuProduct.image_uri, SkuProduct.name)
                 .join(SkuVariant, SkuVariant.starpets_product_id == SkuProduct.product_id)
-                .where(SkuVariant.ggsel_offer_id == gid)
-                .limit(1)
+                .where(SkuVariant.ggsel_offer_id == gid).limit(1)
             )).first()
         if not row:
-            results.append({"ggsel_offer_id": gid, "error": "no variant/product"})
-            continue
-        rare, pumping, image_uri = row
+            results.append({"ggsel_offer_id": gid, "error": "no variant/product"}); continue
+        pid, rare, pumping, image_uri, pet_name = row
         pet_bytes = b""
         if image_uri:
             try:
@@ -2471,14 +2482,25 @@ async def regenerate_cover(ggsel_offer_id: int = 0, all_sku: bool = False):
                     if r.is_success:
                         pet_bytes = r.content
             except Exception as e:
-                print(f"[regenerate-cover] image fetch error gid={gid}: {e}", flush=True)
-        png = make_cover(pet_bytes, rare, pumping)
+                print(f"[RegenCovers] image fetch error gid={gid}: {e}", flush=True)
+        missing = is_placeholder_bytes(pet_bytes)
+        async with AsyncSessionLocal() as db:
+            _pids = [int(x) for (x,) in (await db.execute(
+                select(SkuVariant.starpets_product_id).where(SkuVariant.ggsel_offer_id == gid)
+            )).all()]
+            await db.execute(sql_update(SkuProduct).where(SkuProduct.product_id.in_(_pids))
+                             .values(image_missing=missing))
+            await db.commit()
+        png = make_cover(pet_bytes, rare, pumping, name=pet_name)
         try:
             await ggsel_office.update_cover(gid, base64.b64encode(png).decode(), "image/png")
-            results.append({"ggsel_offer_id": gid, "ok": True, "bytes": len(png)})
+            results.append({"ggsel_offer_id": gid, "ok": True})
         except Exception as e:
             results.append({"ggsel_offer_id": gid, "error": f"{type(e).__name__}: {e}"})
-    return {"count": len(results), "results": results}
+        await asyncio.sleep(0.2)
+    ok = sum(1 for r in results if r.get("ok"))
+    print(f"[RegenCovers] done total={len(results)} ok={ok}", flush=True)
+    return {"count": len(results), "ok": ok, "results": results[:50]}
 
 
 async def _sku_group_list(min_combos: int, pumping: str = ""):
@@ -3884,3 +3906,40 @@ async def probe_image_hash(product_ids: str = "1739700,19416,23991"):
     return {"results": out, "unique_hashes": len(set(hashes)),
             "all_same": len(set(hashes)) == 1 and len(hashes) > 1,
             "note": "all_same=true -> one placeholder hash to detect. Different -> hash per-pet or real images."}
+
+
+@app.get("/resync-missing-images")
+async def resync_missing_images_ep(dry_run: bool = True, max_cards: int = 400):
+    """Re-sync catalog + regenerate covers for pets flagged image_missing (StarPets 'NO IMAGE').
+    If art now exists, the real image replaces the name fallback. ?dry_run=true just counts."""
+    from app.workers.resync_missing import resync_missing_images
+    if dry_run:
+        return await resync_missing_images(max_cards=max_cards, dry_run=True)
+    import asyncio
+    asyncio.create_task(resync_missing_images(max_cards=max_cards, dry_run=False))
+    return {"started": True, "note": "background; see [ResyncMissing] in logs"}
+
+
+@app.get("/floor-sweep")
+async def floor_sweep_ep(dry_run: bool = True, max_offers: int = 20000):
+    """DB-only: recompute the robust floor from store_items for every SKU-combo offer and rewrite
+    offers.price_usd/price_rub where the price drifted (fixes frozen/underpriced offers). Phase 3
+    then pushes the corrected price to the SKU card. ?dry_run=true just reports what would change."""
+    from app.workers.floor_reconcile import sweep_floors
+    if dry_run:
+        return await sweep_floors(max_offers=max_offers, dry_run=True)
+    import asyncio
+    asyncio.create_task(sweep_floors(max_offers=max_offers, dry_run=False))
+    return {"started": True, "note": "background; see [FloorSweep] in logs"}
+
+
+@app.get("/floor-relive")
+async def floor_relive_ep(dry_run: bool = True, max_products: int = 150):
+    """Live items/top pull for products behind SHOWN variants: truthfully refresh store_items
+    (delete phantoms), then re-price the offer from the robust floor. ?dry_run=true just counts."""
+    from app.workers.floor_reconcile import relive_active
+    if dry_run:
+        return await relive_active(max_products=max_products, dry_run=True)
+    import asyncio
+    asyncio.create_task(relive_active(max_products=max_products, dry_run=False))
+    return {"started": True, "max_products": max_products, "note": "background; see [FloorRelive] in logs"}

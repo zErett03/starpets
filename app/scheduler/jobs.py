@@ -220,6 +220,39 @@ async def reconcile_stuck_safe():
         print(f"[Scheduler] reconcile_stuck error: {e}", flush=True)
 
 
+async def floor_sweep_safe():
+    from app.config import settings
+    if not settings.floor_reconcile:
+        return  # DB-only floor sweep (fixes frozen offers.price_rub); set FLOOR_RECONCILE=true
+    try:
+        from app.workers.floor_reconcile import sweep_floors
+        await sweep_floors()
+    except Exception as e:
+        print(f"[Scheduler] floor_sweep error: {e}", flush=True)
+
+
+async def floor_relive_safe():
+    from app.config import settings
+    if not settings.floor_reconcile:
+        return  # live items/top relive of shown variants (refreshes store_items at the source)
+    try:
+        from app.workers.floor_reconcile import relive_active
+        await relive_active()
+    except Exception as e:
+        print(f"[Scheduler] floor_relive error: {e}", flush=True)
+
+
+async def resync_missing_safe():
+    from app.config import settings
+    if not settings.sku_price_sync:
+        return  # part of keeping SKU cards correct; runs when SKU_PRICE_SYNC=true
+    try:
+        from app.workers.resync_missing import resync_missing_images
+        await resync_missing_images()
+    except Exception as e:
+        print(f"[Scheduler] resync_missing error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
@@ -232,6 +265,9 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(sku_price_sync_safe, "interval", minutes=5, id="sku_price_sync")
     scheduler.add_job(sku_stock_sync_safe, "interval", minutes=10, id="sku_stock_sync")
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
+    scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
+    scheduler.add_job(floor_relive_safe, "interval", minutes=15, id="floor_relive")
+    scheduler.add_job(resync_missing_safe, "interval", hours=12, id="resync_missing")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler
