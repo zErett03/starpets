@@ -56,9 +56,17 @@ async def _cheap_upsert(gid, opt, ordered, default_vid, base):
         await db.commit()
 
 
-async def _rebuild_option(gid, old_opt, ordered, base, default_pid):
-    # delete the drifted option, recreate it with default = cheapest, remap SkuVariant ids.
-    await ggsel_office.delete_options(gid, [old_opt])
+async def _rebuild_option(gid, ordered, base, default_pid):
+    # Delete EVERY "Вариант" radio option first (including orphan empties left by earlier failed
+    # rebuilds), then create exactly one fresh option -> no leftover required-empty option that
+    # would block checkout. Then remap SkuVariant ids.
+    opts = await ggsel_office.get_options(gid)
+    odata = opts.get("data") if isinstance(opts, dict) else opts
+    old_ids = [o.get("id") for o in (odata or [])
+               if o.get("type") == "radio_button"
+               and (o.get("title_ru") or "").strip() == "Вариант" and o.get("id") is not None]
+    if old_ids:
+        await ggsel_office.delete_options(gid, old_ids)
     new_opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
     # A required radio must always have a default -> create the default (cheapest) variant FIRST,
     # then the rest; display order is preserved via each variant's explicit `position`.
@@ -140,7 +148,7 @@ async def sku_price_sync(threshold_rub: float = 5.0, threshold_pct: float = 0.05
             else:
                 if rebuilt >= max_rebuilds:
                     continue  # bound the heavy path per run; picked up next cycle
-                await _rebuild_option(gid, opt, ordered, min_live, min_v.starpets_product_id)
+                await _rebuild_option(gid, ordered, min_live, min_v.starpets_product_id)
                 rebuilt += 1
                 results.append({"gid": gid, "mode": "rebuild", "base": round(min_live, 2)})
         except Exception as e:

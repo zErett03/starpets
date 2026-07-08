@@ -3393,3 +3393,49 @@ async def probe_default_swap():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "If C is_default=true (200) => default-first ordering fixes the swap. Delete gid."
     return out
+
+
+@app.get("/fix-duplicate-options")
+async def fix_duplicate_options(ggsel_offer_id: int = 0, all_sku: bool = False, dry_run: bool = True):
+    """Repair cards left with duplicate/orphan 'Вариант' options by failed rebuilds. Keeps the one
+    referenced by SkuVariant.ggsel_option_id, deletes the rest. ?all_sku=true scans every SKU card."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        if all_sku:
+            gids = [int(g) for (g,) in (await db.execute(
+                select(SkuVariant.ggsel_offer_id).distinct()
+            )).all()]
+        elif ggsel_offer_id:
+            gids = [ggsel_offer_id]
+        else:
+            return {"error": "pass ggsel_offer_id or all_sku=true"}
+
+    results = []
+    for gid in gids:
+        async with AsyncSessionLocal() as db:
+            keep = {int(o) for (o,) in (await db.execute(
+                select(SkuVariant.ggsel_option_id).where(
+                    SkuVariant.ggsel_offer_id == gid, SkuVariant.ggsel_option_id.isnot(None)
+                ).distinct()
+            )).all()}
+        try:
+            opts = await ggsel_office.get_options(gid)
+            data = opts.get("data") if isinstance(opts, dict) else opts
+            variant_opts = [o.get("id") for o in (data or [])
+                            if o.get("type") == "radio_button"
+                            and (o.get("title_ru") or "").strip() == "Вариант" and o.get("id") is not None]
+            orphans = [oid for oid in variant_opts if oid not in keep]
+            if not orphans:
+                continue
+            entry = {"ggsel_offer_id": gid, "variant_options": variant_opts,
+                     "keep": list(keep), "orphans": orphans}
+            if not dry_run:
+                await ggsel_office.delete_options(gid, orphans)
+                entry["deleted"] = True
+            results.append(entry)
+        except Exception as e:
+            results.append({"ggsel_offer_id": gid, "error": f"{type(e).__name__}: {e}"})
+    return {"dry_run": dry_run, "cards_with_orphans": len(results), "results": results[:50]}
