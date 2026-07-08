@@ -3759,3 +3759,29 @@ async def sku_stock_sync_ep(dry_run: bool = True, max_cards: int = 40):
     import asyncio
     asyncio.create_task(sku_stock_sync(max_cards=max_cards, dry_run=False))
     return {"started": True, "max_cards": max_cards, "note": "background; see [SkuStockSync] in logs"}
+
+
+@app.get("/force-deliver")
+async def force_deliver(order_id: int):
+    """Operator override: deliver an order EVEN AT A LOSS (skip the profitability guard). Use for a
+    stuck order where you accept the loss to satisfy the buyer. Accepts internal id or ggsel id."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            order = (await db.execute(select(Order).where(Order.ggsel_order_id == order_id))).scalar_one_or_none()
+        if not order:
+            return {"error": f"order {order_id} not found"}
+        if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
+            return {"error": f"order {order.id} is {order.delivery_status.value} — not forcing"}
+        order.force_deliver = True
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
+        await db.commit()
+        return {"ok": True, "order_id": order.id, "roblox_username": order.roblox_username,
+                "sku_product_id": order.sku_product_id, "force_deliver": True, "requeued": True,
+                "warning": "profitability guard bypassed — may sell at a loss"}

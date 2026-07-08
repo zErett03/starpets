@@ -42,6 +42,7 @@ async def _buy_with_retry(
     item_id: str,
     price_usd: float,
     sale_price_rub: float,
+    force: bool = False,
 ) -> tuple[str, float]:
     """Buy item, retrying up to 3x on code=330 (PRICES_HAVE_CHANGED).
 
@@ -100,7 +101,7 @@ async def _buy_with_retry(
                 flush=True,
             )
 
-            if not ok:
+            if not ok and not force:
                 print(
                     f"[Buy] price_too_high: cost {new_cost_rub:.2f} > "
                     f"{settings.max_cost_ratio}×{sale_price_rub} — aborting",
@@ -208,7 +209,7 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
             # refreshed every ~30 min, so between syncs the live floor can spike above it.
             fx_rate = await get_usd_rub()
             ok, cost_rub = item_cost_ok(price_usd, fx_rate, sale_rub, settings.max_cost_ratio)
-            if not ok:
+            if not ok and not order.force_deliver:
                 await _transient_fail(
                     db, order, order_id, "price_too_high",
                     f"cost_rub={cost_rub:.2f} > {settings.max_cost_ratio}×{sale_rub} "
@@ -219,7 +220,7 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
             # 2. Buy the item (with retry on code=330 PRICES_HAVE_CHANGED)
             try:
                 purchased_item_id, exec_price = await _buy_with_retry(
-                    item_id, price_usd, sale_rub
+                    item_id, price_usd, sale_rub, force=order.force_deliver
                 )
             except RuntimeError as e:
                 if str(e) == "price_too_high":

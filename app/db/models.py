@@ -113,6 +113,7 @@ class Order(Base):
     starpets_purchase_id = Column(String, nullable=True)
     starpets_custom_id = Column(String, nullable=True)
     sku_product_id = Column(Integer, nullable=True)  # SKU-master: resolved product for the selected variant
+    force_deliver = Column(Boolean, default=False, server_default="false", nullable=False)  # operator override: buy even at a loss
     starpets_status = Column(String, nullable=True)
     starpets_error_code = Column(String, nullable=True)
 
