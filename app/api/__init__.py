@@ -3762,12 +3762,14 @@ async def sku_stock_sync_ep(dry_run: bool = True, max_cards: int = 40):
 
 
 @app.get("/force-deliver")
-async def force_deliver(order_id: int):
-    """Operator override: deliver an order EVEN AT A LOSS (skip the profitability guard). Use for a
-    stuck order where you accept the loss to satisfy the buyer. Accepts internal id or ggsel id."""
+async def force_deliver(order_id: int, confirm: bool = False):
+    """Operator override: deliver an order EVEN AT A LOSS. Two-step: without confirm it shows the
+    LIVE cost + estimated loss (no write); with confirm=true it actually forces the buy. Prevents
+    blindly force-buying a stale-underpriced card. Accepts internal id or ggsel id."""
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
-    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+    from app.db.models import Order, Offer, Task, TaskKind, DeliveryStatus
+    from app.fx import get_usd_rub, item_cost_ok
 
     async with AsyncSessionLocal() as db:
         order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
@@ -3777,11 +3779,38 @@ async def force_deliver(order_id: int):
             return {"error": f"order {order_id} not found"}
         if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
             return {"error": f"order {order.id} is {order.delivery_status.value} — not forcing"}
+        offer = (await db.execute(select(Offer).where(Offer.id == order.offer_id))).scalar_one_or_none()
+        product_id = order.sku_product_id or (offer.starpets_product_id if offer else None)
+        sale_rub = float(order.amount_rub or 0)
+        order_pk = order.id
+        username = order.roblox_username
+
+    # LIVE cost check — the whole point: show what it ACTUALLY costs right now.
+    live = {"product_id": product_id}
+    if product_id:
+        async with httpx.AsyncClient(timeout=10) as http:
+            top = await starpets.get_top_item(http, str(product_id))
+        if not top:
+            live["in_stock"] = False
+        else:
+            price_usd = float(top.get("price_usd") or 0)
+            fx = await get_usd_rub()
+            _ok, cost_rub = item_cost_ok(price_usd, fx, sale_rub, settings.max_cost_ratio)
+            live.update({"in_stock": True, "live_price_usd": price_usd, "fx": fx,
+                         "live_cost_rub": round(cost_rub, 2), "sale_rub": sale_rub,
+                         "est_loss_rub": round(cost_rub - sale_rub, 2), "profitable": _ok})
+
+    if not confirm:
+        return {"preview": True, "order_id": order_pk, "roblox_username": username,
+                "live": live,
+                "message": "Проверь live_cost_rub и est_loss_rub. Чтобы всё равно выкупить — повтори с &confirm=true"}
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_pk))).scalar_one()
         order.force_deliver = True
         order.delivery_status = DeliveryStatus.pending
         order.error_reason = None
         db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
         await db.commit()
-        return {"ok": True, "order_id": order.id, "roblox_username": order.roblox_username,
-                "sku_product_id": order.sku_product_id, "force_deliver": True, "requeued": True,
-                "warning": "profitability guard bypassed — may sell at a loss"}
+    return {"ok": True, "order_id": order_pk, "confirmed": True, "live": live, "requeued": True,
+            "warning": "profitability guard bypassed — buying even at a loss"}
