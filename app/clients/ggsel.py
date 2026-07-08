@@ -381,8 +381,10 @@ class GgselSellerOfficeClient:
                 json={"variants": variants},
             )
             if not resp.is_success:
-                print(f"[update_variants] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
-            resp.raise_for_status()
+                print(f"[update_variants] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:400]}", flush=True)
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code} {resp.text[:400]}", request=resp.request, response=resp
+                )
             return resp.json()
 
     async def get_active_offer_ids(self) -> list[int]:
