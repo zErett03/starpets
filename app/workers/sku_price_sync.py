@@ -72,18 +72,23 @@ async def _rebuild_option(gid, ordered, base, default_pid):
     # then the rest; display order is preserved via each variant's explicit `position`.
     creation = sorted(enumerate(ordered),
                       key=lambda iv: 0 if iv[1].starpets_product_id == default_pid else 1)
+    payload, meta = [], []
+    for pos, v in creation:
+        live = float(v.live)
+        delta = round(live - base, 2)
+        payload.append({
+            "title_ru": f"{v.label} — {int(round(live))}₽", "title_en": v.label,
+            "price": abs(delta), "discount_type": "fixed",
+            "impact_type": "increase" if delta >= 0 else "decrease",
+            "is_default": (v.starpets_product_id == default_pid), "status": "active", "position": pos,
+        })
+        meta.append((v, live))
+    created = await ggsel_office.add_variants_bulk(gid, new_opt, payload)
     async with AsyncSessionLocal() as db:
-        for pos, v in creation:
-            live = float(v.live)
-            title = f"{v.label} — {int(round(live))}₽"
-            new_vid = await ggsel_office.add_variant(
-                gid, new_opt, title_ru=title, title_en=v.label,
-                price_delta=round(live - base, 2),
-                is_default=(v.starpets_product_id == default_pid), position=pos,
-            )
+        for (v, live), cv in zip(meta, created):
             await db.execute(sql_update(SkuVariant)
                              .where(SkuVariant.ggsel_variant_id == v.ggsel_variant_id)
-                             .values(ggsel_option_id=new_opt, ggsel_variant_id=new_vid,
+                             .values(ggsel_option_id=new_opt, ggsel_variant_id=cv.get("id"),
                                      price_rub=live))
         await db.commit()
     await ggsel_office.update_price(gid, round(base, 2))

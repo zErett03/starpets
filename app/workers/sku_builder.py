@@ -217,25 +217,34 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
             enumerate(combos),
             key=lambda ip: 0 if ip[1][0].product_id == base_p.product_id else 1,
         )
-        variants = []
+        # Build the whole variants array (default FIRST) and create them in ONE POST.
+        payload, meta = [], []
         for pos, (p, price) in creation:
             delta = round(price - base_price, 2)
             label = _variant_label(p)
-            vtitle = f"{label} — {int(round(price))}₽"
             is_def = (p.product_id == base_p.product_id)
-            vid = await ggsel_office.add_variant(
-                gid, option_id, title_ru=vtitle, title_en=label,
-                price_delta=delta, is_default=is_def, position=pos,
-            )
-            async with AsyncSessionLocal() as db:
+            payload.append({
+                "title_ru": f"{label} — {int(round(price))}₽", "title_en": label,
+                "price": abs(delta), "discount_type": "fixed",
+                "impact_type": "increase" if delta >= 0 else "decrease",
+                "is_default": is_def, "status": "active", "position": pos,
+            })
+            meta.append((p, price, label, is_def, pos, delta))
+        created = await ggsel_office.add_variants_bulk(gid, option_id, payload)
+        if len(created) != len(meta):
+            return {"error": f"bulk variant count mismatch: sent {len(meta)} got {len(created)}"}
+        variants = []
+        async with AsyncSessionLocal() as db:
+            for (p, price, label, is_def, pos, delta), cv in zip(meta, created):
+                vid = cv.get("id")
                 db.add(SkuVariant(
                     ggsel_offer_id=gid, ggsel_option_id=option_id, ggsel_variant_id=vid,
                     starpets_product_id=p.product_id, label=label, price_rub=price,
                 ))
-                await db.commit()
-            variants.append({"label": label, "variant_id": vid, "position": pos,
-                             "product_id": p.product_id, "price_rub": price,
-                             "delta": delta, "default": is_def})
+                variants.append({"label": label, "variant_id": vid, "position": pos,
+                                 "product_id": p.product_id, "price_rub": price,
+                                 "delta": delta, "default": is_def})
+            await db.commit()
         variants.sort(key=lambda v: v["position"])
 
         await ggsel_office.patch_offer(

@@ -387,6 +387,24 @@ class GgselSellerOfficeClient:
                 )
             return resp.json()
 
+    async def add_variants_bulk(self, offer_id: int, option_id: int, variants: list[dict]) -> list:
+        """Create MANY variants in ONE POST (items WITHOUT `id`). ~1 call instead of N×(POST+GET).
+        Returns the created variants (each with its assigned `id`), in request order. Put the
+        default variant FIRST in `variants` (a required radio must have a default during save)."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST",
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options/{option_id}/variants",
+                json={"variants": variants},
+            )
+            if not resp.is_success:
+                print(f"[add_variants_bulk] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:400]}", flush=True)
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code} {resp.text[:400]}", request=resp.request, response=resp
+                )
+            data = resp.json()
+            return data.get("data") if isinstance(data, dict) and "data" in data else data
+
     async def get_active_offer_ids(self) -> list[int]:
         """Fetch all active offer IDs from GGSel, filter by status in response."""
         ids = []
