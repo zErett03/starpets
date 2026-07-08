@@ -3691,3 +3691,59 @@ async def probe_unarchive():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "unarchive_active 200 + B active => clean toggle. 404 => must recreate. Delete gid."
     return out
+
+
+@app.get("/probe-unarchive2")
+async def probe_unarchive2():
+    """Can an archived variant be resurrected by sending the FULL variant set (with it = active)?
+    Create A(default)+B+C, archive B alone, then POST all three active -> is B back? Delete gid."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_unarch2__", title_en="__probe_unarch2__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
+        a = await ggsel_office.add_variant(gid, opt, "A", "A", 0, is_default=True, position=0)
+        b = await ggsel_office.add_variant(gid, opt, "B", "B", 20, position=1)
+        c = await ggsel_office.add_variant(gid, opt, "C", "C", 30, position=2)
+        out["ids"] = {"A": a, "B": b, "C": c}
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}/variants"
+    def v(vid, title, price, st, is_def, pos):
+        return {"id": vid, "title_ru": title, "title_en": title, "price": price,
+                "discount_type": "fixed", "impact_type": "increase",
+                "is_default": is_def, "status": st, "position": pos}
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as cl:
+        # archive B alone
+        try:
+            r = await cl.post(url, json={"variants": [v(b, "B", 20, "archived", False, 1)]})
+            out["archive_B"] = {"status": r.status_code}
+        except Exception as e:
+            out["archive_B"] = {"error": str(e)}
+        # resurrect via FULL set (all active)
+        try:
+            r = await cl.post(url, json={"variants": [
+                v(a, "A", 0, "active", True, 0), v(b, "B", 20, "active", False, 1),
+                v(c, "C", 30, "active", False, 2)]})
+            out["resurrect_fullset"] = {"status": r.status_code, "body": r.text[:200]}
+        except Exception as e:
+            out["resurrect_fullset"] = {"error": str(e)}
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["variants_after"] = [{"id": vv.get("id"), "title": vv.get("title_ru"),
+                                          "status": vv.get("status")} for vv in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = str(e)
+    out["note"] = "If B is back (active) in variants_after -> full-set resurrect works = clean toggle. Delete gid."
+    return out
