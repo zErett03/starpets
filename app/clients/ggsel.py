@@ -72,6 +72,7 @@ class GgselSellerOfficeClient:
             "price": price,
             "currency": "RUB",
             "is_autoselling": False,
+            "is_unlimited_quantity": True,   # manual delivery, unlimited StarPets supply -> never "sold out"
             "category_id": category_id,
             "delivery": "manual",
             "post_payment_url": f"{settings.public_url}/delivery",
@@ -474,6 +475,18 @@ class GgselSellerOfficeClient:
                 client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
                 json={"price": price},
             )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def set_unlimited(self, offer_id: int) -> dict:
+        """PATCH an offer to unlimited quantity (so a single sale doesn't mark it 'sold out')."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+                json={"is_unlimited_quantity": True},
+            )
+            if not resp.is_success:
+                print(f"[set_unlimited] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 

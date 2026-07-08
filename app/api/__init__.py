@@ -3456,3 +3456,78 @@ async def fix_duplicate_options(ggsel_offer_id: int = 0, all_sku: bool = False, 
         except Exception as e:
             results.append({"ggsel_offer_id": gid, "error": f"{type(e).__name__}: {e}"})
     return {"dry_run": dry_run, "cards_with_orphans": len(results), "results": results[:50]}
+
+
+@app.get("/set-order-product")
+async def set_order_product(order_id: int, product_id: int):
+    """Operator: deliver a DIFFERENT variant of the same SKU card for a stuck order (buyer agreed
+    to a substitute). Validates product_id belongs to the order's card, sets it, re-enqueues delivery.
+    Same Roblox login; profitability guard at buy-time still applies."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Offer, SkuVariant, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            order = (await db.execute(select(Order).where(Order.ggsel_order_id == order_id))).scalar_one_or_none()
+        if not order:
+            return {"error": f"order {order_id} not found"}
+        if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
+            return {"error": f"order {order.id} is {order.delivery_status.value} — not overriding"}
+        if order.starpets_purchase_id:
+            return {"error": f"order {order.id} already bought item {order.starpets_purchase_id} — can't switch"}
+
+        offer = (await db.execute(select(Offer).where(Offer.id == order.offer_id))).scalar_one_or_none()
+        gid = offer.ggsel_offer_id if offer else None
+        # substitute must be a variant of the SAME card
+        sv = (await db.execute(select(SkuVariant).where(
+            SkuVariant.ggsel_offer_id == gid, SkuVariant.starpets_product_id == product_id
+        ).limit(1))).scalar_one_or_none()
+        if not sv:
+            return {"error": f"product {product_id} is not a variant of this card (ggsel_offer_id={gid})"}
+
+        order.sku_product_id = product_id
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
+        await db.commit()
+        return {"ok": True, "order_id": order.id, "roblox_username": order.roblox_username,
+                "new_sku_product_id": product_id, "label": sv.label, "requeued": True}
+
+
+@app.get("/fix-sku-unlimited")
+async def fix_sku_unlimited(dry_run: bool = True):
+    """Set every SKU card to unlimited quantity (they were created quantity=1 -> 'sold out' after
+    one purchase). ?dry_run=true just counts; false applies (background if many)."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    async with AsyncSessionLocal() as db:
+        gids = sorted({int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).distinct()
+        )).all()})
+    if dry_run:
+        return {"dry_run": True, "sku_cards": len(gids), "sample": gids[:20]}
+    if len(gids) <= 60:
+        return await _run_fix_unlimited(gids, background=False)
+    import asyncio
+    asyncio.create_task(_run_fix_unlimited(gids, background=True))
+    return {"started": True, "sku_cards": len(gids), "note": "background; see [FixUnlimited] in logs"}
+
+
+async def _run_fix_unlimited(gids, background):
+    import asyncio
+    ok = 0
+    errors = []
+    for gid in gids:
+        try:
+            await ggsel_office.set_unlimited(gid)
+            ok += 1
+        except Exception as e:
+            errors.append({"gid": gid, "error": f"{type(e).__name__}: {e}"})
+        await asyncio.sleep(0.2)
+    summary = {"updated": ok, "total": len(gids), "errors": errors[:20], "error_count": len(errors)}
+    print(f"[FixUnlimited] {summary}", flush=True)
+    return summary
