@@ -209,6 +209,17 @@ async def sku_stock_sync_safe():
         print(f"[Scheduler] sku_stock_sync error: {e}", flush=True)
 
 
+async def reconcile_stuck_safe():
+    from app.config import settings
+    if not settings.sku_price_sync:
+        return  # tied to Phase 3 (keeps SKU prices correct); runs when SKU_PRICE_SYNC=true
+    try:
+        from app.workers.reconcile_stuck import reconcile_stuck_offers
+        await reconcile_stuck_offers()
+    except Exception as e:
+        print(f"[Scheduler] reconcile_stuck error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
@@ -220,6 +231,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
     scheduler.add_job(sku_price_sync_safe, "interval", minutes=5, id="sku_price_sync")
     scheduler.add_job(sku_stock_sync_safe, "interval", minutes=10, id="sku_stock_sync")
+    scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler

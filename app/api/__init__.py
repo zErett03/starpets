@@ -3814,3 +3814,15 @@ async def force_deliver(order_id: int, confirm: bool = False):
         await db.commit()
     return {"ok": True, "order_id": order_pk, "confirmed": True, "live": live, "requeued": True,
             "warning": "profitability guard bypassed — buying even at a loss"}
+
+
+@app.get("/reconcile-stuck-offers")
+async def reconcile_stuck_offers_ep(dry_run: bool = True, max_offers: int = 100):
+    """Revive 'stuck' SKU-variant offers (paused + empty store_items but live stock exists): seed
+    store_items + refresh offers.price_rub from the live floor + unpause. ?dry_run=true just counts."""
+    from app.workers.reconcile_stuck import reconcile_stuck_offers
+    if dry_run:
+        return await reconcile_stuck_offers(max_offers=max_offers, dry_run=True)
+    import asyncio
+    asyncio.create_task(reconcile_stuck_offers(max_offers=max_offers, dry_run=False))
+    return {"started": True, "max_offers": max_offers, "note": "background; see [ReconcileStuck] in logs"}
