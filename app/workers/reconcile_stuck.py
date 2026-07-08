@@ -8,6 +8,7 @@ stock, it seeds one StoreItem (so stock-sync shows the variant again) and refres
 from the live floor + unpauses. Phase 3 then pushes the corrected price to the SKU card.
 """
 import asyncio
+import time
 from datetime import datetime
 
 import httpx
@@ -20,6 +21,8 @@ from app.fx import get_usd_rub
 from app.config import settings
 
 _running = False
+_last_checked: dict = {}        # offer_id -> monotonic ts of last live-check
+_THROTTLE_SEC = 3600           # re-check each candidate at most hourly (skip genuinely-OOS churn)
 
 
 def _price_rub(price_usd: float, fx: float) -> float:
@@ -50,12 +53,18 @@ async def reconcile_stuck_offers(max_offers: int = 100, dry_run: bool = False) -
                                for (o, p, pr) in stuck[:30]]}
 
         fx = await get_usd_rub()
-        revived = still_oos = errors = 0
+        revived = still_oos = errors = checked = skipped = 0
         results = []
+        now_m = time.monotonic()
         async with httpx.AsyncClient(timeout=10) as http:
             for off_id, pid, old_pr in stuck:
-                if revived >= max_offers:
+                if checked >= max_offers:
                     break
+                if now_m - _last_checked.get(off_id, 0.0) < _THROTTLE_SEC:
+                    skipped += 1
+                    continue  # checked recently -> let the next run advance to unchecked ones
+                _last_checked[off_id] = now_m
+                checked += 1
                 try:
                     top = await starpets.get_top_item(http, str(pid))
                     if not top:
@@ -86,10 +95,12 @@ async def reconcile_stuck_offers(max_offers: int = 100, dry_run: bool = False) -
                     print(f"[ReconcileStuck] offer={off_id} pid={pid} failed: {type(e).__name__}: {e}", flush=True)
                 await asyncio.sleep(0.2)
 
-        summary = {"stuck_candidates": total, "revived": revived, "still_oos": still_oos,
-                   "errors": errors, "sample": results[:30]}
+        summary = {"stuck_candidates": total, "checked": checked, "skipped_throttled": skipped,
+                   "revived": revived, "still_oos": still_oos, "errors": errors, "sample": results[:30]}
         print(f"[ReconcileStuck] {summary}", flush=True)
         return summary
     finally:
         if not dry_run:
             _running = False
+_last_checked: dict = {}        # offer_id -> monotonic ts of last live-check
+_THROTTLE_SEC = 3600           # re-check each candidate at most hourly (skip genuinely-OOS churn)
