@@ -3032,3 +3032,58 @@ async def probe_matrix():
 
     steps["note"] = "Inspect for combinations/matrix/price_table fields; delete this test offer manually."
     return steps
+
+
+@app.get("/probe-variant-patch")
+async def probe_variant_patch():
+    """Phase 3 feasibility: can we PATCH an existing variant's price/default in place?
+    Creates a throwaway offer+option+variant, tries two PATCH body formats, verifies. Delete gid after."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_vpatch__", title_en="__probe_vpatch__",
+        description_ru="probe", description_en="probe",
+        instructions_ru="probe", instructions_en="probe",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=1)
+        vid = await ggsel_office.add_variant(gid, opt, "Teen", "Teen", 0, is_default=True, position=0)
+        await ggsel_office.add_variant(gid, opt, "Full Grown", "Full Grown", 10, position=1)
+        out["option_id"], out["variant_id"] = opt, vid
+    except Exception as e:
+        out["build_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}/variants/{vid}"
+    async def _patch(body, label):
+        async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+            try:
+                r = await c.patch(url, json=body)
+                out[label] = {"status": r.status_code, "body": r.text[:400]}
+            except Exception as e:
+                out[label] = {"error": f"{type(e).__name__}: {e}"}
+
+    # Format A: direct fields
+    await _patch({"price": 77.0, "discount_type": "fixed", "impact_type": "increase",
+                  "is_default": True, "status": "active"}, "patch_direct")
+    # Format B: wrapped like POST
+    await _patch({"variants": [{"id": vid, "price": 88.0, "discount_type": "fixed",
+                                "impact_type": "increase", "is_default": True, "status": "active"}]},
+                 "patch_wrapped")
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final_variants"] = [{"id": v.get("id"), "price": v.get("price"),
+                                          "is_default": v.get("is_default")} for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "If a variant price became 77 or 88 -> PATCH works (Phase 3 in-place). Delete gid after."
+    return out
