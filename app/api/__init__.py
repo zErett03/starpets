@@ -3603,3 +3603,41 @@ async def probe_hide_variant():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "Open this card (gid) on ggsel: if B is NOT in the Вариант list -> inactive hides it. Delete gid."
     return out
+
+
+@app.get("/probe-variant-statuses")
+async def probe_variant_statuses():
+    """Find a valid 'hidden' status for a variant. Create A(default)+B, try setting B to each
+    candidate status, report which ggsel accepts (200) vs '422 invalid'. Delete gid after."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_vstat__", title_en="__probe_vstat__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
+        a = await ggsel_office.add_variant(gid, opt, "A", "A", 0, is_default=True, position=0)
+        b = await ggsel_office.add_variant(gid, opt, "B", "B", 20, position=1)
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}/variants"
+    candidates = ["hidden", "disabled", "paused", "archived", "not_active", "deleted", "draft", "off"]
+    out["results"] = {}
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        for st in candidates:
+            body = {"variants": [{"id": b, "title_ru": "B", "title_en": "B", "price": 20,
+                                  "discount_type": "fixed", "impact_type": "increase",
+                                  "is_default": False, "status": st, "position": 1}]}
+            try:
+                r = await c.post(url, json=body)
+                out["results"][st] = {"status": r.status_code, "body": r.text[:120]}
+            except Exception as e:
+                out["results"][st] = {"error": f"{type(e).__name__}: {e}"}
+    out["note"] = "Any status with 200 = accepted. Then check if B disappears from the buyer's radio. Delete gid."
+    return out
