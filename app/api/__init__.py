@@ -3087,3 +3087,57 @@ async def probe_variant_patch():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "If a variant price became 77 or 88 -> PATCH works (Phase 3 in-place). Delete gid after."
     return out
+
+
+@app.get("/probe-variant-update2")
+async def probe_variant_update2():
+    """Phase 3: find HOW ggsel updates an existing variant. Tries several endpoint/method combos
+    with DISTINCT target prices so the final variant price reveals which one worked. Delete gid after."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_vu2__", title_en="__probe_vu2__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=1)
+        vid = await ggsel_office.add_variant(gid, opt, "Teen", "Teen", 0, is_default=True, position=0)
+        vid2 = await ggsel_office.add_variant(gid, opt, "Full Grown", "Full Grown", 10, position=1)
+        out["option_id"], out["variant_id"], out["variant_id2"] = opt, vid, vid2
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    B = f"{SELLER_OFFICE_V2_URL}/offers"
+    def _var(price):
+        return {"id": vid, "title_ru": "Teen", "title_en": "Teen", "price": price,
+                "discount_type": "fixed", "impact_type": "increase", "is_default": True,
+                "status": "active", "position": 0}
+    candidates = [
+        ("A_patch_option",   "PATCH", f"{B}/{gid}/options/{opt}",               {"variants": [_var(71)]}),
+        ("B_put_variant",    "PUT",   f"{B}/{gid}/options/{opt}/variants/{vid}", _var(72)),
+        ("C_patch_offer",    "PATCH", f"{B}/{gid}",                             {"options": [{"id": opt, "variants": [_var(73)]}]}),
+        ("D_post_with_id",   "POST",  f"{B}/{gid}/options/{opt}/variants",       {"variants": [_var(74)]}),
+    ]
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        for label, method, url, body in candidates:
+            try:
+                r = await c.request(method, url, json=body)
+                out[label] = {"method": method, "status": r.status_code, "body": r.text[:200]}
+            except Exception as e:
+                out[label] = {"method": method, "error": f"{type(e).__name__}: {e}"}
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final_variants"] = [{"id": v.get("id"), "title": v.get("title_ru"),
+                                          "price": v.get("price")} for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "Teen price 71/72/73/74 reveals which worked (A/B/C/D). Check variant ids stayed stable. Delete gid."
+    return out
