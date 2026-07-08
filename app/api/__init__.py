@@ -2991,3 +2991,44 @@ async def probe_activate(ggsel_offer_id: int):
     out["status_after_activate_offers"] = await _status()
 
     return out
+
+
+@app.get("/probe-matrix")
+async def probe_matrix():
+    """Create a throwaway offer with TWO radio params (Age + Modifier) and dump the raw offer +
+    options structure — to see whether ggsel v2 supports per-combination (matrix) pricing or
+    only additive per-variant modifiers that sum. Returns gid; delete it manually after."""
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_matrix__", title_en="__probe_matrix__",
+        description_ru="probe", description_en="probe",
+        instructions_ru="probe", instructions_en="probe",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid in create_offer response: {resp}"}
+
+    steps = {"gid": gid}
+    try:
+        opt_age = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=1)
+        await ggsel_office.add_variant(gid, opt_age, "Teen", "Teen", 0, is_default=True, position=0)
+        await ggsel_office.add_variant(gid, opt_age, "Full Grown", "Full Grown", 50, position=1)
+
+        opt_mod = await ggsel_office.create_radio_option(gid, "Модификатор", "Modifier", position=2)
+        await ggsel_office.add_variant(gid, opt_mod, "Обычный", "Base", 0, is_default=True, position=0)
+        await ggsel_office.add_variant(gid, opt_mod, "Летает", "Fly", 100, position=1)
+        steps["option_ids"] = {"age": opt_age, "modifier": opt_mod}
+    except Exception as e:
+        steps["build_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        steps["offer"] = await ggsel_office.get_offer(gid)
+    except Exception as e:
+        steps["offer_error"] = f"{type(e).__name__}: {e}"
+    try:
+        steps["options"] = await ggsel_office.get_options(gid)
+    except Exception as e:
+        steps["options_error"] = f"{type(e).__name__}: {e}"
+
+    steps["note"] = "Inspect for combinations/matrix/price_table fields; delete this test offer manually."
+    return steps
