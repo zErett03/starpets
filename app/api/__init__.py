@@ -3320,3 +3320,13 @@ async def probe_upsert_correct():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "Full Grown price 55 + same ids + count 2 => in-place upsert WORKS (Phase 3 easy). Delete gid."
     return out
+
+
+@app.get("/sku-price-sync")
+async def sku_price_sync_ep(dry_run: bool = True, threshold_rub: float = 5.0,
+                            threshold_pct: float = 0.05, max_cards: int = 100):
+    """Phase 3: refresh SKU card prices from live offers.price_rub (in-place variant upsert).
+    ?dry_run=true (default) reports how many cards drifted beyond threshold without writing."""
+    from app.workers.sku_price_sync import sku_price_sync
+    return await sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
+                                max_cards=max_cards, dry_run=dry_run)

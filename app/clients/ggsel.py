@@ -369,6 +369,22 @@ class GgselSellerOfficeClient:
                         return v.get("id")
         raise RuntimeError(f"variant created but id not found offer_id={offer_id} option_id={option_id} title={title_ru!r}")
 
+    async def update_variants(self, offer_id: int, option_id: int, variants: list[dict]) -> dict:
+        """In-place upsert of variants on an option. POST /variants with each variant carrying its
+        existing `id` UPDATES it (ids preserved) — the same endpoint that creates. Per ggsel, the
+        default variant must have price 0. `variants` items:
+          {id, title_ru, title_en, price, discount_type, impact_type, is_default, status, position}."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "POST",
+                f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options/{option_id}/variants",
+                json={"variants": variants},
+            )
+            if not resp.is_success:
+                print(f"[update_variants] offer_id={offer_id} option_id={option_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
     async def get_active_offer_ids(self) -> list[int]:
         """Fetch all active offer IDs from GGSel, filter by status in response."""
         ids = []
