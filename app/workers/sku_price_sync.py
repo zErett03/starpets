@@ -63,23 +63,42 @@ async def sku_price_sync(threshold_rub: float = 5.0, threshold_pct: float = 0.05
         if updated >= max_cards:
             break
 
-        new_base = min(float(v.live) for v in variants)
-        min_pid = min(variants, key=lambda v: float(v.live)).starpets_product_id
-        ordered = sorted(variants, key=lambda v: _variant_sort_key(_P(v.age, v.flyable, v.rideable)))
-        payload = []
-        for pos, v in enumerate(ordered):
-            live = float(v.live)
-            payload.append({
-                "id": v.ggsel_variant_id,
-                "title_ru": f"{v.label} — {int(round(live))}₽",
-                "title_en": v.label,
-                "price": round(live - new_base, 2),
-                "discount_type": "fixed", "impact_type": "increase",
-                "is_default": (v.starpets_product_id == min_pid),
-                "status": "active", "position": pos,
-            })
         try:
-            await ggsel_office.update_price(gid, round(new_base, 2))
+            # Keep the CURRENT default fixed. Changing which variant is default makes the
+            # per-variant upsert transiently violate "exactly 1 default" -> 422. So we read the
+            # current default from ggsel, set base = its live price (its modifier stays 0), and
+            # give every other variant a +/- modifier around it (ggsel supports decrease).
+            opts = await ggsel_office.get_options(gid)
+            odata = opts.get("data") if isinstance(opts, dict) else opts
+            default_vid = None
+            for o in (odata or []):
+                if o.get("id") == opt:
+                    for vv in (o.get("variants") or []):
+                        if vv.get("is_default"):
+                            default_vid = vv.get("id")
+                            break
+                    break
+            by_vid = {v.ggsel_variant_id: v for v in variants}
+            if default_vid not in by_vid:
+                default_vid = min(variants, key=lambda v: float(v.live)).ggsel_variant_id
+            base = float(by_vid[default_vid].live)
+
+            ordered = sorted(variants, key=lambda v: _variant_sort_key(_P(v.age, v.flyable, v.rideable)))
+            payload = []
+            for pos, v in enumerate(ordered):
+                live = float(v.live)
+                delta = round(live - base, 2)
+                payload.append({
+                    "id": v.ggsel_variant_id,
+                    "title_ru": f"{v.label} — {int(round(live))}₽",
+                    "title_en": v.label,
+                    "price": abs(delta),
+                    "discount_type": "fixed",
+                    "impact_type": "increase" if delta >= 0 else "decrease",
+                    "is_default": (v.ggsel_variant_id == default_vid),
+                    "status": "active", "position": pos,
+                })
+            await ggsel_office.update_price(gid, round(base, 2))
             await ggsel_office.update_variants(gid, opt, payload)
             async with AsyncSessionLocal() as db:
                 for v in variants:
@@ -90,7 +109,7 @@ async def sku_price_sync(threshold_rub: float = 5.0, threshold_pct: float = 0.05
                     )
                 await db.commit()
             updated += 1
-            results.append({"gid": gid, "new_base": round(new_base, 2), "variants": len(payload)})
+            results.append({"gid": gid, "base": round(base, 2), "variants": len(payload)})
         except Exception as e:
             errors += 1
             print(f"[SkuPriceSync] gid={gid} update failed: {type(e).__name__}: {e}", flush=True)
