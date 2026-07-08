@@ -3330,8 +3330,16 @@ async def sku_price_sync_ep(dry_run: bool = True, threshold_rub: float = 5.0,
     default is still ~cheapest; option rebuild (bounded by max_rebuilds) when the default drifted.
     ?dry_run=true (default) reports how many cards drifted without writing."""
     from app.workers.sku_price_sync import sku_price_sync
-    return await sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
-                                max_cards=max_cards, max_rebuilds=max_rebuilds, dry_run=dry_run)
+    if dry_run:
+        return await sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
+                                    max_cards=max_cards, max_rebuilds=max_rebuilds, dry_run=True)
+    # writing pass can take minutes (rebuilds ~26 ggsel calls each) -> run in background to avoid
+    # the HTTP/proxy timeout; final summary is logged as [SkuPriceSync] {...}.
+    import asyncio
+    asyncio.create_task(sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
+                                       max_cards=max_cards, max_rebuilds=max_rebuilds, dry_run=False))
+    return {"started": True, "max_cards": max_cards, "max_rebuilds": max_rebuilds,
+            "note": "running in background; see [SkuPriceSync] summary in logs"}
 
 
 @app.get("/probe-default-swap")
