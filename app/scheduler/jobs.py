@@ -187,6 +187,17 @@ async def price_sync_safe():
         print(f"[Scheduler] price_sync error: {e}", flush=True)
 
 
+async def sku_price_sync_safe():
+    from app.config import settings
+    if not settings.sku_price_sync:
+        return  # Phase 3 disabled until validated (set SKU_PRICE_SYNC=true)
+    try:
+        from app.workers.sku_price_sync import sku_price_sync
+        await sku_price_sync()
+    except Exception as e:
+        print(f"[Scheduler] sku_price_sync error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
@@ -196,6 +207,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
     scheduler.add_job(sync_prices_safe, "interval", minutes=30, id="sync_prices")
     scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
+    scheduler.add_job(sku_price_sync_safe, "interval", minutes=15, id="sku_price_sync")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler

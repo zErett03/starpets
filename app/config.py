@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     # StarPets /ex-buyers/updates feed) and the legacy 30-min top-per-product sync_prices
     # is disabled. Flip via env EVENT_PRICE_SYNC after seeding store_items.
     event_price_sync: bool = False
+    sku_price_sync: bool = False   # Phase 3: periodic SKU variant price refresh (SKU_PRICE_SYNC=true)
     starpets_category_id: int = 0
 
     class Config:
