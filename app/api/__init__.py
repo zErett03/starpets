@@ -3204,3 +3204,119 @@ async def probe_v2_put_option():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "Teen price 61 -> A works, 62 -> B works, still 0 -> v2 rejects it (use delete+re-add). Check ids stable. Delete gid."
     return out
+
+
+@app.get("/probe-options-bulk")
+async def probe_options_bulk():
+    """Try PUT/PATCH on the PLURAL /options endpoint with the v2 option_object schema (variants
+    with ids) — the doc schema implies an in-place update path. Distinct prices reveal the winner."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_optbulk__", title_en="__probe_optbulk__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=3)
+        vid = await ggsel_office.add_variant(gid, opt, "Teen", "Teen", 0, is_default=True, position=0)
+        vid2 = await ggsel_office.add_variant(gid, opt, "Full Grown", "Full Grown", 10, position=1)
+        out["option_id"], out["variant_id"], out["variant_id2"] = opt, vid, vid2
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    def _opt_obj(teen_price):
+        return {"id": opt, "type": "radio_button", "status": "active",
+                "title_ru": "Возраст", "title_en": "Age", "is_required": True,
+                "is_price_modifier_hidden": False, "position": 3,
+                "variants": [
+                    {"id": vid, "title_ru": "Teen", "title_en": "Teen", "price": teen_price,
+                     "discount_type": "fixed", "impact_type": "increase", "is_default": True,
+                     "status": "active", "position": 0},
+                    {"id": vid2, "title_ru": "Full Grown", "title_en": "Full Grown", "price": 10,
+                     "discount_type": "fixed", "impact_type": "increase", "is_default": False,
+                     "status": "active", "position": 1},
+                ]}
+
+    url_plural = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options"
+    url_single = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}"
+    attempts = [
+        ("A_put_plural",    "PUT",   url_plural, {"options": [_opt_obj(51)]}),
+        ("B_patch_plural",  "PATCH", url_plural, {"options": [_opt_obj(52)]}),
+        ("C_put_single_v2", "PUT",   url_single, _opt_obj(53)),
+    ]
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        for label, method, url, body in attempts:
+            try:
+                r = await c.request(method, url, json=body)
+                out[label] = {"method": method, "status": r.status_code, "body": r.text[:220]}
+            except Exception as e:
+                out[label] = {"method": method, "error": f"{type(e).__name__}: {e}"}
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final_variants"] = [{"id": v.get("id"), "price": v.get("price")}
+                                         for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "Teen 51->A, 52->B, 53->C worked. Still 0 -> no v2 update path, use delete+re-add."
+    return out
+
+
+@app.get("/probe-upsert-correct")
+async def probe_upsert_correct():
+    """Confirm: POST /variants with ids UPDATES in place (upsert). Update a NON-default variant's
+    price (default stays price 0). Expect Full Grown -> 55, ids stable, still 2 variants."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_upsert__", title_en="__probe_upsert__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=3)
+        vid = await ggsel_office.add_variant(gid, opt, "Teen", "Teen", 0, is_default=True, position=0)
+        vid2 = await ggsel_office.add_variant(gid, opt, "Full Grown", "Full Grown", 10, position=1)
+        out["variant_id_default"], out["variant_id_nondefault"] = vid, vid2
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    body = {"variants": [
+        {"id": vid, "title_ru": "Teen", "title_en": "Teen", "price": 0,
+         "discount_type": "fixed", "impact_type": "increase", "is_default": True,
+         "status": "active", "position": 0},
+        {"id": vid2, "title_ru": "Full Grown NEW", "title_en": "Full Grown NEW", "price": 55,
+         "discount_type": "fixed", "impact_type": "increase", "is_default": False,
+         "status": "active", "position": 1},
+    ]}
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}/variants"
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        try:
+            r = await c.post(url, json=body)
+            out["upsert_resp"] = {"status": r.status_code, "body": r.text[:300]}
+        except Exception as e:
+            out["upsert_resp"] = {"error": f"{type(e).__name__}: {e}"}
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final_variants"] = [{"id": v.get("id"), "title": v.get("title_ru"),
+                                          "price": v.get("price"), "is_default": v.get("is_default")}
+                                         for v in o.get("variants", [])]
+                out["variant_count"] = len(o.get("variants", []))
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "Full Grown price 55 + same ids + count 2 => in-place upsert WORKS (Phase 3 easy). Delete gid."
+    return out
