@@ -2786,7 +2786,7 @@ async def close_order(order_id: int):
 
 
 @app.get("/activate-sku-cards")
-async def activate_sku_cards(limit: int = 0, dry_run: bool = True):
+async def activate_sku_cards(limit: int = 0, dry_run: bool = True, chunk_size: int = 1):
     """Publish SKU-card drafts (they're created as drafts, like normal offers). Activates every
     distinct ggsel card that has SkuVariant rows, in batches of 100 via ggsel batch_activate.
     ?dry_run=true (default) just lists what would be activated. Per-variant availability is
@@ -2806,18 +2806,20 @@ async def activate_sku_cards(limit: int = 0, dry_run: bool = True):
     if dry_run:
         return {"dry_run": True, "sku_card_count": len(gids), "sample": gids[:30]}
 
+    import asyncio
+    cs = max(1, chunk_size)
     activated = 0
     errors = []
-    for i in range(0, len(gids), 100):
-        chunk = gids[i:i + 100]
+    for i in range(0, len(gids), cs):
+        chunk = gids[i:i + cs]
         try:
             await ggsel_office.batch_activate(chunk)
             activated += len(chunk)
         except Exception as e:
-            errors.append({"chunk_start": i, "error": f"{type(e).__name__}: {e}"})
-        import asyncio
-        await asyncio.sleep(0.3)
-    return {"activated": activated, "total": len(gids), "errors": errors}
+            errors.append({"chunk_start": i, "gids": chunk, "error": f"{type(e).__name__}: {e}"})
+        await asyncio.sleep(0.25)
+    return {"activated_submitted": activated, "total": len(gids), "chunk_size": cs, "errors": errors,
+            "note": "batch_activate is async; verify with /sku-card-statuses after ~1-2 min"}
 
 
 @app.get("/cleanup-sku-by-name")
