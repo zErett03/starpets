@@ -3747,3 +3747,15 @@ async def probe_unarchive2():
         out["verify_error"] = str(e)
     out["note"] = "If B is back (active) in variants_after -> full-set resurrect works = clean toggle. Delete gid."
     return out
+
+
+@app.get("/sku-stock-sync")
+async def sku_stock_sync_ep(dry_run: bool = True, max_cards: int = 40):
+    """Stock-driven variant visibility: hide (archive) out-of-stock variants, rebuild the option
+    when the in-stock set changes, pause a card with nothing in stock. ?dry_run=true just counts."""
+    from app.workers.sku_stock_sync import sku_stock_sync
+    if dry_run:
+        return await sku_stock_sync(max_cards=max_cards, dry_run=True)
+    import asyncio
+    asyncio.create_task(sku_stock_sync(max_cards=max_cards, dry_run=False))
+    return {"started": True, "max_cards": max_cards, "note": "background; see [SkuStockSync] in logs"}

@@ -107,7 +107,8 @@ async def sku_price_sync(threshold_rub: float = 5.0, threshold_pct: float = 0.05
             )
             .join(Offer, Offer.starpets_product_id == SkuVariant.starpets_product_id)
             .join(SkuProduct, SkuProduct.product_id == SkuVariant.starpets_product_id)
-            .where(Offer.price_rub.isnot(None), Offer.price_rub > 0)
+            .where(Offer.price_rub.isnot(None), Offer.price_rub > 0,
+                   SkuVariant.hidden.is_(False))   # skip stock-hidden variants (archived on ggsel)
         )).all()
 
     cards: dict = {}

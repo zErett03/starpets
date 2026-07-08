@@ -235,6 +235,7 @@ class SkuVariant(Base):
     starpets_product_id = Column(Integer, nullable=False)
     label = Column(String, nullable=True)
     price_rub = Column(Numeric(10, 2), nullable=True)
+    hidden = Column(Boolean, default=False, server_default="false", nullable=False)  # out-of-stock -> archived on ggsel
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
