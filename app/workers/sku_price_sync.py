@@ -60,8 +60,12 @@ async def _rebuild_option(gid, old_opt, ordered, base, default_pid):
     # delete the drifted option, recreate it with default = cheapest, remap SkuVariant ids.
     await ggsel_office.delete_options(gid, [old_opt])
     new_opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
+    # A required radio must always have a default -> create the default (cheapest) variant FIRST,
+    # then the rest; display order is preserved via each variant's explicit `position`.
+    creation = sorted(enumerate(ordered),
+                      key=lambda iv: 0 if iv[1].starpets_product_id == default_pid else 1)
     async with AsyncSessionLocal() as db:
-        for pos, v in enumerate(ordered):
+        for pos, v in creation:
             live = float(v.live)
             title = f"{v.label} — {int(round(live))}₽"
             new_vid = await ggsel_office.add_variant(
