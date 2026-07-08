@@ -12,7 +12,7 @@ import base64
 import traceback
 
 import httpx
-from sqlalchemy import select, delete as sql_delete
+from sqlalchemy import select, delete as sql_delete, update as sql_update
 
 from app.db import AsyncSessionLocal
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -165,7 +165,14 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
                     print(f"[SkuBuilder] image fetch {r.status_code} {img_uri}", flush=True)
         except Exception as e:
             print(f"[SkuBuilder] image fetch error: {e}", flush=True)
-    cover_png = make_cover(pet_bytes, rare, pumping)
+    from app.images.cover import is_placeholder_bytes
+    _missing = is_placeholder_bytes(pet_bytes)
+    async with AsyncSessionLocal() as db:
+        await db.execute(sql_update(SkuProduct)
+                         .where(SkuProduct.product_id.in_([p.product_id for (p, _pr) in combos]))
+                         .values(image_missing=_missing))
+        await db.commit()
+    cover_png = make_cover(pet_bytes, rare, pumping, name=name)
     cover_b64 = base64.b64encode(cover_png).decode()
 
     desc_ru, desc_en = _card_description(name, rare, pumping)

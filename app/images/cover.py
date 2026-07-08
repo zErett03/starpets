@@ -6,8 +6,7 @@ rings + rarity-tinted radial + sparkles) with a pumping-type badge in the top-LE
 
 Rendered at 2000px (ggsel accepts up to 2000×2000) so the vector elements stay crisp and
 ggsel doesn't re-compress a small image into artifacts. All sizes are SZ fractions, so
-changing SZ rescales the whole composition. Config-driven: tweak RARITY_COLORS / _BADGE and
-re-run /regenerate-covers to restyle every card — the card structure is untouched.
+changing SZ rescales the whole composition.
 """
 from io import BytesIO
 
@@ -38,7 +37,7 @@ def _font(sz):
         except Exception:
             continue
     try:
-        return ImageFont.load_default(size=sz)   # scalable default (Pillow >= 10.1)
+        return ImageFont.load_default(size=sz)
     except Exception:
         return ImageFont.load_default()
 
@@ -97,15 +96,59 @@ def _badge(img: Image.Image, pumping: str) -> Image.Image:
     return img
 
 
-def make_cover(pet_png: bytes, rare: str, pumping: str) -> bytes:
-    """Return PNG bytes: pet centered on a rarity background with a pumping badge."""
+# StarPets serves a "NO IMAGE" placeholder for pets without art. SHA differs per pet, but the
+# perceptual aHash is (near-)identical. is_placeholder_bytes is used to FLAG such pets
+# (sku_products.image_missing) so the 12h re-sync can pull real art once StarPets adds it.
+_PLACEHOLDER_AHASHES = {
+    "c5870b8dcfc7c3df",   # black cat "NO IMAGE" (the common one)
+}
+_AHASH_MAXDIST = 8
+
+
+def _ahash(img: "Image.Image") -> str:
+    bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    bg.alpha_composite(img.convert("RGBA"))
+    g = bg.convert("L").resize((8, 8), Image.LANCZOS)
+    px = list(g.getdata())
+    avg = sum(px) / len(px)
+    bits = 0
+    for i, p in enumerate(px):
+        if p >= avg:
+            bits |= (1 << i)
+    return format(bits, "016x")
+
+
+def _is_placeholder(img: "Image.Image") -> bool:
+    try:
+        h = int(_ahash(img), 16)
+    except Exception:
+        return False
+    for ref in _PLACEHOLDER_AHASHES:
+        if bin(h ^ int(ref, 16)).count("1") <= _AHASH_MAXDIST:
+            return True
+    return False
+
+
+def is_placeholder_bytes(pet_png: bytes) -> bool:
+    """True if the bytes are missing or a detected StarPets 'NO IMAGE' placeholder."""
+    if not pet_png:
+        return True
+    try:
+        return _is_placeholder(Image.open(BytesIO(pet_png)))
+    except Exception:
+        return False
+
+
+def make_cover(pet_png: bytes, rare: str, pumping: str, name: str = "") -> bytes:
+    """Return PNG bytes: pet centered on a rarity background with a pumping badge. Placeholder
+    images (StarPets 'NO IMAGE') are composited as-is; image_missing tracking + the 12h re-sync
+    swap in real art once StarPets adds it. (`name` kept for call-site compatibility.)"""
     bg = _background(rare)
     if pet_png:
         try:
             pet = Image.open(BytesIO(pet_png)).convert("RGBA")
             # StarPets source is only 110px. A tiny CONSTANT pre-smooth hides webp blocking
-            # without washing detail (it runs on the 110px source, so it must not scale with
-            # SZ); then LANCZOS upscale -> soft, clean edges. Sharpening looks harsh here.
+            # without washing detail; then LANCZOS upscale -> soft, clean edges.
             pet = pet.filter(ImageFilter.GaussianBlur(0.4))
             box = int(SZ * 0.60)
             scale = min(box / pet.width, box / pet.height)

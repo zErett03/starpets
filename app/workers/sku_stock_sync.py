@@ -19,6 +19,7 @@ from app.workers.sku_builder import _variant_sort_key
 
 _HIDE_AFTER = 2                 # consecutive out-of-stock checks before hiding (hysteresis)
 _oos_streak: dict = {}          # (gid, product_id) -> consecutive OOS count (in-memory)
+_running = False                # guard: no concurrent writing runs (racing rebuilds -> 422)
 
 
 class _P:
@@ -68,6 +69,22 @@ async def _rebuild_shown(gid, opt_hint, shown, default_pid):
 
 
 async def sku_stock_sync(max_cards: int = 40, dry_run: bool = False) -> dict:
+    """Guard against concurrent writing runs (parallel rebuilds of one card race into a
+    transient no-default state -> 422). dry_run is read-only, so it never blocks."""
+    global _running
+    if not dry_run:
+        if _running:
+            print("[SkuStockSync] already running — skip", flush=True)
+            return {"skipped": "already running"}
+        _running = True
+    try:
+        return await _sku_stock_sync_impl(max_cards, dry_run)
+    finally:
+        if not dry_run:
+            _running = False
+
+
+async def _sku_stock_sync_impl(max_cards: int, dry_run: bool) -> dict:
     _in_stock = exists().where(and_(StoreItem.product_id == SkuVariant.starpets_product_id,
                                     StoreItem.reserve_level == 0))
     async with AsyncSessionLocal() as db:

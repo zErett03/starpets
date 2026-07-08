@@ -255,4 +255,5 @@ class SkuProduct(Base):
     flyable = Column(Boolean, default=False)
     rideable = Column(Boolean, default=False)
     image_uri = Column(String, nullable=True)
+    image_missing = Column(Boolean, default=False, server_default="false", nullable=False)  # StarPets 'NO IMAGE' placeholder
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
