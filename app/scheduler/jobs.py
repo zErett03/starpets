@@ -207,7 +207,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
     scheduler.add_job(sync_prices_safe, "interval", minutes=30, id="sync_prices")
     scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
-    scheduler.add_job(sku_price_sync_safe, "interval", minutes=15, id="sku_price_sync")
+    scheduler.add_job(sku_price_sync_safe, "interval", minutes=5, id="sku_price_sync")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler

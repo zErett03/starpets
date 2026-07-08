@@ -3519,15 +3519,87 @@ async def fix_sku_unlimited(dry_run: bool = True):
 
 async def _run_fix_unlimited(gids, background):
     import asyncio
+    print(f"[FixUnlimited] START total={len(gids)}", flush=True)
     ok = 0
     errors = []
-    for gid in gids:
+    for i, gid in enumerate(gids, 1):
         try:
             await ggsel_office.set_unlimited(gid)
             ok += 1
         except Exception as e:
             errors.append({"gid": gid, "error": f"{type(e).__name__}: {e}"})
+        if i % 25 == 0:
+            print(f"[FixUnlimited] progress {i}/{len(gids)} ok={ok} errors={len(errors)}", flush=True)
         await asyncio.sleep(0.2)
     summary = {"updated": ok, "total": len(gids), "errors": errors[:20], "error_count": len(errors)}
-    print(f"[FixUnlimited] {summary}", flush=True)
+    print(f"[FixUnlimited] DONE {summary}", flush=True)
     return summary
+
+
+
+@app.get("/probe-unlimited")
+async def probe_unlimited(ggsel_offer_id: int):
+    """Sync test: PATCH is_unlimited_quantity on ONE card, return ggsel's raw status+body, then
+    read back the offer's quantity fields — to confirm the field is accepted."""
+    import httpx as _httpx
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{ggsel_offer_id}"
+    out = {"ggsel_offer_id": ggsel_offer_id}
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        try:
+            r = await c.patch(url, json={"is_unlimited_quantity": True})
+            out["patch"] = {"status": r.status_code, "body": r.text[:300]}
+        except Exception as e:
+            out["patch"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        data = await ggsel_office.get_offer(ggsel_offer_id)
+        off = data.get("data") if isinstance(data, dict) and "data" in data else data
+        out["after"] = {"is_unlimited_quantity": (off or {}).get("is_unlimited_quantity"),
+                        "quantity": (off or {}).get("quantity"),
+                        "status": (off or {}).get("status")}
+    except Exception as e:
+        out["after_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+@app.get("/probe-hide-variant")
+async def probe_hide_variant():
+    """Does status='inactive' hide a variant from the buyer's radio? Create A(default)+B, set B
+    inactive via upsert, report B's status. Then open the card on ggsel and check if B is gone."""
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_hide__", title_en="__probe_hide__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
+        a = await ggsel_office.add_variant(gid, opt, "A (in stock)", "A", 0, is_default=True, position=0)
+        b = await ggsel_office.add_variant(gid, opt, "B (out of stock)", "B", 20, position=1)
+        out["ids"] = {"A": a, "B": b}
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    payload = [
+        {"id": a, "title_ru": "A (in stock)", "title_en": "A", "price": 0, "discount_type": "fixed",
+         "impact_type": "increase", "is_default": True, "status": "active", "position": 0},
+        {"id": b, "title_ru": "B (out of stock)", "title_en": "B", "price": 20, "discount_type": "fixed",
+         "impact_type": "increase", "is_default": False, "status": "inactive", "position": 1},
+    ]
+    try:
+        out["upsert"] = await ggsel_office.update_variants(gid, opt, payload)
+    except Exception as e:
+        out["upsert_error"] = f"{type(e).__name__}: {e}"
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["variants_after"] = [{"id": v.get("id"), "title": v.get("title_ru"),
+                                          "status": v.get("status")} for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "Open this card (gid) on ggsel: if B is NOT in the Вариант list -> inactive hides it. Delete gid."
+    return out
