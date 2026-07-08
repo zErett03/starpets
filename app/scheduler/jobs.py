@@ -100,21 +100,27 @@ async def starpets_sync() -> dict:
             for i in range(0, len(rows), UPSERT_BATCH):
                 batch = rows[i:i + UPSERT_BATCH]
                 stmt = pg_insert(Offer).values(batch)
+                # When event_price_sync is on, prices are owned by the event feed + the robust
+                # floor sweep. starpets_sync must NOT clobber them: its per-product min (incl.
+                # reserved items, no outlier rejection) re-introduces bait/phantom prices and
+                # fights the sweep. Catalog fields are always refreshed.
+                _set = {
+                    "starpets_qty": stmt.excluded.starpets_qty,
+                    "item_type": stmt.excluded.item_type,
+                    "rare": stmt.excluded.rare,
+                    "flyable": stmt.excluded.flyable,
+                    "rideable": stmt.excluded.rideable,
+                    "age": stmt.excluded.age,
+                    "image_uri": stmt.excluded.image_uri,
+                    "starpets_product_id": stmt.excluded.starpets_product_id,
+                    "last_synced_at": stmt.excluded.last_synced_at,
+                }
+                if not settings.event_price_sync:
+                    _set["price_usd"] = stmt.excluded.price_usd
+                    _set["price_rub"] = stmt.excluded.price_rub
                 stmt = stmt.on_conflict_do_update(
                     constraint="uq_offers_composite",
-                    set_={
-                        "price_usd": stmt.excluded.price_usd,
-                        "price_rub": stmt.excluded.price_rub,
-                        "starpets_qty": stmt.excluded.starpets_qty,
-                        "item_type": stmt.excluded.item_type,
-                        "rare": stmt.excluded.rare,
-                        "flyable": stmt.excluded.flyable,
-                        "rideable": stmt.excluded.rideable,
-                        "age": stmt.excluded.age,
-                        "image_uri": stmt.excluded.image_uri,
-                        "starpets_product_id": stmt.excluded.starpets_product_id,
-                        "last_synced_at": stmt.excluded.last_synced_at,
-                    },
+                    set_=_set,
                 )
                 await db.execute(stmt)
             await db.commit()
@@ -193,7 +199,9 @@ async def sku_price_sync_safe():
         return  # Phase 3 disabled until validated (set SKU_PRICE_SYNC=true)
     try:
         from app.workers.sku_price_sync import sku_price_sync
-        await sku_price_sync()
+        # scheduled pass ignores copeck-churn (FX/floor micro-shifts); manual endpoint keeps
+        # its sensitive defaults for diagnostics. Big traps still caught well under 50₽/10%.
+        await sku_price_sync(threshold_rub=50.0, threshold_pct=0.10)
     except Exception as e:
         print(f"[Scheduler] sku_price_sync error: {e}", flush=True)
 
