@@ -3330,3 +3330,56 @@ async def sku_price_sync_ep(dry_run: bool = True, threshold_rub: float = 5.0,
     from app.workers.sku_price_sync import sku_price_sync
     return await sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
                                 max_cards=max_cards, dry_run=dry_run)
+
+
+@app.get("/probe-default-swap")
+async def probe_default_swap():
+    """Can upsert MOVE the default if the new default is sent FIRST in the array? Create A(default),
+    B, C; then upsert to make C default (C first). Success => cheap path keeps default=cheapest."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_dswap__", title_en="__probe_dswap__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "V", "V", position=3)
+        a = await ggsel_office.add_variant(gid, opt, "A", "A", 0, is_default=True, position=0)
+        b = await ggsel_office.add_variant(gid, opt, "B", "B", 20, position=1)
+        c = await ggsel_office.add_variant(gid, opt, "C", "C", 50, position=2)
+        out["ids"] = {"A": a, "B": b, "C": c}
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    # Make C the default, C FIRST in the array. base becomes C's price -> A/B get modifiers.
+    payload = {"variants": [
+        {"id": c, "title_ru": "C", "title_en": "C", "price": 0, "discount_type": "fixed",
+         "impact_type": "increase", "is_default": True, "status": "active", "position": 2},
+        {"id": a, "title_ru": "A", "title_en": "A", "price": 30, "discount_type": "fixed",
+         "impact_type": "increase", "is_default": False, "status": "active", "position": 0},
+        {"id": b, "title_ru": "B", "title_en": "B", "price": 10, "discount_type": "fixed",
+         "impact_type": "increase", "is_default": False, "status": "active", "position": 1},
+    ]}
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}/variants"
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as cl:
+        try:
+            r = await cl.post(url, json=payload)
+            out["swap_resp"] = {"status": r.status_code, "body": r.text[:300]}
+        except Exception as e:
+            out["swap_resp"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final"] = [{"id": v.get("id"), "title": v.get("title_ru"),
+                                 "price": v.get("price"), "is_default": v.get("is_default")}
+                                for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "If C is_default=true (200) => default-first ordering fixes the swap. Delete gid."
+    return out
