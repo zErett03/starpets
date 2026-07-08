@@ -2806,8 +2806,18 @@ async def activate_sku_cards(limit: int = 0, dry_run: bool = True, chunk_size: i
     if dry_run:
         return {"dry_run": True, "sku_card_count": len(gids), "sample": gids[:30]}
 
-    import asyncio
     cs = max(1, chunk_size)
+    # Small runs inline (immediate result); large ones in background to avoid HTTP timeout.
+    if len(gids) <= 60:
+        return await _run_activate_sku(gids, cs, background=False)
+    import asyncio
+    asyncio.create_task(_run_activate_sku(gids, cs, background=True))
+    return {"started": True, "total": len(gids), "chunk_size": cs,
+            "note": "running in background (one batch_activate per chunk); verify with /sku-card-statuses"}
+
+
+async def _run_activate_sku(gids, cs, background):
+    import asyncio
     activated = 0
     errors = []
     for i in range(0, len(gids), cs):
@@ -2818,8 +2828,13 @@ async def activate_sku_cards(limit: int = 0, dry_run: bool = True, chunk_size: i
         except Exception as e:
             errors.append({"chunk_start": i, "gids": chunk, "error": f"{type(e).__name__}: {e}"})
         await asyncio.sleep(0.25)
-    return {"activated_submitted": activated, "total": len(gids), "chunk_size": cs, "errors": errors,
-            "note": "batch_activate is async; verify with /sku-card-statuses after ~1-2 min"}
+    summary = {"activated_submitted": activated, "total": len(gids), "chunk_size": cs,
+               "errors": errors[:20], "error_count": len(errors)}
+    print(f"[ActivateSku] {summary}", flush=True)
+    if background:
+        return summary
+    summary["note"] = "batch_activate is async; verify with /sku-card-statuses after ~1-2 min"
+    return summary
 
 
 @app.get("/cleanup-sku-by-name")
