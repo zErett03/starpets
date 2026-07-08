@@ -3826,3 +3826,43 @@ async def reconcile_stuck_offers_ep(dry_run: bool = True, max_offers: int = 100)
     import asyncio
     asyncio.create_task(reconcile_stuck_offers(max_offers=max_offers, dry_run=False))
     return {"started": True, "max_offers": max_offers, "note": "background; see [ReconcileStuck] in logs"}
+
+
+@app.get("/probe-image-hash")
+async def probe_image_hash(product_ids: str = "1739700,19416,23991"):
+    """Fetch each product's image_uri and hash the CONTENT — to see if 'NO IMAGE' placeholders
+    share one hash (detect by hash) or differ. Pass comma-separated product_ids."""
+    import hashlib
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuProduct
+
+    ids = [int(x) for x in product_ids.split(",") if x.strip().isdigit()]
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(SkuProduct.product_id, SkuProduct.name, SkuProduct.image_uri)
+            .where(SkuProduct.product_id.in_(ids))
+        )).all()
+
+    out = []
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+        for pid, name, uri in rows:
+            e = {"product_id": pid, "name": name, "uri": uri}
+            if not uri:
+                e["error"] = "no image_uri"
+                out.append(e); continue
+            try:
+                r = await c.get(uri)
+                e["status"] = r.status_code
+                if r.is_success:
+                    e["bytes"] = len(r.content)
+                    e["sha256"] = hashlib.sha256(r.content).hexdigest()
+                else:
+                    e["body"] = r.text[:120]
+            except Exception as ex:
+                e["error"] = f"{type(ex).__name__}: {ex}"
+            out.append(e)
+    hashes = [e.get("sha256") for e in out if e.get("sha256")]
+    return {"results": out, "unique_hashes": len(set(hashes)),
+            "all_same": len(set(hashes)) == 1 and len(hashes) > 1,
+            "note": "all_same=true -> one placeholder hash to detect. Different -> hash per-pet or real images."}
