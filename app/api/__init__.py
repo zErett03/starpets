@@ -2962,3 +2962,32 @@ async def reset_sku_cards(dry_run: bool = True):
             "ggsel_errors": ggsel_errors, "deleted_sku_variant_rows": n_variants,
             "deleted_backing_offers": deleted_offers,
             "kept_backing_offers_with_orders": kept}
+
+
+@app.get("/probe-activate")
+async def probe_activate(ggsel_offer_id: int):
+    """One-shot: try both activate endpoints on one draft and report which flips it out of
+    'draft'. batch_activate = POST /offers/batch_activate; activate_offers = POST /offers/batch/activate."""
+    async def _status():
+        try:
+            data = await ggsel_office.get_offer(ggsel_offer_id)
+            off = data.get("data") if isinstance(data, dict) and "data" in data else data
+            return (off or {}).get("status")
+        except Exception as e:
+            return f"ERR {type(e).__name__}: {e}"
+
+    out = {"ggsel_offer_id": ggsel_offer_id, "initial_status": await _status()}
+
+    try:
+        out["batch_activate_resp"] = await ggsel_office.batch_activate([ggsel_offer_id])
+    except Exception as e:
+        out["batch_activate_resp"] = f"ERR {type(e).__name__}: {e}"
+    out["status_after_batch_activate"] = await _status()
+
+    try:
+        out["activate_offers_resp"] = await ggsel_office.activate_offers([ggsel_offer_id])
+    except Exception as e:
+        out["activate_offers_resp"] = f"ERR {type(e).__name__}: {e}"
+    out["status_after_activate_offers"] = await _status()
+
+    return out
