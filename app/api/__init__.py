@@ -3141,3 +3141,66 @@ async def probe_variant_update2():
         out["verify_error"] = f"{type(e).__name__}: {e}"
     out["note"] = "Teen price 71/72/73/74 reveals which worked (A/B/C/D). Check variant ids stayed stable. Delete gid."
     return out
+
+
+@app.get("/probe-v2-put-option")
+async def probe_v2_put_option():
+    """Phase 3 linchpin: does our v2 seller API (api-key auth) accept the UI's PUT-option-with-
+    variants_attributes format? If yes -> in-place variant update (ids preserved). Delete gid after."""
+    import httpx as _httpx
+    resp = await ggsel_office.create_offer(
+        title_ru="__probe_v2put__", title_en="__probe_v2put__",
+        description_ru="p", description_en="p", instructions_ru="p", instructions_en="p",
+        category_id=122921, cover_base64="", price=100.0,
+    )
+    gid = (resp.get("data") or {}).get("id") or resp.get("id") or resp.get("offer_id")
+    if not gid:
+        return {"error": f"no gid: {resp}"}
+    out = {"gid": gid}
+    try:
+        opt = await ggsel_office.create_radio_option(gid, "Возраст", "Age", position=3)
+        vid = await ggsel_office.add_variant(gid, opt, "Teen", "Teen", 0, is_default=True, position=0)
+        vid2 = await ggsel_office.add_variant(gid, opt, "Full Grown", "Full Grown", 10, position=1)
+        out["option_id"], out["variant_id"], out["variant_id2"] = opt, vid, vid2
+    except Exception as e:
+        return {**out, "build_error": f"{type(e).__name__}: {e}"}
+
+    url = f"{SELLER_OFFICE_V2_URL}/offers/{gid}/options/{opt}"
+    def _body(teen_price):
+        variants = [
+            {"id": vid, "position": 0, "title_ru": "Teen", "title_en": "Teen",
+             "discount_kind": "fixed", "impact_variant": "increase", "default": True, "price": teen_price},
+            {"id": vid2, "position": 1, "title_ru": "Full Grown", "title_en": "Full Grown",
+             "discount_kind": "fixed", "impact_variant": "increase", "default": False, "price": 10},
+        ]
+        inner = {"kind": "radio_button", "position": 3, "title_ru": "Возраст", "title_en": "Age",
+                 "required": True, "hide_price_modifier": False, "splitted_products": False,
+                 "variants_attributes": variants}
+        return inner
+
+    async with _httpx.AsyncClient(headers=ggsel_office._headers(), timeout=30) as c:
+        # A: wrapped in {"option": {...}} (exactly like the UI)
+        try:
+            r = await c.put(url, json={"option": _body(61)})
+            out["A_put_wrapped"] = {"status": r.status_code, "body": r.text[:250]}
+        except Exception as e:
+            out["A_put_wrapped"] = {"error": f"{type(e).__name__}: {e}"}
+        # B: no wrapper (inner object directly)
+        try:
+            r = await c.put(url, json=_body(62))
+            out["B_put_plain"] = {"status": r.status_code, "body": r.text[:250]}
+        except Exception as e:
+            out["B_put_plain"] = {"error": f"{type(e).__name__}: {e}"}
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+        data = opts.get("data") if isinstance(opts, dict) else opts
+        for o in (data or []):
+            if o.get("id") == opt:
+                out["final_variants"] = [{"id": v.get("id"), "title": v.get("title_ru"),
+                                          "price": v.get("price"), "is_default": v.get("is_default")}
+                                         for v in o.get("variants", [])]
+    except Exception as e:
+        out["verify_error"] = f"{type(e).__name__}: {e}"
+    out["note"] = "Teen price 61 -> A works, 62 -> B works, still 0 -> v2 rejects it (use delete+re-add). Check ids stable. Delete gid."
+    return out
