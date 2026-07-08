@@ -3324,12 +3324,14 @@ async def probe_upsert_correct():
 
 @app.get("/sku-price-sync")
 async def sku_price_sync_ep(dry_run: bool = True, threshold_rub: float = 5.0,
-                            threshold_pct: float = 0.05, max_cards: int = 100):
-    """Phase 3: refresh SKU card prices from live offers.price_rub (in-place variant upsert).
-    ?dry_run=true (default) reports how many cards drifted beyond threshold without writing."""
+                            threshold_pct: float = 0.05, max_cards: int = 100,
+                            max_rebuilds: int = 20):
+    """Phase 3: refresh SKU card prices from live offers.price_rub. Cheap in-place upsert when the
+    default is still ~cheapest; option rebuild (bounded by max_rebuilds) when the default drifted.
+    ?dry_run=true (default) reports how many cards drifted without writing."""
     from app.workers.sku_price_sync import sku_price_sync
     return await sku_price_sync(threshold_rub=threshold_rub, threshold_pct=threshold_pct,
-                                max_cards=max_cards, dry_run=dry_run)
+                                max_cards=max_cards, max_rebuilds=max_rebuilds, dry_run=dry_run)
 
 
 @app.get("/probe-default-swap")
