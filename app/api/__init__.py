@@ -3857,6 +3857,24 @@ async def probe_image_hash(product_ids: str = "1739700,19416,23991"):
                 if r.is_success:
                     e["bytes"] = len(r.content)
                     e["sha256"] = hashlib.sha256(r.content).hexdigest()
+                    # perceptual aHash (composite on white -> L -> 8x8 -> bit per pixel vs mean).
+                    # Visually-identical placeholders share a near-identical aHash even if bytes differ.
+                    try:
+                        from PIL import Image as _Img
+                        from io import BytesIO as _BIO
+                        im = _Img.open(_BIO(r.content)).convert("RGBA")
+                        bg = _Img.new("RGBA", im.size, (255, 255, 255, 255))
+                        bg.alpha_composite(im)
+                        g = bg.convert("L").resize((8, 8), _Img.LANCZOS)
+                        px = list(g.getdata())
+                        avg = sum(px) / len(px)
+                        bits = 0
+                        for i, p in enumerate(px):
+                            if p >= avg:
+                                bits |= (1 << i)
+                        e["ahash"] = format(bits, "016x")
+                    except Exception as ie:
+                        e["ahash_error"] = f"{type(ie).__name__}: {ie}"
                 else:
                     e["body"] = r.text[:120]
             except Exception as ex:
