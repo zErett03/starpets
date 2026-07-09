@@ -557,9 +557,15 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 # (retry-delivery, пересоздание трейда спустя время) снова стал привязываемым,
                 # а не завис на "обрабатывается". Берём и needs_attention (recovered orders).
                 from sqlalchemy import func as _func
-                cutoff = datetime.utcnow() - timedelta(minutes=60)
+                # Buyers often open the order link long AFTER purchase (an hour+). A short window
+                # left them stuck on the spinner forever, so it is generous now. But ggsel passes
+                # only the uniquecode (not our order id), so if MULTIPLE unbound orders are in range
+                # (same buyer bought several at once) we can't tell them apart — binding "the newest"
+                # would show the WRONG bot. So bind only when there is exactly ONE candidate; the
+                # ambiguous multi-order case needs the order id in the URL (see &id_i handling).
+                cutoff = datetime.utcnow() - timedelta(hours=24)
                 _recent = _func.coalesce(Order.dispatched_at, Order.created_at)
-                result = await db.execute(
+                cand = (await db.execute(
                     select(Order)
                     .where(
                         Order.uniquecode.is_(None),
@@ -570,13 +576,16 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                         _recent >= cutoff,
                     )
                     .order_by(_recent.desc())
-                    .limit(1)
-                )
-                order = result.scalar_one_or_none()
-                if order is not None:
+                    .limit(2)
+                )).scalars().all()
+                if len(cand) == 1:
+                    order = cand[0]
                     order.uniquecode = uniquecode
                     await db.commit()
                     print(f"[delivery] linked uniquecode={uniquecode!r} → order id={order.id}", flush=True)
+                elif len(cand) > 1:
+                    print(f"[delivery] uniquecode={uniquecode!r} ambiguous — {len(cand)} unbound "
+                          f"orders in window; not guessing (need id_i in URL)", flush=True)
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None

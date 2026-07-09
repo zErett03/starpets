@@ -64,7 +64,12 @@ _FRIENDSHIP_WINDOW = timedelta(minutes=10)
 # Pre-acceptance states where the friendship still needs driving. Includes 2 PENDING_FRIEND
 # (the state that oscillates 0↔2 until the bot accepts) — excluding it left orders stuck.
 # Stop at 3 PENDING_START+ (friendship established, trade moving) to avoid needless re-pings.
-_FRIENDSHIP_OPEN_STATES = (None, "", "0", "1", "2")
+# Re-ping friendship ONLY in the very-early phase (CREATED/unknown). Once a trade reaches
+# PENDING_FRIEND(2)/DELAYED_START(1) we must LEAVE IT ALONE: poking friendship every cycle
+# keeps StarPets treating the trade as active, so an abandoned trade never idles out and the
+# item is never released (create/cancel then return 130). Letting it sit lets it expire in
+# ~15 min and free the item — the proven flow. (Regression from commit ecfa58f, reverted.)
+_FRIENDSHIP_OPEN_STATES = (None, "", "0")
 
 # Server-side delivery timer: how long a single trade's bot-online window lasts before
 # we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the

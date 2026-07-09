@@ -68,19 +68,35 @@ async def _rebuild_option(gid, ordered, base, default_pid):
     if old_ids:
         await ggsel_office.delete_options(gid, old_ids)
     new_opt = await ggsel_office.create_radio_option(gid, "Вариант", "Variant", position=3)
-    # A required radio must always have a default -> create the default (cheapest) variant FIRST,
-    # then the rest; display order is preserved via each variant's explicit `position`.
-    creation = sorted(enumerate(ordered),
-                      key=lambda iv: 0 if iv[1].starpets_product_id == default_pid else 1)
+    # Guarantee EXACTLY one default regardless of card state: dedupe by product, pick the default
+    # variant by identity (default_pid, else cheapest), recompute base from it so its modifier is 0,
+    # and create it FIRST at position 0. Prevents the "должен быть указан 1 вариант по умолчанию" 422.
+    seen, uniq = set(), []
+    for v in ordered:
+        if v.starpets_product_id in seen:
+            continue
+        seen.add(v.starpets_product_id)
+        uniq.append(v)
+    ordered = uniq
+    if not ordered:
+        print(f"[SkuPriceSync] rebuild gid={gid}: no variants — skip", flush=True)
+        return
+    default_v = next((v for v in ordered if v.starpets_product_id == default_pid), None)
+    if default_v is None:
+        print(f"[SkuPriceSync] rebuild gid={gid}: default_pid={default_pid} not among "
+              f"{len(ordered)} variants -> using cheapest-by-live", flush=True)
+        default_v = min(ordered, key=lambda v: float(v.live))
+    base = float(default_v.live)
+    creation = [default_v] + [v for v in ordered if v is not default_v]
     payload, meta = [], []
-    for pos, v in creation:
+    for pos, v in enumerate(creation):
         live = float(v.live)
         delta = round(live - base, 2)
         payload.append({
             "title_ru": f"{v.label} — {int(round(live))}₽", "title_en": v.label,
             "price": abs(delta), "discount_type": "fixed",
             "impact_type": "increase" if delta >= 0 else "decrease",
-            "is_default": (v.starpets_product_id == default_pid), "status": "active", "position": pos,
+            "is_default": (v is default_v), "status": "active", "position": pos,
         })
         meta.append((v, live))
     created = await ggsel_office.add_variants_bulk(gid, new_opt, payload)
