@@ -3952,3 +3952,34 @@ async def floor_relive_ep(dry_run: bool = True, max_products: int = 150):
     import asyncio
     asyncio.create_task(relive_active(max_products=max_products, dry_run=False))
     return {"started": True, "max_products": max_products, "note": "background; see [FloorRelive] in logs"}
+
+
+@app.get("/debug-item")
+async def debug_item(item_ids: str = ""):
+    """Forensic: dump StarPets' live view of specific purchased item ids (comma-separated) +
+    account info. Reveals whether a 'stuck' item still exists / is ours / its reserveLevel —
+    to tell 'locked in trade' from 'gone' from 'valid but request-side 130'."""
+    from app.clients.starpets import starpets
+    out = {"item_ids": item_ids}
+    ids = [x.strip() for x in item_ids.split(",") if x.strip()]
+    # 1. account identity we're acting as
+    try:
+        info = await starpets.get_info()
+        out["account_info"] = info
+    except Exception as e:
+        out["account_info_error"] = f"{type(e).__name__}: {e}"
+    # 2. raw item lookup
+    if ids:
+        try:
+            out["get_items"] = await starpets.get_items(ids)
+        except Exception as e:
+            import httpx as _hx
+            body = None
+            if isinstance(e, _hx.HTTPStatusError):
+                try:
+                    body = e.response.json()
+                except Exception:
+                    body = e.response.text[:300]
+            out["get_items_error"] = f"{type(e).__name__}: {e}"
+            out["get_items_error_body"] = body
+    return out
