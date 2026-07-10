@@ -71,6 +71,12 @@ _FRIENDSHIP_WINDOW = timedelta(minutes=10)
 # ~15 min and free the item — the proven flow. (Regression from commit ecfa58f, reverted.)
 _FRIENDSHIP_OPEN_STATES = (None, "", "0")
 
+# Act (cancel+retry / give up) BEFORE the ~10-min bot window closes, so the trade is still
+# CANCELLABLE and the item is released cleanly. Cancelling exactly at expiry left the item
+# locked (cancel returns 130 on an already-expired trade) — the root of the stuck-item cases.
+# Only fires for non-session buyers (statuses 0/1/2), who have not entered the game yet.
+_RETRY_AFTER = timedelta(minutes=9)
+
 # Server-side delivery timer: how long a single trade's bot-online window lasts before
 # we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the
 # current trade's friendship was fired). Capped to avoid an infinite recreate loop.
@@ -238,8 +244,8 @@ async def monitor_all_deliveries() -> None:
                 continue  # settled or already handled this cycle
             anchor = order.dispatched_at or order.updated_at
             anchor = anchor.replace(tzinfo=None) if anchor else None
-            if anchor is None or (now - anchor) <= _DELIVERY_TIMEOUT:
-                continue  # timer not expired yet
+            if anchor is None or (now - anchor) <= _RETRY_AFTER:
+                continue  # act ~1 min before the bot window closes (trade still cancellable)
 
             st = str(order.starpets_status or "")
             if st == "5":
@@ -290,6 +296,18 @@ async def monitor_all_deliveries() -> None:
                     flush=True,
                 )
             else:
+                # Give up — but CANCEL the still-live trade first so the item is released cleanly.
+                # Leaving it to expire locks the item (cancel then returns 130). This is the fix
+                # for the stuck-item cases: we always free the item while the trade is cancellable.
+                old_tid = order.starpets_custom_id
+                if old_tid:
+                    try:
+                        await starpets.cancel_trade(old_tid, "seller_not_friending")
+                        print(f"[MonitorDelivery] order_id={order.id} cancelled trade {old_tid} "
+                              f"before giving up — item released", flush=True)
+                    except Exception as e:
+                        print(f"[MonitorDelivery] order_id={order.id} final cancel failed "
+                              f"trade={old_tid}: {e}", flush=True)
                 order.delivery_status = DeliveryStatus.needs_attention
                 if not order.error_reason:
                     order.error_reason = "delivery timeout: бот не смог передать (лимит ретраев)"
