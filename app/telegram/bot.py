@@ -32,11 +32,14 @@ def _admin_ids() -> set[int]:
     return out
 
 
-def _orders_chat() -> str | None:
-    if settings.telegram_chat_id_orders:
-        return settings.telegram_chat_id_orders
-    ids = _admin_ids()
-    return str(next(iter(ids))) if ids else None
+def _orders_chats() -> list[str]:
+    """Chats that receive new-order + problem alerts. TELEGRAM_CHAT_ID_ORDERS (comma-separated)
+    if set, else EVERY whitelisted admin id — so notifications reach several people."""
+    raw = settings.telegram_chat_id_orders or ""
+    chats = [c.strip() for c in raw.replace(";", ",").split(",") if c.strip()]
+    if chats:
+        return chats
+    return [str(i) for i in sorted(_admin_ids())]
 
 
 def is_authorized(user_id) -> bool:
@@ -364,29 +367,25 @@ async def handle_update(update: dict) -> None:
 
 # ----------------------------------------------------------- notifications ---
 async def notify_new_order(order) -> None:
-    chat = _orders_chat()
-    if not chat:
-        return
-    await send_message(chat,
-        f"🆕 <b>Новый заказ #{order.id}</b>\n"
-        f"{_esc(order.item_name)}\n"
-        f"покупатель: <code>{_esc(order.roblox_username)}</code>  ·  "
-        f"{_esc(order.amount_rub)}₽\n"
-        f"ggsel: <code>{_esc(order.ggsel_order_id)}</code>\n"
-        f"<code>/order {order.id}</code>")
+    text = (f"🆕 <b>Новый заказ #{order.id}</b>\n"
+            f"{_esc(order.item_name)}\n"
+            f"покупатель: <code>{_esc(order.roblox_username)}</code>  ·  "
+            f"{_esc(order.amount_rub)}₽\n"
+            f"ggsel: <code>{_esc(order.ggsel_order_id)}</code>\n"
+            f"<code>/order {order.id}</code>")
+    for chat in _orders_chats():
+        await send_message(chat, text)
 
 
 async def notify_problem(order) -> None:
-    chat = _orders_chat()
-    if not chat:
-        return
     st = order.delivery_status.value if order.delivery_status else "—"
-    await send_message(chat,
-        f"🔴 <b>Заказ #{order.id} → {_esc(st)}</b>\n"
-        f"{_esc(order.item_name)}\n"
-        f"причина: {_esc((order.error_reason or '')[:150])}\n"
-        f"покупатель: <code>{_esc(order.roblox_username)}</code>",
-        buttons=_order_buttons(order))
+    text = (f"🔴 <b>Заказ #{order.id} → {_esc(st)}</b>\n"
+            f"{_esc(order.item_name)}\n"
+            f"причина: {_esc((order.error_reason or '')[:150])}\n"
+            f"покупатель: <code>{_esc(order.roblox_username)}</code>")
+    btns = _order_buttons(order)
+    for chat in _orders_chats():
+        await send_message(chat, text, buttons=btns)
 
 
 async def notify_new_order_by_id(order_id: int) -> None:
