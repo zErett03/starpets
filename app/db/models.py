@@ -26,6 +26,7 @@ class DeliveryStatus(str, enum.Enum):
     finalized = "finalized"
     failed = "failed"
     needs_attention = "needs_attention"
+    closed = "closed"
 
 
 class TaskKind(str, enum.Enum):

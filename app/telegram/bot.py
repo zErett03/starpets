@@ -90,7 +90,9 @@ def _order_buttons(order) -> list:
 
 
 async def _get_json(path: str) -> dict:
-    async with httpx.AsyncClient(timeout=30) as c:
+    # internal endpoints sit behind the app's Basic-Auth middleware — send admin creds
+    auth = (settings.admin_user, settings.admin_password) if settings.admin_password else None
+    async with httpx.AsyncClient(timeout=30, auth=auth) as c:
         r = await c.get(f"{_BASE}{path}")
         try:
             return r.json()

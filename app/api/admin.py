@@ -47,6 +47,7 @@ _STATUS_COLORS = {
     "finalized": "#2ea043",
     "failed": "#f85149",
     "needs_attention": "#db61a2",
+    "closed": "#ffffff",
 }
 
 _TRADE_STATUS_LABEL = {
