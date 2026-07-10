@@ -100,7 +100,11 @@ class GgselSellerOfficeClient:
             "pre_payment_settings": {
                 "is_enabled": True,
                 "url": precheck_url,
-                "allow_payment": True,
+                # False = ggsel HARD-blocks payment when our precheck returns an error (OOS /
+                # price_too_high / bad username). True (ggsel default) silently let buyers pay
+                # through every rejection — the root of OOS & underpriced purchases. Fail-closed:
+                # if our precheck endpoint is down, sales are blocked until it recovers.
+                "allow_payment": False,
             },
             "notification_settings": {
                 "type": "url",
