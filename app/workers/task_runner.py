@@ -12,9 +12,15 @@ WORKER_ID = str(uuid.uuid4())
 
 
 async def pop_task(db) -> Task | None:
+    # Honour scheduled_at: a task rescheduled after a failure (scheduled_at = now + backoff)
+    # must WAIT for its delay. Without this filter pop_task grabbed it immediately, retrying
+    # 6× in one second (no backoff) — which raced cancel+create_trade and locked the item.
     result = await db.execute(
         select(Task)
-        .where(Task.status == TaskStatus.pending)
+        .where(
+            Task.status == TaskStatus.pending,
+            Task.scheduled_at <= datetime.utcnow(),
+        )
         .order_by(Task.priority.asc(), Task.created_at.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
