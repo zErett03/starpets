@@ -37,6 +37,26 @@ async def _resolve_sku_product_id(db, ggsel_offer_id: int, options: list) -> int
     return None
 
 
+_bal_cache = {"val": None, "at": 0.0}
+
+
+async def _starpets_balance():
+    """StarPets balance (USD), cached ~30s. Returns None on error (fail-open — don't block sales
+    just because get_info hiccupped)."""
+    import time
+    from app.clients.starpets import starpets
+    if _bal_cache["val"] is not None and time.time() - _bal_cache["at"] < 30:
+        return _bal_cache["val"]
+    try:
+        info = await starpets.get_info()
+        bal = float((info.get("buyer") or {}).get("balance") or 0)
+        _bal_cache["val"], _bal_cache["at"] = bal, time.time()
+        return bal
+    except Exception as e:
+        print(f"[precheck] balance fetch failed: {e}", flush=True)
+        return None
+
+
 @router.post("/hooks/ggsel/precheck/{ggsel_offer_id}")
 async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
     check_secret(secret)
@@ -167,6 +187,12 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         _starpets_qty = offer.starpets_qty
         _offer_price_rub = _sku_price_rub if _sku_price_rub is not None else float(offer.price_rub or 0)
 
+    # Maintenance switch: if MAINTENANCE_MESSAGE is set, block ALL sales and show this text to
+    # the buyer (blocks payment via allow_payment=false). Clear the env var to resume.
+    if settings.maintenance_message.strip():
+        print(f"[precheck] maintenance mode — sale blocked (msg set)", flush=True)
+        return {"error": settings.maintenance_message.strip()}
+
     # Live availability check — don't rely on stale starpets_qty from DB (updated every 30 min)
     if _product_id:
         async with httpx.AsyncClient(timeout=10) as _http:
@@ -186,6 +212,15 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
                 flush=True,
             )
             return {"error": "Товар временно недоступен — идёт обновление цены, попробуйте позже"}
+        # Balance guard: don't take an order we can't afford to fulfil (StarPets balance depleted).
+        # With allow_payment=false this HARD-blocks the payment until the balance is topped up —
+        # auto-pause when broke, auto-resume when funded. No manual toggling.
+        _need = float(_top.get("price_usd") or 0)
+        _bal = await _starpets_balance()
+        if _bal is not None and _bal < _need:
+            print(f"[precheck] BLOCKED low balance ${_bal:.2f} < item ${_need:.2f} "
+                  f"product_id={_product_id} offer={_offer_name!r}", flush=True)
+            return {"error": "Товар временно недоступен"}
     elif _starpets_qty == 0:
         return {"error": "Товар временно недоступен"}
 
