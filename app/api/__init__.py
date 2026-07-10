@@ -20,7 +20,7 @@ import secrets as _sec
 # and health root. EVERYTHING ELSE (test-*, fix-*, sync-*, trigger-*, /admin, …) requires
 # the admin Basic Auth — closes the previously-public ops/test endpoints.
 _PUBLIC_EXACT = {"/", "/delivery"}
-_PUBLIC_PREFIXES = ("/hooks/",)
+_PUBLIC_PREFIXES = ("/hooks/", "/telegram/webhook/")  # webhook guarded by its own secret path
 
 
 @app.middleware("http")
