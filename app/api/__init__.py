@@ -563,9 +563,15 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 # (same buyer bought several at once) we can't tell them apart — binding "the newest"
                 # would show the WRONG bot. So bind only when there is exactly ONE candidate; the
                 # ambiguous multi-order case needs the order id in the URL (see &id_i handling).
+                # Bind to the MOST RECENT unbound order in range: the buyer who just paid and got
+                # redirected is the freshest order. Window 24h so a late opener (an hour+ later) still
+                # binds. Older still-unbound orders (dead/abandoned) are simply older, so newest-first
+                # skips past them. ggsel passes only the uniquecode (not our order id), so newest-first
+                # is the best signal available — don't refuse on multiple candidates (that stalls
+                # EVERY new order while any old unbound order lingers).
                 cutoff = datetime.utcnow() - timedelta(hours=24)
                 _recent = _func.coalesce(Order.dispatched_at, Order.created_at)
-                cand = (await db.execute(
+                order = (await db.execute(
                     select(Order)
                     .where(
                         Order.uniquecode.is_(None),
@@ -576,16 +582,12 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                         _recent >= cutoff,
                     )
                     .order_by(_recent.desc())
-                    .limit(2)
-                )).scalars().all()
-                if len(cand) == 1:
-                    order = cand[0]
+                    .limit(1)
+                )).scalar_one_or_none()
+                if order is not None:
                     order.uniquecode = uniquecode
                     await db.commit()
                     print(f"[delivery] linked uniquecode={uniquecode!r} → order id={order.id}", flush=True)
-                elif len(cand) > 1:
-                    print(f"[delivery] uniquecode={uniquecode!r} ambiguous — {len(cand)} unbound "
-                          f"orders in window; not guessing (need id_i in URL)", flush=True)
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None
