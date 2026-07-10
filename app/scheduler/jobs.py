@@ -261,6 +261,43 @@ async def resync_missing_safe():
         print(f"[Scheduler] resync_missing error: {e}", flush=True)
 
 
+_tg_alerted_ids: set = set()
+_tg_seeded = False
+
+
+async def tg_alerts_safe():
+    """Push a Telegram alert when an order NEWLY enters needs_attention/failed. Seeds silently on
+    first run (so existing problems don't spam after a redeploy), then alerts only new ones."""
+    from app.config import settings
+    if not (settings.telegram_admin_ids and settings.telegram_bot_token
+            and settings.telegram_bot_token != "dummy"):
+        return
+    global _tg_seeded
+    try:
+        from sqlalchemy import select
+        from app.db import AsyncSessionLocal
+        from app.db.models import Order, DeliveryStatus
+        from app.telegram.bot import notify_problem
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(
+                select(Order).where(Order.delivery_status.in_(
+                    [DeliveryStatus.needs_attention, DeliveryStatus.failed]))
+                .order_by(Order.id.desc()).limit(100)
+            )).scalars().all()
+            current = {o.id for o in rows}
+            if not _tg_seeded:
+                _tg_alerted_ids.update(current)
+                _tg_seeded = True
+                return
+            for o in rows:
+                if o.id not in _tg_alerted_ids:
+                    await notify_problem(o)
+        _tg_alerted_ids.clear()
+        _tg_alerted_ids.update(current)
+    except Exception as e:
+        print(f"[Scheduler] tg_alerts error: {e}", flush=True)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
@@ -276,6 +313,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
     scheduler.add_job(floor_relive_safe, "interval", minutes=15, id="floor_relive")
     scheduler.add_job(resync_missing_safe, "interval", hours=12, id="resync_missing")
+    scheduler.add_job(tg_alerts_safe, "interval", minutes=2, id="tg_alerts")
     scheduler.start()
     print("[Scheduler] Started")
     return scheduler

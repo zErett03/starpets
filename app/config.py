@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = "dummy"
     telegram_chat_id_critical: str = ""
     telegram_chat_id_warn: str = ""
+    telegram_chat_id_orders: str = ""     # new-order + problem alerts go here (default: first admin id)
+    telegram_admin_ids: str = ""          # comma-separated Telegram user ids allowed to use the bot
+    telegram_webhook_secret: str = ""     # secret path segment for /telegram/webhook/<secret>
 
     public_url: str = "https://starpets-production.up.railway.app"
 

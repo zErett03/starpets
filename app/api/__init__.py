@@ -3985,3 +3985,46 @@ async def debug_item(item_ids: str = ""):
             out["get_items_error"] = f"{type(e).__name__}: {e}"
             out["get_items_error_body"] = body
     return out
+
+
+from fastapi import Request as _TgRequest  # Telegram bot webhook
+
+
+@app.post("/telegram/webhook/{secret}")
+async def telegram_webhook(secret: str, request: _TgRequest):
+    """Telegram sends updates here. Secret path segment gates it. Processing is backgrounded
+    so we return 200 immediately (Telegram retries on slow/non-200)."""
+    if not settings.telegram_webhook_secret or secret != settings.telegram_webhook_secret:
+        return {"ok": False}
+    try:
+        update = await request.json()
+    except Exception:
+        return {"ok": True}
+    import asyncio
+    from app.telegram.bot import handle_update
+    asyncio.create_task(handle_update(update))
+    return {"ok": True}
+
+
+@app.get("/set-telegram-webhook")
+async def set_telegram_webhook(base_url: str = ""):
+    """Register the Telegram webhook. Pass ?base_url=https://<your-railway-domain> (defaults to
+    settings.public_url, which may be stale after a domain change)."""
+    import httpx
+    if not settings.telegram_bot_token or settings.telegram_bot_token == "dummy":
+        return {"error": "TELEGRAM_BOT_TOKEN not set"}
+    if not settings.telegram_webhook_secret:
+        return {"error": "TELEGRAM_WEBHOOK_SECRET not set"}
+    base = (base_url or settings.public_url).rstrip("/")
+    url = f"{base}/telegram/webhook/{settings.telegram_webhook_secret}"
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/setWebhook",
+            json={"url": url, "allowed_updates": ["message", "callback_query"],
+                  "drop_pending_updates": True},
+        )
+        try:
+            tg = r.json()
+        except Exception:
+            tg = r.text[:300]
+    return {"set_webhook_url": url, "telegram_response": tg}

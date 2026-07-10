@@ -425,5 +425,13 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
         ))
 
         await db.commit()
+        _new_order_id = order.id
+
+    try:
+        import asyncio as _asyncio
+        from app.telegram.bot import notify_new_order_by_id
+        _asyncio.create_task(notify_new_order_by_id(_new_order_id))
+    except Exception as _e:
+        print(f"[notification] telegram notify skipped: {_e}", flush=True)
 
     return {"status": "ok"}
