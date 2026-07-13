@@ -606,6 +606,53 @@ class GgselSellerOfficeClient:
     def _purchase_token(self) -> str:
         return settings.ggsel_purchase_token or settings.ggsel_api_key
 
+    _pt_token = None
+    _pt_exp = 0.0
+
+    async def _login_purchase_token(self):
+        """POST /api_sellers/api/apilogin {seller_id, timestamp, sign=SHA256(key+ts)} -> token.
+        Returns (token, expiry_epoch) or (None, 0.0) on failure."""
+        import time as _t, hashlib as _hl
+        from datetime import datetime as _dt
+        ts = str(int(_t.time()))
+        key = settings.ggsel_purchase_api_key or settings.ggsel_api_key
+        sign = _hl.sha256((key + ts).encode()).hexdigest()
+        url = f"{self._purchases_base()}/apilogin"
+        body = {"seller_id": settings.ggsel_seller_id, "timestamp": ts, "sign": sign}
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(url, json=body, headers={"Accept": "application/json"})
+            data = r.json() if r.content else {}
+        except Exception as e:
+            print(f"[ggsel apilogin] error: {e}", flush=True)
+            return None, 0.0
+        tok = (data or {}).get("token") or (data or {}).get("access_token")
+        if not tok:
+            print(f"[ggsel apilogin] no token status={r.status_code} body={str(data)[:300]}", flush=True)
+            return None, 0.0
+        exp = _t.time() + 3600
+        vt = (data or {}).get("valid_thru") or (data or {}).get("expires_at")
+        if vt:
+            try:
+                exp = _dt.fromisoformat(str(vt).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                pass
+        return tok, exp
+
+    async def purchase_token(self):
+        """Cached token for the legacy purchase API. Manual override wins; else apilogin,
+        cached in-process until ~2 min before expiry."""
+        import time as _t
+        if settings.ggsel_purchase_token:
+            return settings.ggsel_purchase_token
+        if self._pt_token and _t.time() < self._pt_exp - 120:
+            return self._pt_token
+        tok, exp = await self._login_purchase_token()
+        if tok:
+            self.__class__._pt_token = tok
+            self.__class__._pt_exp = exp
+        return tok
+
     async def resolve_unique_code(self, unique_code: str) -> dict | None:
         """Resolve a ggsel purchase uniquecode -> the purchase `content` object.
         GET /api_sellers/api/purchases/unique-code/{code}?token=...
@@ -616,7 +663,7 @@ class GgselSellerOfficeClient:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await self._request_retry(
                     client, "GET", url,
-                    params={"token": self._purchase_token()},
+                    params={"token": await self.purchase_token()},
                     headers={"Accept": "application/json"},
                 )
                 if not resp.is_success:
@@ -639,7 +686,7 @@ class GgselSellerOfficeClient:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await self._request_retry(
                     client, "GET", url,
-                    params={"token": self._purchase_token()},
+                    params={"token": await self.purchase_token()},
                     headers={"Accept": "application/json"},
                 )
                 if not resp.is_success:

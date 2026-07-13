@@ -4013,6 +4013,23 @@ async def debug_item(item_ids: str = ""):
     return out
 
 
+@app.get("/ggsel-login")
+async def ggsel_login_ep():
+    # Diagnostic: force an apilogin and report the result (token masked). Verifies
+    # GGSEL_SELLER_ID + the sign key without exposing the token. Clears the cache first.
+    import datetime as _dt
+    from app.clients.ggsel import ggsel_office
+    ggsel_office.__class__._pt_token = None
+    ggsel_office.__class__._pt_exp = 0.0
+    tok, exp = await ggsel_office._login_purchase_token()
+    return {
+        "seller_id": settings.ggsel_seller_id,
+        "sign_key_source": "GGSEL_PURCHASE_API_KEY" if settings.ggsel_purchase_api_key else "ggsel_api_key",
+        "got_token": bool(tok),
+        "token_preview": (tok[:6] + "\u2026" + tok[-4:]) if tok else None,
+        "valid_thru": _dt.datetime.fromtimestamp(exp).isoformat() if exp else None,
+    }
+
 @app.get("/resolve-code")
 async def resolve_code_ep(code: str = "", invoice: int = 0, token: str = ""):
     """Diagnostic: probe the ggsel purchase API so we can find the working ?token=.
@@ -4023,7 +4040,7 @@ async def resolve_code_ep(code: str = "", invoice: int = 0, token: str = ""):
     import httpx as _hx
     from app.clients.ggsel import ggsel_office
     base = ggsel_office._purchases_base()
-    tok = token or ggsel_office._purchase_token()
+    tok = token or await ggsel_office.purchase_token()
     if code:
         url = f"{base}/purchases/unique-code/{code}"
     elif invoice:

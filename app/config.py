@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     # uniquecode resolver. It uses ?token=... (NOT the Bearer Authorization header of v2). If empty
     # we fall back to ggsel_api_key. Set GGSEL_PURCHASE_TOKEN if the api key is not accepted here.
     ggsel_purchase_token: str = ""
+    # apilogin flow for the legacy purchase API: POST /api_sellers/api/apilogin with
+    # {seller_id, timestamp, sign=SHA256(sign_key+timestamp)} -> short-lived token (~2h).
+    ggsel_seller_id: int = 0              # your ggsel/Digiseller seller id (GGSEL_SELLER_ID)
+    ggsel_purchase_api_key: str = ""      # key used to SIGN apilogin; empty -> ggsel_api_key
 
     webhook_shared_secret: str
 
