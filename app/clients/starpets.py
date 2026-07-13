@@ -12,6 +12,7 @@ class StarPetsClient:
         self.base_url = settings.starpets_base_url
 
     def _sign(self, params: dict) -> str:
+        params = self._normalize(params)
         parts = []
         for k, v in params.items():
             if isinstance(v, (list, dict)):
@@ -24,6 +25,20 @@ class StarPetsClient:
             qs.encode(),
             hashlib.sha512,
         ).hexdigest()
+
+    def _normalize(self, obj):
+        """Match JavaScript JSON.stringify number formatting for the signature. StarPets'
+        backend is Node.js: JSON.stringify(6.0) === "6" (JS has no int/float split). Python json
+        keeps the ".0" (6.0 -> "6.0"), so a ROUND-dollar price signed our way never matches the
+        server's recomputed signature -> code 120 INVALID_SIGNATURE. Coerce integer-valued floats
+        to int (6.0 -> 6); fractional prices (6.67) are left untouched."""
+        if isinstance(obj, float):
+            return int(obj) if obj.is_integer() else obj
+        if isinstance(obj, dict):
+            return {k: self._normalize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._normalize(v) for v in obj]
+        return obj
 
     def _headers(self, signature: str) -> dict:
         return {
@@ -189,7 +204,7 @@ class StarPetsClient:
         Response items[].id are the purchased item IDs to use in create_trade.
         """
         base = self._base_params()
-        payload = {**base, "items": items}
+        payload = self._normalize({**base, "items": items})
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
@@ -210,7 +225,7 @@ class StarPetsClient:
         Response items[].id are the purchased item IDs to use in create_trade.
         """
         base = self._base_params()
-        payload = {**base, "products": [{"id": product_id, "maxPrice": max_price_usd}]}
+        payload = self._normalize({**base, "products": [{"id": product_id, "maxPrice": max_price_usd}]})
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
