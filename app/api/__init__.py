@@ -4044,6 +4044,64 @@ async def resolve_code_ep(code: str = "", invoice: int = 0, token: str = ""):
         out["error"] = f"{type(e).__name__}: {e}"
     return out
 
+@app.get("/orders-export")
+async def orders_export(since: str = "", until: str = "", status: str = "all", format: str = "csv"):
+    # Экспорт заказов строками для калькулятора Бухгалтерия_StarPets.xlsx (лист «Заказы»).
+    # Колонки: № заказа, Товар, Цена продажи P ₽, Курс USD/RUB, Себест. выкупа $, Статус.
+    # ?since=YYYY-MM-DD&until=YYYY-MM-DD — фильтр по дате оплаты; ?status=delivered|refund|all;
+    # ?format=csv|json. Курс = ТЕКУЩИЙ USD/RUB (историю курса не храним) — для свежих заказов ок.
+    from datetime import datetime as _dt
+    from sqlalchemy import select as _select
+    from app.db import AsyncSessionLocal as _S
+    from app.db.models import Order as _O, DeliveryStatus as _DS
+    from app.fx import get_usd_rub as _fx
+    import csv as _csv, io as _io
+    from fastapi.responses import PlainTextResponse as _PTR
+    _DELIVERED = {_DS.dispatched, _DS.done, _DS.finalized}
+    _REFUND = {_DS.failed, _DS.closed}
+    def _ru(ds):
+        if ds in _DELIVERED: return "Доставлен"
+        if ds in _REFUND: return "Возврат"
+        return ""  # pending / needs_attention — исход ещё не ясен, пропускаем
+    _since = _dt.fromisoformat(since) if since else None
+    _until = _dt.fromisoformat(until) if until else None
+    async with _S() as db:
+        rows = (await db.execute(_select(_O).order_by(_O.ggsel_order_id.asc()))).scalars().all()
+    fx = await _fx()
+    out = []
+    for o in rows:
+        ru = _ru(o.delivery_status)
+        if not ru:
+            continue
+        if status == "delivered" and ru != "Доставлен":
+            continue
+        if status == "refund" and ru != "Возврат":
+            continue
+        d = o.paid_at or o.created_at
+        dd = d.replace(tzinfo=None) if d else None
+        if _since and dd and dd < _since:
+            continue
+        if _until and dd and dd > _until:
+            continue
+        out.append({
+            "order_id": o.ggsel_order_id,
+            "item": o.item_name,
+            "sale_rub": float(o.amount_rub or 0),
+            "fx": round(fx, 4),
+            "cost_usd": float(o.exec_price_usd or 0),
+            "status": ru,
+            "raw_status": o.delivery_status.value if o.delivery_status else None,
+            "date": dd.date().isoformat() if dd else "",
+        })
+    if format == "json":
+        return {"count": len(out), "fx": round(fx, 4), "rows": out}
+    buf = _io.StringIO()
+    buf.write("\ufeff")  # BOM — чтобы Excel корректно открыл кириллицу
+    w = _csv.writer(buf)
+    w.writerow(["№ заказа", "Товар", "Цена продажи P, ₽", "Курс USD/RUB", "Себест. выкупа, $", "Статус"])
+    for r in out:
+        w.writerow([r["order_id"], r["item"], r["sale_rub"], r["fx"], r["cost_usd"], r["status"]])
+    return _PTR(buf.getvalue(), media_type="text/csv")
 
 from fastapi import Request as _TgRequest  # Telegram bot webhook
 
