@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     ggsel_base_url: str = "https://seller.ggsel.com/api_sellers/v2"
     ggsel_access_token: str = ""
     ggsel_qrator: str = ""
+    # Token for the legacy purchase API (/api_sellers/api/purchases/*) used by the delivery-page
+    # uniquecode resolver. It uses ?token=... (NOT the Bearer Authorization header of v2). If empty
+    # we fall back to ggsel_api_key. Set GGSEL_PURCHASE_TOKEN if the api key is not accepted here.
+    ggsel_purchase_token: str = ""
 
     webhook_shared_secret: str
 

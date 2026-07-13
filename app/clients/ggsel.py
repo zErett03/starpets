@@ -597,5 +597,62 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    # ---- legacy purchase API (/api_sellers/api/purchases/*) --------------------
+    # Auth here is ?token=... (a query param), NOT the Bearer Authorization header used by v2.
+    # Base is .../api_sellers/api (v2 base is .../api_sellers/v2), so derive it from ggsel_base_url.
+    def _purchases_base(self) -> str:
+        return SELLER_OFFICE_V2_URL.rsplit("/", 1)[0] + "/api"
+
+    def _purchase_token(self) -> str:
+        return settings.ggsel_purchase_token or settings.ggsel_api_key
+
+    async def resolve_unique_code(self, unique_code: str) -> dict | None:
+        """Resolve a ggsel purchase uniquecode -> the purchase `content` object.
+        GET /api_sellers/api/purchases/unique-code/{code}?token=...
+        content.content_id is the ggsel order id (== our Order.ggsel_order_id). Returns the
+        content dict, or None on any failure (caller falls back to the heuristic binder)."""
+        url = f"{self._purchases_base()}/purchases/unique-code/{unique_code}"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await self._request_retry(
+                    client, "GET", url,
+                    params={"token": self._purchase_token()},
+                    headers={"Accept": "application/json"},
+                )
+                if not resp.is_success:
+                    print(f"[resolve_unique_code] code={unique_code!r} status={resp.status_code} "
+                          f"body={resp.text[:300]}", flush=True)
+                    return None
+                data = resp.json()
+        except Exception as e:
+            print(f"[resolve_unique_code] code={unique_code!r} error: {e}", flush=True)
+            return None
+        if isinstance(data, dict):
+            return data.get("content") if isinstance(data.get("content"), dict) else data
+        return None
+
+    async def get_purchase_info(self, invoice_id: int) -> dict | None:
+        """GET /api_sellers/api/purchase/info/{invoice_id}?token=... -> purchase `content` object
+        (used to VERIFY a heuristic candidate against a uniquecode). None on failure."""
+        url = f"{self._purchases_base()}/purchase/info/{invoice_id}"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await self._request_retry(
+                    client, "GET", url,
+                    params={"token": self._purchase_token()},
+                    headers={"Accept": "application/json"},
+                )
+                if not resp.is_success:
+                    print(f"[get_purchase_info] invoice={invoice_id} status={resp.status_code} "
+                          f"body={resp.text[:300]}", flush=True)
+                    return None
+                data = resp.json()
+        except Exception as e:
+            print(f"[get_purchase_info] invoice={invoice_id} error: {e}", flush=True)
+            return None
+        if isinstance(data, dict):
+            return data.get("content") if isinstance(data.get("content"), dict) else data
+        return None
+
 
 ggsel_office = GgselSellerOfficeClient()

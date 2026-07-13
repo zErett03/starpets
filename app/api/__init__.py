@@ -551,6 +551,27 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 result = await db.execute(select(Order).where(Order.uniquecode == uniquecode))
                 order = result.scalar_one_or_none()
             if order is None and uniquecode is not None:
+                # ДЕТЕРМИНИРОВАННО: спрашиваем у ggsel, чей это uniquecode.
+                # GET /api_sellers/api/purchases/unique-code/{code} -> content.content_id = ggsel
+                # order id (== наш Order.ggsel_order_id). Если резолвится — привязка точная, эвристика
+                # ниже не нужна. Любая ошибка/None -> тихий откат на эвристику (fail-safe).
+                try:
+                    from app.clients.ggsel import ggsel_office
+                    _content = await ggsel_office.resolve_unique_code(uniquecode)
+                    _gg_id = (_content or {}).get("content_id")
+                    if _gg_id is not None:
+                        order = (await db.execute(
+                            select(Order).where(Order.ggsel_order_id == int(_gg_id))
+                        )).scalar_one_or_none()
+                        if order is not None and not order.uniquecode:
+                            order.uniquecode = uniquecode
+                            await db.commit()
+                            print(f"[delivery] resolved uniquecode={uniquecode!r} -> "
+                                  f"ggsel_order_id={_gg_id} order id={order.id}", flush=True)
+                except Exception as _e:
+                    print(f"[delivery] resolve_unique_code failed: {_e}", flush=True)
+
+            if order is None and uniquecode is not None:
                 # Первый визит: привязываем uniquecode к свежему order без него (notification
                 # webhook срабатывает до редиректа, order уже в БД). Окно считаем по САМОМУ
                 # позднему из created_at / dispatched_at — чтобы восстановленный заказ
@@ -3989,6 +4010,38 @@ async def debug_item(item_ids: str = ""):
                     body = e.response.text[:300]
             out["get_items_error"] = f"{type(e).__name__}: {e}"
             out["get_items_error_body"] = body
+    return out
+
+
+@app.get("/resolve-code")
+async def resolve_code_ep(code: str = "", invoice: int = 0, token: str = ""):
+    """Diagnostic: probe the ggsel purchase API so we can find the working ?token=.
+    /resolve-code?code=<uniquecode>         -> unique-code resolver (target endpoint)
+    /resolve-code?invoice=<ggsel_order_id>  -> purchase/info (verifier)
+    ?token=<override> tries a specific token; default = GGSEL_PURCHASE_TOKEN or ggsel_api_key.
+    Returns raw status + body so the response tells us whether the token is accepted."""
+    import httpx as _hx
+    from app.clients.ggsel import ggsel_office
+    base = ggsel_office._purchases_base()
+    tok = token or ggsel_office._purchase_token()
+    if code:
+        url = f"{base}/purchases/unique-code/{code}"
+    elif invoice:
+        url = f"{base}/purchase/info/{invoice}"
+    else:
+        return {"error": "pass ?code=<uniquecode> or ?invoice=<ggsel_order_id>"}
+    out = {"url": url, "token_source": "override" if token else
+           ("GGSEL_PURCHASE_TOKEN" if settings.ggsel_purchase_token else "ggsel_api_key")}
+    try:
+        async with _hx.AsyncClient(timeout=15) as c:
+            r = await c.get(url, params={"token": tok}, headers={"Accept": "application/json"})
+        out["status"] = r.status_code
+        try:
+            out["body"] = r.json()
+        except Exception:
+            out["body"] = r.text[:800]
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
     return out
 
 
