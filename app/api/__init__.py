@@ -558,7 +558,9 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 try:
                     from app.clients.ggsel import ggsel_office
                     _content = await ggsel_office.resolve_unique_code(uniquecode)
-                    _gg_id = (_content or {}).get("content_id")
+                    # реальный ответ ggsel — плоский Digiseller-формат: id заказа = inv
+                    # (id_goods = карточка, amount = сумма). content_id — на случай иной схемы.
+                    _gg_id = (_content or {}).get("inv") or (_content or {}).get("content_id")
                     if _gg_id is not None:
                         order = (await db.execute(
                             select(Order).where(Order.ggsel_order_id == int(_gg_id))
