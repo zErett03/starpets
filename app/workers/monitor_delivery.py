@@ -81,7 +81,9 @@ _RETRY_AFTER = timedelta(minutes=15)  # act AFTER the trade has expired (item fr
 # we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the
 # current trade's friendship was fired). Capped to avoid an infinite recreate loop.
 _DELIVERY_TIMEOUT = timedelta(minutes=10)
-_MAX_AUTO_RETRIES = 2
+_MAX_AUTO_RETRIES = 1  # 1 авто-пересоздание (=2 трейда на предмет). Больше циклов create/expire
+# на одном предмете повышает шанс StarPets-лимбо (наблюдали: залипал именно 3-й трейд). С фиксом
+# привязки покупатель видит бота и завершает на первом трейде — ретраи нужны редко.
 
 
 async def _get_cursor(db) -> int | None:

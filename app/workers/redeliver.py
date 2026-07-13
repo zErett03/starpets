@@ -153,13 +153,16 @@ async def redeliver_same_item(db, order) -> str:
             else:
                 order.delivery_status = DeliveryStatus.needs_attention
                 order.error_reason = (
-                    "130 NOT_FOUND, обмен не начинался (статус <5) — предмет "
-                    "залочен/недоступен, НЕ доставлено, проверить"
+                    "130 — предмет не выводится после протухшего трейда (StarPets держит). Обычно "
+                    "освобождается сам: жми 🔁 Повторить (/retry-delivery) — ретраит с бэкоффом до ~80 мин "
+                    "и дожмётся, когда отпустит. Если и после — предмет застрял у StarPets (редко) → "
+                    "возврат покупателю + их поддержка. Разовый «Новый трейд» окно не покрывает."
                 )
                 order.updated_at = now
                 result = (
-                    "🟡 create_trade 130 NOT_FOUND, но обмен не начинался — НЕ помечаю "
-                    "доставленным; needs_attention (предмет залочен в активном трейде?)"
+                    "🟡 create_trade 130 — предмет пока не выводится (StarPets держит после протухшего "
+                    "трейда). Жми 🔁 Повторить (retry-delivery, бэкофф до ~80 мин). Если не дожмётся — "
+                    "застрял у StarPets, нужен возврат/их поддержка."
                 )
         elif code == 210:
             order.delivery_status = DeliveryStatus.needs_attention

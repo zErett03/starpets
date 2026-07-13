@@ -579,6 +579,11 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                             DeliveryStatus.pending, DeliveryStatus.dispatched,
                             DeliveryStatus.needs_attention,
                         ]),
+                        # ONLY paid orders. precheck creates an Order for EVERY purchase attempt
+                        # (incl. balance/maintenance-blocked ones) with amount_rub NULL — those flood
+                        # the pool and steal the binding from the real paid order -> buyer gets the
+                        # "processing" spinner. amount_rub is set only by the notification (payment).
+                        Order.amount_rub.isnot(None),
                         _recent >= cutoff,
                     )
                     .order_by(_recent.desc())
