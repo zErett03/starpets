@@ -482,6 +482,18 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_title(self, offer_id: int, title_ru: str, title_en: str) -> dict:
+        """PATCH an offer's title (RU/EN). Used to add the game-name suffix for store search."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
+                json={"title_ru": title_ru, "title_en": title_en},
+            )
+            if not resp.is_success:
+                print(f"[update_title] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
     async def set_unlimited(self, offer_id: int) -> dict:
         """PATCH an offer to unlimited quantity (so a single sale doesn't mark it 'sold out')."""
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:

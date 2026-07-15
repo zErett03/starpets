@@ -4163,3 +4163,33 @@ async def set_telegram_webhook(base_url: str = ""):
         except Exception:
             tg = r.text[:300]
     return {"set_webhook_url": url, "telegram_response": tg}
+
+
+@app.get("/retitle-adopt-me")
+async def retitle_adopt_me(dry_run: bool = True, limit: int = 0):
+    """Add ' | Adopt Me!' to every live SKU base card's ggsel title (store-search tag).
+    Base cards are Offer rows with age=='__sku__'. Offer.name stays clean; idempotent via
+    a not-already-suffixed check."""
+    from sqlalchemy import select as _sel
+    from app.db import AsyncSessionLocal as _S
+    from app.db.models import Offer as _O
+    from app.clients.ggsel import ggsel_office as _g
+    _SUFFIX = " | Adopt Me!"
+    async with _S() as db:
+        offers = (await db.execute(
+            _sel(_O).where(_O.age == "__sku__", _O.ggsel_offer_id.isnot(None)))).scalars().all()
+    items, updated = [], 0
+    for o in offers:
+        base = (o.name or "").rstrip()
+        title = base if base.endswith(_SUFFIX) else base + _SUFFIX
+        row = {"gid": o.ggsel_offer_id, "title": title}
+        if not dry_run:
+            try:
+                await _g.update_title(o.ggsel_offer_id, title, title)
+                updated += 1
+            except Exception as e:
+                row["error"] = str(e)[:200]
+        items.append(row)
+        if limit and len(items) >= limit:
+            break
+    return {"dry_run": dry_run, "count": len(items), "updated": updated, "sample": items[:30]}

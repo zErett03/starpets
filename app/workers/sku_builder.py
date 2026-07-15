@@ -24,6 +24,7 @@ from app.workers.offer_creator import _resolve_category, _INSTRUCTIONS_RU, _INST
 
 # pumping value -> label used in the title tag "Name | Rarity, Pumping".
 _PUMPING_TITLE = {"default": "Default", "neon": "Neon", "mega_neon": "Mega Neon"}
+_GAME_SUFFIX = " | Adopt Me!"   # appended to ggsel card title so store-search finds the game
 
 # Age display order (youngest -> oldest). Default and neon stage names don't collide, so one
 # map covers both; a card is single-pumping, so only one family's ranks ever apply.
@@ -177,11 +178,12 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
 
     desc_ru, desc_en = _card_description(name, rare, pumping)
     title = _card_title(name, rare, pumping)
+    _ggsel_title = title + _GAME_SUFFIX   # game-tagged title for ggsel (Offer.name stays clean)
 
     # 3. Create the card, then username + consent + Вариант radio, then webhooks.
     try:
         resp = await ggsel_office.create_offer(
-            title_ru=title, title_en=title,
+            title_ru=_ggsel_title, title_en=_ggsel_title,
             description_ru=desc_ru, description_en=desc_en,
             instructions_ru=_INSTRUCTIONS_RU, instructions_en=_INSTRUCTIONS_EN,
             category_id=category_id,
