@@ -4249,17 +4249,16 @@ async def fix_username_label(dry_run: bool = True, limit: int = 0):
             try:
                 data = await _g.get_options(gid)
                 opt = _find_text_opt(data)
-                if not opt:
-                    errors += 1
-                    print(f"[fix-username] gid={gid} no text option", flush=True)
+                if opt is None:
+                    # card lost its username field (e.g. an interrupted run) -> recreate it
+                    await _g.create_option(gid)
+                    updated += 1
                 elif (opt.get("title_ru") or "").strip() == _NEW_RU:
                     skipped += 1
                 else:
-                    try:
-                        await _g.update_option(gid, opt.get("id"), _NEW_RU, _NEW_EN)
-                    except Exception:
-                        await _g.delete_options(gid, [opt.get("id")])
-                        await _g.create_option(gid)
+                    # ggsel v2 has NO in-place option PATCH -> delete + recreate with new label
+                    await _g.delete_options(gid, [opt.get("id")])
+                    await _g.create_option(gid)
                     updated += 1
             except Exception as e:
                 errors += 1
