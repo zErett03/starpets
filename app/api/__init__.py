@@ -4167,29 +4167,47 @@ async def set_telegram_webhook(base_url: str = ""):
 
 @app.get("/retitle-adopt-me")
 async def retitle_adopt_me(dry_run: bool = True, limit: int = 0):
-    """Add ' | Adopt Me!' to every live SKU base card's ggsel title (store-search tag).
-    Base cards are Offer rows with age=='__sku__'. Offer.name stays clean; idempotent via
-    a not-already-suffixed check."""
+    """Add ' | Adopt Me!' to every live SKU base card's ggsel title. Runs in the BACKGROUND
+    (many cards -> would exceed the gateway timeout if synchronous). Watch logs for
+    '[retitle-adopt-me] DONE'. Idempotent; Offer.name stays clean."""
     from sqlalchemy import select as _sel
     from app.db import AsyncSessionLocal as _S
     from app.db.models import Offer as _O
     from app.clients.ggsel import ggsel_office as _g
+    import asyncio as _asyncio
     _SUFFIX = " | Adopt Me!"
     async with _S() as db:
-        offers = (await db.execute(
-            _sel(_O).where(_O.age == "__sku__", _O.ggsel_offer_id.isnot(None)))).scalars().all()
-    items, updated = [], 0
-    for o in offers:
-        base = (o.name or "").rstrip()
-        title = base if base.endswith(_SUFFIX) else base + _SUFFIX
-        row = {"gid": o.ggsel_offer_id, "title": title}
-        if not dry_run:
+        rows = (await db.execute(
+            _sel(_O.ggsel_offer_id, _O.name).where(
+                _O.age == "__sku__", _O.ggsel_offer_id.isnot(None)))).all()
+    targets = [(g, n) for (g, n) in rows]
+    if limit:
+        targets = targets[:limit]
+
+    def _title_for(name):
+        base = (name or "").rstrip()
+        return base if base.endswith(_SUFFIX) else base + _SUFFIX
+
+    if dry_run:
+        return {"dry_run": True, "count": len(targets),
+                "sample": [{"gid": g, "title": _title_for(n)} for g, n in targets[:30]]}
+
+    async def _run():
+        updated = errors = 0
+        total = len(targets)
+        print(f"[retitle-adopt-me] START total={total}", flush=True)
+        for i, (gid, name) in enumerate(targets, 1):
+            title = _title_for(name)
             try:
-                await _g.update_title(o.ggsel_offer_id, title, title)
+                await _g.update_title(gid, title, title)
                 updated += 1
             except Exception as e:
-                row["error"] = str(e)[:200]
-        items.append(row)
-        if limit and len(items) >= limit:
-            break
-    return {"dry_run": dry_run, "count": len(items), "updated": updated, "sample": items[:30]}
+                errors += 1
+                print(f"[retitle-adopt-me] gid={gid} ERROR {str(e)[:200]}", flush=True)
+            if i % 25 == 0:
+                print(f"[retitle-adopt-me] progress {i}/{total} updated={updated} errors={errors}", flush=True)
+        print(f"[retitle-adopt-me] DONE updated={updated} errors={errors} total={total}", flush=True)
+
+    _asyncio.create_task(_run())
+    return {"status": "started", "total": len(targets),
+            "note": "watch logs for [retitle-adopt-me] DONE"}
