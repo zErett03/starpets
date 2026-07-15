@@ -4211,3 +4211,62 @@ async def retitle_adopt_me(dry_run: bool = True, limit: int = 0):
     _asyncio.create_task(_run())
     return {"status": "started", "total": len(targets),
             "note": "watch logs for [retitle-adopt-me] DONE"}
+
+
+@app.get("/fix-username-label")
+async def fix_username_label(dry_run: bool = True, limit: int = 0):
+    """Add '(без знака @)' to the Roblox-username field on every live SKU base card. Background.
+    Clean PATCH of the option title, fallback delete+recreate. Watch logs for '[fix-username] DONE'.
+    Idempotent (skips already-updated). Base cards are Offer rows with age=='__sku__'."""
+    from sqlalchemy import select as _sel
+    from app.db import AsyncSessionLocal as _S
+    from app.db.models import Offer as _O
+    from app.clients.ggsel import ggsel_office as _g
+    import asyncio as _asyncio
+    _NEW_RU = "Ваш Roblox Username (без знака @)"
+    _NEW_EN = "Your Roblox Username (without @)"
+    async with _S() as db:
+        gids = [r[0] for r in (await db.execute(
+            _sel(_O.ggsel_offer_id).where(
+                _O.age == "__sku__", _O.ggsel_offer_id.isnot(None)))).all()]
+    if limit:
+        gids = gids[:limit]
+    if dry_run:
+        return {"dry_run": True, "count": len(gids), "new_label": _NEW_RU}
+
+    def _find_text_opt(data):
+        opts = data if isinstance(data, list) else (data.get("options") or data.get("data") or [])
+        for o in opts:
+            if o.get("type") == "text" or "Username" in (o.get("title_ru") or ""):
+                return o
+        return None
+
+    async def _run():
+        updated = skipped = errors = 0
+        total = len(gids)
+        print(f"[fix-username] START total={total}", flush=True)
+        for i, gid in enumerate(gids, 1):
+            try:
+                data = await _g.get_options(gid)
+                opt = _find_text_opt(data)
+                if not opt:
+                    errors += 1
+                    print(f"[fix-username] gid={gid} no text option", flush=True)
+                elif (opt.get("title_ru") or "").strip() == _NEW_RU:
+                    skipped += 1
+                else:
+                    try:
+                        await _g.update_option(gid, opt.get("id"), _NEW_RU, _NEW_EN)
+                    except Exception:
+                        await _g.delete_options(gid, [opt.get("id")])
+                        await _g.create_option(gid)
+                    updated += 1
+            except Exception as e:
+                errors += 1
+                print(f"[fix-username] gid={gid} ERROR {str(e)[:200]}", flush=True)
+            if i % 25 == 0:
+                print(f"[fix-username] progress {i}/{total} updated={updated} skipped={skipped} errors={errors}", flush=True)
+        print(f"[fix-username] DONE updated={updated} skipped={skipped} errors={errors} total={total}", flush=True)
+
+    _asyncio.create_task(_run())
+    return {"status": "started", "total": len(gids), "note": "watch logs for [fix-username] DONE"}

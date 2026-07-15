@@ -157,8 +157,8 @@ class GgselSellerOfficeClient:
             "options": [
                 {
                     "type": "text",
-                    "title_ru": "Ваш Roblox Username",
-                    "title_en": "Your Roblox Username",
+                    "title_ru": "Ваш Roblox Username (без знака @)",
+                    "title_en": "Your Roblox Username (without @)",
                     "comment_ru": "Имя пользователя в Roblox для отправки трейда",
                     "is_required": True,
                     "position": 1,
@@ -439,6 +439,18 @@ class GgselSellerOfficeClient:
             resp = await self._request_retry(
                 client, "GET", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options"
             )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def update_option(self, offer_id: int, option_id: int, title_ru: str, title_en: str) -> dict:
+        """PATCH a single option's RU/EN title (e.g. add '(без знака @)' to the username field)."""
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}/options/{option_id}",
+                json={"title_ru": title_ru, "title_en": title_en},
+            )
+            if not resp.is_success:
+                print(f"[update_option] offer={offer_id} opt={option_id} status={resp.status_code} body={resp.text[:200]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
