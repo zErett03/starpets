@@ -282,16 +282,26 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
                 flush=True,
             )
             if _code == 210:
-                # NO_ACCESS = the bought item is locked / not withdrawable now (held in an active
-                # trade, or a StarPets-side lock). It usually frees when the holding trade expires
-                # (~15 min), so treat it as TRANSIENT: retry with backoff (self-heals), and escalate
-                # to needs_attention only on the LAST attempt.
-                await _transient_fail(
-                    db, order, order_id,
-                    "210 NO_ACCESS — предмет залочен/недоступен для вывода (обычно освобождается "
-                    "~15 мин). Держится долго → /rebuy-fresh (свежий выкуп) или возврат покупателю.",
-                    f"code=210 body={err_body[:120]}", attempt, max_attempts,
+                # 210 NO_ACCESS on the FIRST create_trade (the item was just bought, so it CANNOT
+                # be "locked in a trade"): StarPets now validates the RECIPIENT up front and rejects
+                # when the buyer's Roblox account can't receive a trade (closed trade privacy /
+                # under-13 / trading disabled). Retrying or re-buying does NOT help — flag for the
+                # operator to fix the buyer login/privacy or refund. (The item-locked flavour of 210
+                # is handled in redeliver, where a prior active trade actually holds the item.)
+                order.delivery_status = DeliveryStatus.needs_attention
+                order.error_reason = (
+                    "210 NO_ACCESS — StarPets не создал трейд: получатель не может принять "
+                    "(закрытая приватность / возраст <13 / трейды отключены у покупателя). Проверь "
+                    "ник/приватность покупателя; не помогает → возврат. Ретрай и rebuy тут НЕ помогут."
                 )
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(f"[Deliver] order_id={order_id} create_trade 210 NO_ACCESS (recipient cannot receive) → needs_attention", flush=True)
+                try:
+                    from app.telegram.bot import notify_problem
+                    await notify_problem(order)
+                except Exception as _e:
+                    print(f"[Deliver] 210 notify failed order={order_id}: {_e}", flush=True)
                 return
             raise
         print(f"[Deliver] create_trade response order_id={order_id}: {trade_resp}", flush=True)
