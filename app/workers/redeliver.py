@@ -70,6 +70,17 @@ async def redeliver_same_item(db, order) -> str:
         order.updated_at = datetime.utcnow()
         return result
 
+    # 1-hour item lifetime: past it StarPets has refunded the item — recreating a trade is futile.
+    from app.deadline import item_expired
+    if item_expired(order):
+        result = ("🔴 предмет протух >1ч — StarPets вернул за него деньги. Доставка этим предметом "
+                  "невозможна: перекупить свежий (Force) или вернуть деньги покупателю.")
+        order.delivery_status = DeliveryStatus.needs_attention
+        order.error_reason = result
+        order.last_redeliver_result = result
+        order.updated_at = datetime.utcnow()
+        return result
+
     # Cancel the previous (hung) trade FIRST so the item is released — otherwise create_trade
     # returns 130/210 because the item is still locked in the active trade. Skip the cancel if
     # the exchange already reached IN_PROGRESS(5), where the item may be mid-delivery.
@@ -154,14 +165,14 @@ async def redeliver_same_item(db, order) -> str:
                 order.delivery_status = DeliveryStatus.needs_attention
                 order.error_reason = (
                     "130 — предмет не выводится после протухшего трейда (StarPets держит). Обычно "
-                    "освобождается сам: жми 🔁 Повторить (/retry-delivery) — ретраит с бэкоффом до ~80 мин "
+                    "освобождается сам: жми 🔁 Повторить (/retry-delivery) — ретраит с бэкоффом в пределах 1ч (после StarPets вернёт деньги) "
                     "и дожмётся, когда отпустит. Если и после — предмет застрял у StarPets (редко) → "
                     "возврат покупателю + их поддержка. Разовый «Новый трейд» окно не покрывает."
                 )
                 order.updated_at = now
                 result = (
                     "🟡 create_trade 130 — предмет пока не выводится (StarPets держит после протухшего "
-                    "трейда). Жми 🔁 Повторить (retry-delivery, бэкофф до ~80 мин). Если не дожмётся — "
+                    "трейда). Жми 🔁 Повторить (retry-delivery) — в пределах 1ч от оплаты. Если не дожмётся — "
                     "застрял у StarPets, нужен возврат/их поддержка."
                 )
         elif code == 210:

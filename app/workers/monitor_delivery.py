@@ -200,6 +200,28 @@ async def monitor_all_deliveries() -> None:
                 )
             # statuses 0–5 are healthy in-progress states → leave dispatched, no action.
 
+        # ---- 2b. 1-hour item lifetime (StarPets auto-refunds an undelivered item ~1h after
+        # purchase). Past that the item is GONE — stop retrying, flag for manual handling, notify.
+        from app.deadline import item_expired
+        for order in orders:
+            if order.delivery_status != DeliveryStatus.dispatched:
+                continue
+            if not item_expired(order, now):
+                continue
+            order.delivery_status = DeliveryStatus.needs_attention
+            order.error_reason = (
+                "предмет протух >1ч: StarPets вернул за него деньги — доставка этим предметом "
+                "невозможна. Перекупить свежий (Force) или вернуть деньги покупателю."
+            )
+            order.updated_at = now
+            print(f"[MonitorDelivery] order_id={order.id} item lifetime >1h expired "
+                  f"→ needs_attention (StarPets refund)", flush=True)
+            try:
+                from app.telegram.bot import notify_problem
+                await notify_problem(order)
+            except Exception as _e:
+                print(f"[MonitorDelivery] expiry notify failed order={order.id}: {_e}", flush=True)
+
         # ---- 3. Device-independent friendship re-send ----
         # deliver_order fires friendship once at T=0 (before the buyer added the bot);
         # the /delivery page re-send only works while the tab is foregrounded (unreliable

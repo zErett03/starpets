@@ -173,6 +173,18 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
             print(f"[Deliver] order_id={order_id} already {order.delivery_status.value} — skip", flush=True)
             return
 
+        # 1-hour item lifetime: if we already bought the item and >1h has passed, StarPets has
+        # refunded it — the purchase is dead. Don't keep retrying; flag for manual handling.
+        from app.deadline import item_expired
+        if order.starpets_purchase_id and item_expired(order):
+            order.delivery_status = DeliveryStatus.needs_attention
+            order.error_reason = ("предмет протух >1ч: StarPets вернул деньги — доставка невозможна. "
+                                  "Перекупить свежий или вернуть покупателю.")
+            order.updated_at = datetime.utcnow()
+            await db.commit()
+            print(f"[Deliver] order_id={order_id} item >1h expired — needs_attention (no retry)", flush=True)
+            return
+
         # Guard: must have roblox_username before spending any money
         if not roblox_username:
             order.delivery_status = DeliveryStatus.failed
