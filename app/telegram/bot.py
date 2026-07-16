@@ -115,7 +115,9 @@ async def cmd_help(chat_id, arg):
         "/drift — сколько карточек с крупным ценовым дрейфом\n"
         "/floorsweep — пересчёт цен из robust floor (dry-run)\n"
         "/health — состояние системы\n"
-        "/help — эта справка")
+        "/help — эта справка\n\n"
+        "<b>MM2</b> — те же команды с суффиксом <code>_mm2</code>:\n"
+        "напр. /order_mm2 5, /balance_mm2, /attention_mm2, /health_mm2")
 
 
 async def cmd_balance(chat_id, arg):
@@ -338,10 +340,27 @@ async def _handle_callback(cb: dict) -> None:
 
 
 # ------------------------------------------------------------- dispatcher ----
+async def _forward_to_mm2(update: dict) -> None:
+    """Relay an update to the MM2 project (holds its own data). MM2 handles it and replies via
+    the shared bot token. Used for _mm2-suffixed commands and m:-prefixed callbacks."""
+    base = (settings.mm2_public_url or "").rstrip("/")
+    secret = settings.mm2_relay_secret
+    if not base or not secret:
+        print("[tg] MM2 relay not configured (MM2_PUBLIC_URL / MM2_RELAY_SECRET)", flush=True)
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.post(f"{base}/telegram/exec/{secret}", json=update)
+    except Exception as e:
+        print(f"[tg] MM2 relay error: {e}", flush=True)
+
+
 async def handle_update(update: dict) -> None:
     """Entry point for a Telegram webhook update."""
     try:
         if "callback_query" in update:
+            if (update["callback_query"].get("data") or "").startswith("m:"):
+                await _forward_to_mm2(update); return   # MM2 button -> MM2 project
             await _handle_callback(update["callback_query"])
             return
         msg = update.get("message") or update.get("edited_message")
@@ -358,6 +377,10 @@ async def handle_update(update: dict) -> None:
             return
         cmd, _, arg = text[1:].partition(" ")
         cmd = cmd.split("@")[0].lower()   # strip @botname in groups
+        if cmd.endswith("_mm2"):          # MM2 command group -> relay to the MM2 project
+            await _forward_to_mm2(update); return
+        if cmd.endswith("_adopt"):        # explicit Adopt Me suffix -> handle here
+            cmd = cmd[:-6]
         handler = _COMMANDS.get(cmd)
         if handler:
             await handler(chat_id, arg)

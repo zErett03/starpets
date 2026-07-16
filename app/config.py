@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     telegram_chat_id_orders: str = ""     # new-order + problem alerts go here (default: first admin id)
     telegram_admin_ids: str = ""          # comma-separated Telegram user ids allowed to use the bot
     telegram_webhook_secret: str = ""     # secret path segment for /telegram/webhook/<secret>
+    mm2_public_url: str = ""              # MM2 Railway URL — router relays _mm2 commands here
+    mm2_relay_secret: str = ""            # = MM2 TELEGRAM_WEBHOOK_SECRET (gates MM2 /telegram/exec)
     maintenance_message: str = ""         # if set, precheck blocks ALL sales and shows this text to buyers
 
     public_url: str = "https://starpets-production.up.railway.app"
