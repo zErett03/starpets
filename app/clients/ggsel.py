@@ -27,7 +27,7 @@ class GgselSellerOfficeClient:
             "Authorization": settings.ggsel_api_key,
         }
 
-    async def _request_retry(self, client, method, url, retries=3, **kwargs):
+    async def _request_retry(self, client, method, url, retries=3, retry_500=False, **kwargs):
         """Send request, retrying transient gateway errors (429/502/503/504) with backoff.
         ggsel's gateway occasionally 502s under concurrent load; a couple of retries with
         small backoff recovers almost all of them within the same run."""
@@ -41,7 +41,8 @@ class GgselSellerOfficeClient:
                     await asyncio.sleep(0.4 * (2 ** attempt))
                     continue
                 raise
-            if resp.status_code in _GGSEL_RETRY_STATUS and attempt < retries:
+            _statuses = (_GGSEL_RETRY_STATUS | {500}) if retry_500 else _GGSEL_RETRY_STATUS
+            if resp.status_code in _statuses and attempt < retries:
                 await asyncio.sleep(0.4 * (2 ** attempt))  # 0.4s, 0.8s, 1.6s
                 continue
             return resp
@@ -116,7 +117,7 @@ class GgselSellerOfficeClient:
         }
 
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
-            resp = await self._request_retry(client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body)
+            resp = await self._request_retry(client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body, retry_500=True)
             if not resp.is_success:
                 print(f"[patch_offer] offer_id={offer_id} status={resp.status_code} body={resp.text[:300]}", flush=True)
             resp.raise_for_status()
@@ -473,7 +474,7 @@ class GgselSellerOfficeClient:
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await self._request_retry(
                 client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
-                json={"delivery": "manual", "post_payment_url": url},
+                json={"delivery": "manual", "post_payment_url": url}, retry_500=True,
             )
             if not resp.is_success:
                 print(f"[set_post_payment_url] offer_id={offer_id} status={resp.status_code} body={resp.text[:200]}", flush=True)

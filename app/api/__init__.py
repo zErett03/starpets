@@ -1278,7 +1278,7 @@ async def _run_fix_post_payment_url():
     total = len(offer_ids)
     print(f"[FixPostPaymentUrl] starting — {total} offers url={url} (concurrency={settings.sync_concurrency})", flush=True)
     counters = {"updated": 0, "errors": 0}
-    sem = asyncio.Semaphore(settings.sync_concurrency)
+    sem = asyncio.Semaphore(3)   # gentler on ggsel — 500s appear under high concurrency; maintenance op
 
     async def _fix(gid):
         async with sem:
@@ -1324,23 +1324,28 @@ async def _run_fix_webhooks():
 
     secret = settings.webhook_shared_secret
     counters = {"updated": 0, "errors": 0}
-    sem = asyncio.Semaphore(settings.sync_concurrency)
+    sem = asyncio.Semaphore(3)   # gentler on ggsel — 500s appear under high concurrency; maintenance op
 
     async def _fix(gid):
         async with sem:
+            ok = False
             try:
                 await ggsel_office.patch_offer(
                     offer_id=gid,
                     precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={secret}",
                     notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={secret}",
                 )
-                # Also repoint the post-payment (delivery) page to the current PUBLIC_URL so a
-                # domain change updates the buyer-facing delivery URL too, not just the webhooks.
-                await ggsel_office.set_post_payment_url(gid, f"{settings.public_url}/delivery")
-                counters["updated"] += 1
+                ok = True
             except Exception as e:
                 counters["errors"] += 1
-                print(f"[FixWebhooks] ggsel_offer_id={gid} error: {e}", flush=True)
+                print(f"[FixWebhooks] ggsel_offer_id={gid} patch_offer(webhooks) error: {e}", flush=True)
+            # Delivery-page URL update is BEST-EFFORT: a failure here must not block the webhook fix.
+            try:
+                await ggsel_office.set_post_payment_url(gid, f"{settings.public_url}/delivery")
+            except Exception as e:
+                print(f"[FixWebhooks] ggsel_offer_id={gid} post_payment_url error (non-fatal): {e}", flush=True)
+            if ok:
+                counters["updated"] += 1
 
     # Concurrent PATCH (bounded by SYNC_CONCURRENCY). We patch every offer directly — for a
     # secret rotation all URLs must change anyway — dropping the per-offer get_offer check
@@ -1379,7 +1384,7 @@ async def _run_fix_descriptions():
     total = len(offers)
     print(f"[FixDescriptions] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
     counters = {"updated": 0, "errors": 0}
-    sem = asyncio.Semaphore(settings.sync_concurrency)
+    sem = asyncio.Semaphore(3)   # gentler on ggsel — 500s appear under high concurrency; maintenance op
 
     async def _fix(offer):
         async with sem:
