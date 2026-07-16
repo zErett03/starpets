@@ -357,7 +357,11 @@ class StarPetsClient:
                 f"{self.base_url}/trades/ex-buyers/friendship", params=params
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            # Log the provider's response so we can tell 'bot accepted' from 'sent but bot idle'
+            # (recurring provider-side issue: friend request delivered but the bot never accepts).
+            print(f"[send_friendship] trade_id={trade_id} resp={data}", flush=True)
+            return data
 
 
 starpets = StarPetsClient()
