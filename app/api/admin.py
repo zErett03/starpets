@@ -93,6 +93,15 @@ def _err_short(reason: str) -> str:
     return (reason[:16] + "…") if len(reason) > 17 else reason
 
 
+_FORCE_TRIGGERS = ("price_too_high", "no_items", "130", "протух")
+
+
+def _show_force(reason: str) -> bool:
+    """Show the Force-buyout button for auto-buyout failures, code 130, and >1h expired items."""
+    r = (reason or "").lower()
+    return any(t in r for t in _FORCE_TRIGGERS)
+
+
 def _badge(status: str) -> str:
     color = _STATUS_COLORS.get(status, "#8b949e")
     return (
@@ -269,6 +278,42 @@ function validateReissue(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeReissue(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='reissue-overlay') closeReissue(); });
+var forceOrderId=null;
+async function openForce(orderId){
+  forceOrderId=orderId;
+  document.getElementById('force-title').textContent='Force-выкуп — заказ #'+orderId;
+  document.getElementById('force-body').innerHTML='Загрузка live-стоимости…';
+  var cb=document.getElementById('force-confirm'); cb.disabled=true; cb.textContent='💥 Выкупить';
+  document.getElementById('force-overlay').style.display='flex';
+  try{
+    var res=await fetch('/force-deliver?order_id='+orderId,{credentials:'same-origin'});
+    var d=await res.json();
+    if(d.error){ document.getElementById('force-body').innerHTML='<span style="color:#f85149">'+d.error+'</span>'; return; }
+    var L=d.live||{};
+    if(L.in_stock===false){ document.getElementById('force-body').innerHTML='<span style="color:#f85149">Нет в наличии на StarPets — выкупить сейчас нельзя.</span>'; return; }
+    var loss=Number(L.est_loss_rub);
+    var pl = loss>0 ? '<b style="color:#f85149">−'+loss+'₽ убыток</b>' : '<b style="color:#3fb950">+'+(-loss)+'₽ прибыль</b>';
+    document.getElementById('force-body').innerHTML=
+      '<div>Себестоимость сейчас: <b>'+L.live_cost_rub+'₽</b> <span style="color:#8b949e">(item $'+L.live_price_usd+', курс '+L.fx+')</span></div>'+
+      '<div>Оплата покупателя: <b>'+L.sale_rub+'₽</b></div>'+
+      '<div>Итог: '+pl+'</div>'+
+      '<div style="margin-top:8px;color:'+(L.profitable?'#8b949e':'#e28015')+'">'+(L.profitable?'В пределах порога прибыльности.':'⚠️ Ниже порога — выкуп в убыток.')+'</div>';
+    cb.disabled=false;
+  }catch(e){ document.getElementById('force-body').innerHTML='<span style="color:#f85149">Ошибка запроса: '+e+'</span>'; }
+}
+function closeForce(){ document.getElementById('force-overlay').style.display='none'; }
+async function confirmForce(){
+  if(forceOrderId==null) return;
+  var b=document.getElementById('force-confirm'); b.disabled=true; b.textContent='Выкупаем…';
+  try{
+    var res=await fetch('/force-deliver?order_id='+forceOrderId+'&confirm=true',{credentials:'same-origin'});
+    var d=await res.json();
+    if(d.error){ document.getElementById('force-body').innerHTML+='<div style="color:#f85149;margin-top:6px">'+d.error+'</div>'; b.disabled=false; b.textContent='💥 Выкупить'; return; }
+    closeForce(); location.reload();
+  }catch(e){ document.getElementById('force-body').innerHTML+='<div style="color:#f85149;margin-top:6px">Ошибка выкупа: '+e+'</div>'; b.disabled=false; b.textContent='💥 Выкупить'; }
+}
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeForce(); });
+document.addEventListener('click',function(e){ if(e.target&&e.target.id==='force-overlay') closeForce(); });
 // Strip flash_order from the URL on load: the flash is server-rendered once from the
 // post-action redirect; removing the param means a plain refresh won't re-show it,
 // while a new action re-adds the param and shows a fresh flash.
@@ -293,6 +338,11 @@ def _order_row(o) -> str:
     )
     uname = _esc(o.roblox_username or "")
     amount = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
+    force_btn = (
+        f'<button type="button" class="act-btn" style="background:#da3633;border-color:#da3633;color:#fff" '
+        f'onclick="openForce({o.id})" title="Выкупить предмет даже в убыток (обход гарда прибыльности)">'
+        f'💥 Force-выкуп</button>'
+    ) if (cur not in ("dispatched", "done", "finalized") and _show_force(o.error_reason or "")) else ""
 
     return f"""<tr>
   <td>{o.id}</td>
@@ -328,6 +378,7 @@ def _order_row(o) -> str:
         <input type="hidden" name="order_id" value="{o.id}">
         <button type="submit" class="act-btn b-amber">Новый трейд</button>
       </form>
+      {force_btn}
       <div class="row-pair">
         <form class="actform" method="post" action="/admin/mark-delivered" style="flex:1"
               onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
@@ -494,6 +545,19 @@ async def admin_orders(
         <button type="submit" class="act-btn b-amber">Подтвердить</button>
       </div>
     </form>
+  </div>
+</div>
+
+<div id="force-overlay" class="overlay">
+  <div class="modal" style="max-width:460px">
+    <button class="modal-close" onclick="closeForce()" title="Закрыть">✕</button>
+    <h2 id="force-title">Force-выкуп</h2>
+    <p class="sub" style="margin-bottom:10px">Выкуп в обход гарда прибыльности. Сначала показываю <b>live-стоимость</b> и убыток — подтвердите, чтобы выкупить предмет заново.</p>
+    <div id="force-body" style="font-size:13px;line-height:1.7">Загрузка…</div>
+    <div class="modal-actions">
+      <button type="button" class="act-btn" onclick="closeForce()">Отмена</button>
+      <button type="button" id="force-confirm" class="act-btn" style="background:#da3633;border-color:#da3633;color:#fff" onclick="confirmForce()" disabled>💥 Выкупить</button>
+    </div>
   </div>
 </div>
 
