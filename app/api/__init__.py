@@ -1334,6 +1334,9 @@ async def _run_fix_webhooks():
                     precheck_url=f"{settings.public_url}/hooks/ggsel/precheck/{gid}?secret={secret}",
                     notification_url=f"{settings.public_url}/hooks/ggsel/notification/{gid}?secret={secret}",
                 )
+                # Also repoint the post-payment (delivery) page to the current PUBLIC_URL so a
+                # domain change updates the buyer-facing delivery URL too, not just the webhooks.
+                await ggsel_office.set_post_payment_url(gid, f"{settings.public_url}/delivery")
                 counters["updated"] += 1
             except Exception as e:
                 counters["errors"] += 1
