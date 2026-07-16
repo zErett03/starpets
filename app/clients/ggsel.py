@@ -468,11 +468,15 @@ class GgselSellerOfficeClient:
                 return {"ok": True}
 
     async def set_post_payment_url(self, offer_id: int, url: str) -> dict:
+        # ggsel's v2 PATCH rejects a bare {"post_payment_url": ...} with 422 — it must be sent
+        # together with the delivery mode (same as at create_offer). Include delivery="manual".
         async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
             resp = await self._request_retry(
                 client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}",
-                json={"post_payment_url": url},
+                json={"delivery": "manual", "post_payment_url": url},
             )
+            if not resp.is_success:
+                print(f"[set_post_payment_url] offer_id={offer_id} status={resp.status_code} body={resp.text[:200]}", flush=True)
             resp.raise_for_status()
             return resp.json()
 
