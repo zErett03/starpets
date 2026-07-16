@@ -115,9 +115,12 @@ async def starpets_sync() -> dict:
                     "starpets_product_id": stmt.excluded.starpets_product_id,
                     "last_synced_at": stmt.excluded.last_synced_at,
                 }
-                if not settings.event_price_sync:
-                    _set["price_usd"] = stmt.excluded.price_usd
-                    _set["price_rub"] = stmt.excluded.price_rub
+                # Price is intentionally NOT refreshed here for EXISTING offers. It must stay in
+                # lockstep with the GGSEL card price, which only the price-sync worker updates —
+                # it pushes to ggsel AND writes price_rub in the same pass (ggsel first). If
+                # starpets_sync bumped price_rub without pushing, precheck would judge profitability
+                # against a DB price that ran AHEAD of the ggsel price the buyer actually pays, and
+                # a loss would slip through. New offers still get their initial price from the insert.
                 stmt = stmt.on_conflict_do_update(
                     constraint="uq_offers_composite",
                     set_=_set,
@@ -305,7 +308,7 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(trade_protection, "interval", hours=1, id="trade_protection")
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
-    scheduler.add_job(sync_prices_safe, "interval", minutes=30, id="sync_prices")
+    scheduler.add_job(sync_prices_safe, "interval", minutes=10, id="sync_prices")
     scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
     scheduler.add_job(sku_price_sync_safe, "interval", minutes=5, id="sku_price_sync")
     scheduler.add_job(sku_stock_sync_safe, "interval", minutes=10, id="sku_stock_sync")

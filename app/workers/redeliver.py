@@ -177,9 +177,13 @@ async def redeliver_same_item(db, order) -> str:
                 )
         elif code == 210:
             order.delivery_status = DeliveryStatus.needs_attention
-            order.error_reason = f"redeliver 210 NO_ACCESS: {body[:120]}"
+            order.error_reason = (
+                "210 NO_ACCESS — предмет залочен/недоступен для вывода (держит активный трейд или "
+                "блок StarPets). Освободится при истечении (~15 мин) → 🔁 Повторить. Держится долго "
+                "— завис у StarPets: их поддержка или возврат покупателю."
+            )
             order.updated_at = now
-            result = "🟡 create_trade 210 NO_ACCESS: залочен в активном трейде — НЕ доставлено, нужна проверка"
+            result = "🟡 210 NO_ACCESS: предмет залочен — освободится ~15 мин, затем 🔁 Повторить (долго держится → StarPets support / возврат)"
         else:
             order.delivery_status = DeliveryStatus.needs_attention
             order.error_reason = f"redeliver err {exc.response.status_code} code={code}: {body[:120]}"

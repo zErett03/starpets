@@ -4272,3 +4272,41 @@ async def fix_username_label(dry_run: bool = True, limit: int = 0):
 
     _asyncio.create_task(_run())
     return {"status": "started", "total": len(gids), "note": "watch logs for [fix-username] DONE"}
+
+
+@app.get("/rebuy-fresh")
+async def rebuy_fresh(order_id: int, confirm: bool = False, force: bool = False):
+    """Abandon the currently-bought item (e.g. one stuck at 210 NO_ACCESS) and buy a FRESH one,
+    then deliver. Spends money — the old item is written off. Two-step: without confirm shows what
+    would be abandoned; confirm=true clears the purchase and re-queues a fresh DELIVER. ?force=true
+    also bypasses the profitability guard on the fresh buy."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            order = (await db.execute(select(Order).where(Order.ggsel_order_id == order_id))).scalar_one_or_none()
+        if not order:
+            return {"error": f"order {order_id} not found"}
+        if order.delivery_status in (DeliveryStatus.done, DeliveryStatus.finalized):
+            return {"error": f"order {order.id} is {order.delivery_status.value} — not rebuying"}
+        old_pid = order.starpets_purchase_id
+        if not confirm:
+            return {"preview": True, "order_id": order.id, "would_abandon_item": old_pid,
+                    "roblox_username": order.roblox_username,
+                    "current_status": order.delivery_status.value if order.delivery_status else None,
+                    "note": "Абандонит купленный предмет и купит свежий. Повтори с &confirm=true (spends money)."}
+        order.starpets_purchase_id = None      # force a fresh buy in deliver_order
+        order.starpets_custom_id = None
+        order.bot_name = None
+        order.starpets_status = None
+        order.exec_price_usd = None
+        order.max_price_usd = None
+        order.force_deliver = bool(force)
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order.id}))
+        await db.commit()
+        return {"ok": True, "order_id": order.id, "abandoned_item": old_pid, "force": bool(force),
+                "requeued": True, "note": "Свежий выкуп поставлен в очередь — следи за логами [Deliver]."}

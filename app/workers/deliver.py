@@ -266,15 +266,33 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
             )
         except httpx.HTTPStatusError as exc:
             err_body = ""
+            _code = None
             try:
                 err_body = exc.response.text
+                _code = (exc.response.json() or {}).get("code")
             except Exception:
                 pass
+            try:
+                _code = int(_code)
+            except (ValueError, TypeError):
+                _code = None
             print(
                 f"[Deliver] create_trade FAILED order_id={order_id} "
-                f"status={exc.response.status_code} body={err_body}",
+                f"status={exc.response.status_code} code={_code} body={err_body}",
                 flush=True,
             )
+            if _code == 210:
+                # NO_ACCESS = the bought item is locked / not withdrawable now (held in an active
+                # trade, or a StarPets-side lock). It usually frees when the holding trade expires
+                # (~15 min), so treat it as TRANSIENT: retry with backoff (self-heals), and escalate
+                # to needs_attention only on the LAST attempt.
+                await _transient_fail(
+                    db, order, order_id,
+                    "210 NO_ACCESS — предмет залочен/недоступен для вывода (обычно освобождается "
+                    "~15 мин). Держится долго → /rebuy-fresh (свежий выкуп) или возврат покупателю.",
+                    f"code=210 body={err_body[:120]}", attempt, max_attempts,
+                )
+                return
             raise
         print(f"[Deliver] create_trade response order_id={order_id}: {trade_resp}", flush=True)
 
