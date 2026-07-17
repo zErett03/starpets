@@ -76,7 +76,7 @@ class GgselSellerOfficeClient:
             "is_unlimited_quantity": True,   # manual delivery, unlimited StarPets supply -> never "sold out"
             "category_id": category_id,
             "delivery": "manual",
-            "post_payment_url": f"{settings.public_url}/delivery",
+            "post_payment_url": f"{(settings.delivery_base_url or settings.public_url)}/delivery",
         }
 
         import json as _json

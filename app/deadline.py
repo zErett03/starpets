@@ -9,7 +9,11 @@ ITEM_LIFETIME = timedelta(minutes=60)
 
 def item_expired(order, now: datetime | None = None) -> bool:
     now = now or datetime.utcnow()
-    anchor = getattr(order, "paid_at", None) or getattr(order, "created_at", None)
+    # Anchor to the CURRENT trade's start (dispatched_at), which RESETS on each rebuy/redeliver —
+    # so a freshly re-bought item gets its own fresh 1h window, not the original payment time.
+    anchor = (getattr(order, "dispatched_at", None)
+              or getattr(order, "paid_at", None)
+              or getattr(order, "created_at", None))
     if anchor is None:
         return False
     try:
