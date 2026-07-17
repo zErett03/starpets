@@ -1267,7 +1267,7 @@ async def _run_fix_post_payment_url():
     from app.db import AsyncSessionLocal
     from app.db.models import Offer
 
-    url = f"{settings.public_url}/delivery"
+    url = f"{(settings.delivery_base_url or settings.public_url)}/delivery"
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1341,7 +1341,7 @@ async def _run_fix_webhooks():
                 print(f"[FixWebhooks] ggsel_offer_id={gid} patch_offer(webhooks) error: {e}", flush=True)
             # Delivery-page URL update is BEST-EFFORT: a failure here must not block the webhook fix.
             try:
-                await ggsel_office.set_post_payment_url(gid, f"{settings.public_url}/delivery")
+                await ggsel_office.set_post_payment_url(gid, f"{(settings.delivery_base_url or settings.public_url)}/delivery")
             except Exception as e:
                 print(f"[FixWebhooks] ggsel_offer_id={gid} post_payment_url error (non-fatal): {e}", flush=True)
             if ok:
@@ -3876,6 +3876,15 @@ async def force_deliver(order_id: int, confirm: bool = False):
 
     async with AsyncSessionLocal() as db:
         order = (await db.execute(select(Order).where(Order.id == order_pk))).scalar_one()
+        from app.deadline import item_expired
+        if item_expired(order):
+            # item refunded by StarPets (>1h) — abandon the dead purchase so deliver buys a FRESH one
+            order.starpets_purchase_id = None
+            order.starpets_custom_id = None
+            order.bot_name = None
+            order.starpets_status = None
+            order.exec_price_usd = None
+            order.max_price_usd = None
         order.force_deliver = True
         order.delivery_status = DeliveryStatus.pending
         order.error_reason = None
