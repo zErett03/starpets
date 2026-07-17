@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     maintenance_message: str = ""         # if set, precheck blocks ALL sales and shows this text to buyers
 
     public_url: str = "https://starpets-production.up.railway.app"
+    delivery_base_url: str = ""            # buyer-facing delivery page domain (RU VPS). Webhooks stay on public_url; only /delivery uses this. Empty -> public_url.
 
     # Operator admin panel (Basic Auth). Set ADMIN_PASSWORD in env to enable.
     # If admin_password is empty the panel is fail-closed (denies every request).
