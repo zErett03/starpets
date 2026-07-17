@@ -76,6 +76,7 @@ _FRIENDSHIP_OPEN_STATES = ()  # monitor no longer re-pings friendship: blind pok
 
 _RETRY_AFTER = timedelta(minutes=15)  # act AFTER the trade has expired (item freed by expiry,
 # not by cancel — cancel returns 409 on an active trade). Matches the proven "recreate after ~15 min".
+_SESSION_TIMEOUT = _RETRY_AFTER + timedelta(minutes=5)  # status 3/4 (buyer in session): extra grace before recreating — the bot may still send the item after the base timer
 
 # Server-side delivery timer: how long a single trade's bot-online window lasts before
 # we auto-recreate the trade (new bot). Anchored to order.dispatched_at (the moment the
@@ -268,10 +269,17 @@ async def monitor_all_deliveries() -> None:
                 continue  # settled or already handled this cycle
             anchor = order.dispatched_at or order.updated_at
             anchor = anchor.replace(tzinfo=None) if anchor else None
-            if anchor is None or (now - anchor) <= _RETRY_AFTER:
-                continue  # act ~1 min before the bot window closes (trade still cancellable)
+            if anchor is None:
+                continue
 
             st = str(order.starpets_status or "")
+            # status 3/4 = buyer reached the bot's session. Give a LONGER window: after the base
+            # timer the bot can still send the item if the trade request was accepted, so don't act
+            # immediately. Only past _SESSION_TIMEOUT do we treat it as a dead session.
+            _timeout = _SESSION_TIMEOUT if st in ("3", "4") else _RETRY_AFTER
+            if (now - anchor) <= _timeout:
+                continue
+
             if st == "5":
                 # Exchange executed but StarPets went silent — probe to auto-close. redeliver
                 # only marks done if the audit trail confirms status 5, else needs_attention.
@@ -283,16 +291,28 @@ async def monitor_all_deliveries() -> None:
                 )
                 continue
             if st in ("3", "4"):
-                # Buyer is inside the bot's game session but stalled — don't disrupt it.
-                order.delivery_status = DeliveryStatus.needs_attention
-                if not order.error_reason:
-                    order.error_reason = f"застрял на статусе {st} (в сессии бота) — проверить"
-                order.updated_at = now
-                print(
-                    f"[MonitorDelivery] order_id={order.id} timer expired at session status={st} "
-                    f"→ needs_attention",
-                    flush=True,
-                )
+                # Still stalled at 3/4 after the extended window (no status update) → session is
+                # dead (buyer left / bot went offline). RECREATE with a fresh bot instead of only
+                # flagging, respecting the retry cap. (Requested: extend timer, then recreate.)
+                retries = order.trade_retry_count or 0
+                if retries < _MAX_AUTO_RETRIES:
+                    order.trade_retry_count = retries + 1
+                    result = await redeliver_same_item(db, order)  # cancels prev trade + recreates
+                    print(
+                        f"[MonitorDelivery] order_id={order.id} stalled at status {st} past extended "
+                        f"window → recreate (retry {order.trade_retry_count}/{_MAX_AUTO_RETRIES}) → {result}",
+                        flush=True,
+                    )
+                else:
+                    order.delivery_status = DeliveryStatus.needs_attention
+                    if not order.error_reason:
+                        order.error_reason = f"застрял на статусе {st} после ретраев — проверить/вернуть"
+                    order.updated_at = now
+                    print(
+                        f"[MonitorDelivery] order_id={order.id} stalled at status {st}, retries "
+                        f"exhausted → needs_attention",
+                        flush=True,
+                    )
                 continue
 
             retries = order.trade_retry_count or 0
