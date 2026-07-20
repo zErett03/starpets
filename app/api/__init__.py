@@ -732,7 +732,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
             <div class="spinner"></div>
             <h1>Заказ обрабатывается</h1>
             <p class="sub">Пожалуйста, подождите — это займёт несколько секунд...</p>
-            <p class="sub small">Страница обновится автоматически</p>
+            <p class="sub small">Не закрывайте страницу: здесь появится имя бота</p>
         </div>"""
         extra_js = ""
 
@@ -748,6 +748,23 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         refresh_meta = '<meta http-equiv="refresh" content="20">'
     else:
         refresh_meta = '<meta http-equiv="refresh" content="5">'
+
+    # meta-refresh ЗАМИРАЕТ, пока вкладка в фоне, — а мы сами просим покупателя свернуть
+    # браузер и уйти в Roblox. Из-за этого он возвращался на страницу, где всё ещё крутился
+    # спиннер, не видел имени бота и не приходил к нему (MM2 заказ #44: бот ждал в
+    # PENDING_FRIEND, покупатель так и не появился, трейд упал в FAILED). Перезагружаем
+    # страницу в момент возврата на вкладку — бот и таймер появляются сразу.
+    refresh_meta += """
+<script>
+(function() {
+  var loadedAt = Date.now();
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible' && Date.now() - loadedAt > 3000) {
+      location.reload();
+    }
+  });
+})();
+</script>"""
 
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ru">
