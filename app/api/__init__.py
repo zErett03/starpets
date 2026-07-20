@@ -629,10 +629,13 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         status == DeliveryStatus.dispatched
         and order
         and order.starpets_custom_id
-        # Re-poke friendship through the whole pre-acceptance phase (statuses 0/1/2 oscillate
-        # before the bot accepts), not just "0" — otherwise a buyer stuck at 2 never gets the
-        # bot to accept. Stop at 3+ (buyer in-session / in-progress) to avoid 400 spam.
-        and (order.starpets_status or "").strip() in ("", "0", "1", "2")
+        # ТОЛЬКО самая ранняя фаза (CREATED/неизвестно). На 1 DELAYED_START и 2 PENDING_FRIEND
+        # трейд трогать НЕЛЬЗЯ — это то же правило, по которому монитору переотправку запретили
+        # полностью (см. _FRIENDSHIP_OPEN_STATES): повторный пинок заставляет StarPets считать
+        # трейд активным, тот не истекает сам, предмет не освобождается, а отмена потом отдаёт 130.
+        # Наблюдали вживую на заказе #44: открытая страница слала дружбу раз в 20с, статус
+        # 17 раз проскакал 2→0→2→0 и умер в FAILED, предмет остался залоченным.
+        and (order.starpets_status or "").strip() in ("", "0")
     ):
         from datetime import datetime as _dt
         _now = _dt.utcnow()
