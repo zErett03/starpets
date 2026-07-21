@@ -150,4 +150,192 @@ async def accounting(since: str = "", until: str = "", days: int = 30,
             "курс берётся текущий и применяется ко всем заказам периода, хотя покупались "
             "они по курсам своих дней",
             "комиссия считается по ставке из параметра, фактические удержания ggsel "
-            "могут отличаться — сверь с вып
+            "могут отличаться — сверь с выпиской кабинета",
+        ],
+    }
+
+
+@router.get("/accounting/xlsx")
+async def accounting_xlsx(since: str = "", until: str = "", days: int = 0,
+                          usd_rub: float = 0.0,
+                          fee_ps: float = 0.027, fee_ggsel: float = 0.001):
+    """
+    Выгрузка в тот же формат, что и ручная таблица: три листа, формулы, параметры.
+
+    Формулы сохранены живыми, а не посчитанными — чтобы можно было поменять комиссию или
+    курс в «Параметрах» и увидеть пересчёт, как в исходном файле.
+
+    days=0 — все заказы.
+    """
+    import io
+    from fastapi.responses import StreamingResponse
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError:
+        return {"error": "openpyxl не установлен — добавь его в requirements.txt"}
+
+    rate, rate_src = (usd_rub, "manual") if usd_rub > 0 else await _usd_rate()
+    start, end, period_label = _period(since, until, days)
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(Order)
+            .where(Order.paid_at.isnot(None), Order.paid_at >= start, Order.paid_at < end)
+            .order_by(Order.paid_at.asc())
+        )).scalars().all()
+
+    # В таблице всего два учитываемых статуса. Остальные заказы попадают в файл, но в
+    # суммы не входят: они ещё не закрыты, и записывать их в прибыль или убыток рано.
+    def _status(o) -> str:
+        if o.delivery_status in _DELIVERED:
+            return "Доставлен"
+        if o.delivery_status == DeliveryStatus.failed:
+            return "Возврат"
+        return "В работе"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Заказы"
+    headers = ["№ заказа ggsel", "Товар", "Цена продажи P, ₽", "Курс USD/RUB",
+               "Себест. выкупа, $", "Статус", "Себест., ₽", "Комиссия ПС, ₽",
+               "Комиссия ggsel, ₽", "Net-выручка, ₽", "Прибыль, ₽", "Маржа %",
+               "Оплачен"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+
+    n = 0
+    for o in rows:
+        sale = float(o.amount_rub or 0)
+        if sale <= 0:
+            continue          # precheck-заготовки без оплаты в бухгалтерию не идут
+        n += 1
+        r = n + 1
+        ws.append([
+            o.ggsel_order_id, o.item_name, sale, round(rate, 4),
+            float(o.exec_price_usd or 0), _status(o),
+            f"=E{r}*D{r}",
+            f"=C{r}*'Параметры'!$B$4",
+            f"=C{r}*'Параметры'!$B$5",
+            f"=C{r}-H{r}-I{r}",
+            f'=IF($F{r}="Возврат",-(H{r}+I{r}),J{r}-G{r})',
+            f"=IF(C{r}=0,0,K{r}/C{r})",
+            o.paid_at.strftime("%d.%m.%Y %H:%M") if o.paid_at else "",
+        ])
+
+    last = n + 1
+    s = wb.create_sheet("Сводка")
+    s["A1"] = "Сводка (P&L)"
+    s["A1"].font = Font(bold=True, size=13)
+    s["A2"] = f"Период по дате оплаты: {period_label}"
+    pairs = [
+        (3, "Заказов всего", f"=COUNTA('Заказы'!$A$2:$A${last})"),
+        (4, "  из них доставлено", f"=COUNTIF('Заказы'!$F$2:$F${last},\"Доставлен\")"),
+        (5, "  из них возвраты", f"=COUNTIF('Заказы'!$F$2:$F${last},\"Возврат\")"),
+        (6, "  из них в работе", f"=COUNTIF('Заказы'!$F$2:$F${last},\"В работе\")"),
+        (8, "Валовая выручка (доставленные)",
+            f"=SUMIFS('Заказы'!$C$2:$C${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"),
+        (9, "Комиссии всего (доставленные)",
+            f"=SUMIFS('Заказы'!$H$2:$H${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"
+            f"+SUMIFS('Заказы'!$I$2:$I${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"),
+        (10, "Net-выручка (доставленные)",
+             f"=SUMIFS('Заказы'!$J$2:$J${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"),
+        (11, "Себестоимость (доставленные)",
+             f"=SUMIFS('Заказы'!$G$2:$G${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"),
+        (12, "Убыток от возвратов",
+             f"=-SUMIFS('Заказы'!$K$2:$K${last},'Заказы'!$F$2:$F${last},\"Возврат\")"),
+        (14, "ЧИСТАЯ ПРИБЫЛЬ",
+             f"=SUMIFS('Заказы'!$K$2:$K${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"
+             f"+SUMIFS('Заказы'!$K$2:$K${last},'Заказы'!$F$2:$F${last},\"Возврат\")"),
+        (15, "Средняя маржа (доставленные)",
+             f"=IFERROR((SUMIFS('Заказы'!$J$2:$J${last},'Заказы'!$F$2:$F${last},\"Доставлен\")"
+             f"-SUMIFS('Заказы'!$G$2:$G${last},'Заказы'!$F$2:$F${last},\"Доставлен\"))"
+             f"/SUMIFS('Заказы'!$C$2:$C${last},'Заказы'!$F$2:$F${last},\"Доставлен\"),0)"),
+    ]
+    for row, label, formula in pairs:
+        s.cell(row=row, column=1, value=label)
+        s.cell(row=row, column=2, value=formula)
+    s["A14"].font = Font(bold=True)
+    s["B14"].font = Font(bold=True)
+    s.column_dimensions["A"].width = 34
+    s.column_dimensions["B"].width = 18
+
+    p = wb.create_sheet("Параметры")
+    yellow = PatternFill("solid", fgColor="FFF2CC")
+    p["A1"] = "Параметры расчёта"
+    p["A1"].font = Font(bold=True, size=13)
+    p["A2"] = "Жёлтые ячейки — редактируемые. Проценты хранятся как доли (0.027 = 2.7%)."
+    params = [
+        (4, "Комиссия платёжной системы", fee_ps, "Удерживается платёжкой с суммы заказа"),
+        (5, "Комиссия ggsel", fee_ggsel, "Комиссия площадки ggsel"),
+        (6, "Итого комиссия с продажи", "=B4+B5", "Сумма двух комиссий выше"),
+        (7, "Курс USD/RUB", round(rate, 4), f"источник: {rate_src}"),
+    ]
+    for row, label, val, note in params:
+        p.cell(row=row, column=1, value=label)
+        c = p.cell(row=row, column=2, value=val)
+        if isinstance(val, float):
+            c.fill = yellow
+        p.cell(row=row, column=3, value=note)
+    notes = [
+        (10, "Как считается прибыль"),
+        (11, "Net-выручка = Цена продажи × (1 − итого комиссия). Комиссии при возврате НЕ возвращаются."),
+        (12, "Себестоимость = цена выкупа StarPets ($) × курс USD/RUB."),
+        (13, "Прибыль (доставлен) = Net-выручка − Себестоимость."),
+        (14, "Прибыль (возврат) = −(комиссия ПС + комиссия ggsel)."),
+        (16, "ОГРАНИЧЕНИЕ: у заказа хранится ОДНА цена выкупа. Перекупы (rebuy-fresh)"),
+        (17, "затирают предыдущую, поэтому себестоимость таких заказов занижена."),
+        (18, "Курс один на весь период, хотя заказы покупались по курсам своих дней."),
+    ]
+    for row, text in notes:
+        p.cell(row=row, column=1, value=text)
+    p["A10"].font = Font(bold=True)
+    p["A16"].font = Font(bold=True)
+    p.column_dimensions["A"].width = 78
+
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 34
+    for col in "CDEFGHIJKLM":
+        ws.column_dimensions[col].width = 15
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    name = f"accounting_{datetime.utcnow():%Y%m%d}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.get("/accounting/orders")
+async def accounting_orders(days: int = 30, only_problems: bool = False, limit: int = 200):
+    """Построчная выгрузка — чтобы сверить итоги и найти, где деньги застряли."""
+    since = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(Order).where(Order.created_at >= since)
+            .order_by(Order.id.desc()).limit(limit)
+        )).scalars().all()
+
+    out = []
+    for o in rows:
+        if only_problems and o.delivery_status not in _AT_RISK:
+            continue
+        if float(o.amount_rub or 0) <= 0 and not only_problems:
+            continue
+        out.append({
+            "id": o.id,
+            "ggsel_order_id": o.ggsel_order_id,
+            "item": o.item_name,
+            "status": o.delivery_status.value if o.delivery_status else None,
+            "sale_rub": float(o.amount_rub) if o.amount_rub else None,
+            "cost_usd": float(o.exec_price_usd) if o.exec_price_usd else None,
+            "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+            "delivered_at": o.delivered_at.isoformat() if o.delivered_at else None,
+            "error": (o.error_reason or "")[:120] or None,
+        })
+    return {"count": len(out), "orders": out}
