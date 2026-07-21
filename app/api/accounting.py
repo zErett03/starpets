@@ -26,8 +26,13 @@ CBR_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
 
 # Заказ считается принёсшим деньги только в этих статусах.
 _DELIVERED = {DeliveryStatus.done, DeliveryStatus.finalized}
+# Деньги покупателю уже вернули: closed — вручную оператором, failed — сорванная выдача.
+# Выручки нет. Закуп при этом обычно НЕ теряется: если предмет не выдан и протух,
+# StarPets возвращает его стоимость на баланс API. Реальный убыток — только комиссии,
+# поэтому формула в таблице (-(H+I), без себестоимости) верна.
+_REFUNDED = {DeliveryStatus.failed, DeliveryStatus.closed}
 # Здесь деньги покупателя получены, но выдача не закрыта — риск возврата.
-_AT_RISK = {DeliveryStatus.needs_attention, DeliveryStatus.failed}
+_AT_RISK = {DeliveryStatus.needs_attention}
 
 
 def _period(since: str, until: str, days: int) -> tuple[datetime, datetime, str]:
@@ -89,9 +94,10 @@ async def accounting(since: str = "", until: str = "", days: int = 30,
                                 Order.paid_at >= start, Order.paid_at < end)
         )).scalars().all()
 
-    delivered_n = at_risk_n = in_flight_n = unpaid_n = 0
+    delivered_n = at_risk_n = in_flight_n = unpaid_n = refunded_n = 0
     delivered_rev = delivered_cost_usd = 0.0
     at_risk_rev = at_risk_cost_usd = 0.0
+    refunded_rev = refunded_cost_usd = 0.0
     spent_usd_total = 0.0
 
     for o in rows:
@@ -106,6 +112,10 @@ async def accounting(since: str = "", until: str = "", days: int = 30,
             delivered_n += 1
             delivered_rev += sale
             delivered_cost_usd += cost_usd
+        elif o.delivery_status in _REFUNDED:
+            refunded_n += 1
+            refunded_rev += sale
+            refunded_cost_usd += cost_usd
         elif o.delivery_status in _AT_RISK:
             at_risk_n += 1
             at_risk_rev += sale
@@ -140,6 +150,14 @@ async def accounting(since: str = "", until: str = "", days: int = 30,
             "purchase_cost_rub": round(at_risk_cost_usd * rate, 2),
             "note": ("оплачено покупателем, но выдача не закрыта: деньги под возвратом, "
                      "а предмет, возможно, уже куплен"),
+        },
+        "refunded": {
+            "orders": refunded_n,
+            "returned_rub": round(refunded_rev, 2),
+            "purchase_cost_rub": round(refunded_cost_usd * rate, 2),
+            "note": ("деньги возвращены покупателю, выручки нет. Стоимость закупа обычно "
+                     "возвращается StarPets на баланс API, поэтому purchase_cost_rub — "
+                     "не убыток, а справка. Убыток реален лишь если предмет успели выдать"),
         },
         "in_flight_orders": in_flight_n,
         "unpaid_precheck_orders": unpaid_n,
@@ -190,7 +208,7 @@ async def accounting_xlsx(since: str = "", until: str = "", days: int = 0,
     def _status(o) -> str:
         if o.delivery_status in _DELIVERED:
             return "Доставлен"
-        if o.delivery_status == DeliveryStatus.failed:
+        if o.delivery_status in _REFUNDED:      # failed + closed (возврат оператором)
             return "Возврат"
         return "В работе"
 
@@ -309,6 +327,13 @@ async def accounting_xlsx(since: str = "", until: str = "", days: int = 0,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+@router.get("/accounting/push-sheets")
+async def accounting_push_sheets(days: int = 14):
+    """Отправить заказы в Google-таблицу вручную. По расписанию это делает воркер."""
+    from app.workers.sheets_sync import push_orders
+    return await push_orders(days=days)
 
 
 @router.get("/accounting/orders")

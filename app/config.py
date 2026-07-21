@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     # к 20 переменной DELIVERY_FRIENDSHIP_RESEND_SECONDS, если понадобится.
     delivery_friendship_resend_seconds: int = 180
 
+    # Выгрузка заказов в Google-таблицу через Apps Script (см. sheets_apps_script.gs).
+    # URL веб-приложения и общий токен: скрипт публикуется с доступом «по ссылке»,
+    # поэтому токен — единственное, что отделяет таблицу от посторонних записей.
+    sheets_webhook_url: str = ""
+    sheets_webhook_token: str = ""
+    sheets_sync_hours: int = 6
+    # Лист внутри общей таблицы. У каждого сервиса свой баланс закупа, поэтому
+    # заказы не смешиваются: имя должно быть в белом списке ALLOWED_SHEETS скрипта.
+    sheets_tab: str = "Заказы AM"
+
     public_url: str = "https://starpets-production.up.railway.app"
     delivery_base_url: str = ""            # buyer-facing delivery page domain (RU VPS). Webhooks stay on public_url; only /delivery uses this. Empty -> public_url.
 
