@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     mm2_relay_secret: str = ""            # = MM2 TELEGRAM_WEBHOOK_SECRET (gates MM2 /telegram/exec)
     maintenance_message: str = ""         # if set, precheck blocks ALL sales and shows this text to buyers
 
+    # Интервал переотправки заявки в друзья со страницы выдачи, в секундах. 0 = выключить.
+    # Механизм нужен: бот сам заявку не принимает. Но частые пинки убивают трейд —
+    # на MM2 при 20 секундах статус качался 2→0 и StarPets отменял сделку. Здесь, на
+    # Adopt Me, прежнее поведение проблем не давало, поэтому интервал можно вернуть
+    # к 20 переменной DELIVERY_FRIENDSHIP_RESEND_SECONDS, если понадобится.
+    delivery_friendship_resend_seconds: int = 180
+
     public_url: str = "https://starpets-production.up.railway.app"
     delivery_base_url: str = ""            # buyer-facing delivery page domain (RU VPS). Webhooks stay on public_url; only /delivery uses this. Empty -> public_url.
 
