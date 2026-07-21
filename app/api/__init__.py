@@ -12,6 +12,10 @@ app = FastAPI(title="starpets-layer")
 app.include_router(webhooks_router)
 app.include_router(admin_router)
 
+from app.api.accounting import router as accounting_router  # noqa: E402
+
+app.include_router(accounting_router)
+
 
 import base64 as _b64
 import secrets as _sec
@@ -626,7 +630,8 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
     # page, so this is the right moment to (re)trigger the bot to accept the pending
     # request. Throttled in-process (~20s) to avoid spam on rapid reloads.
     if (
-        status == DeliveryStatus.dispatched
+        settings.delivery_friendship_resend_seconds > 0
+        and status == DeliveryStatus.dispatched
         and order
         and order.starpets_custom_id
         # ТОЛЬКО самая ранняя фаза (CREATED/неизвестно). На 1 DELAYED_START и 2 PENDING_FRIEND
@@ -640,7 +645,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
         from datetime import datetime as _dt
         _now = _dt.utcnow()
         _last = _friendship_resend_at.get(order.id)
-        if _last is None or (_now - _last).total_seconds() > 20:
+        if _last is None or (_now - _last).total_seconds() > settings.delivery_friendship_resend_seconds:
             _friendship_resend_at[order.id] = _now
             try:
                 await starpets.send_friendship(trade_id=int(order.starpets_custom_id))
