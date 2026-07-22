@@ -338,6 +338,15 @@ def _order_row(o) -> str:
     )
     uname = _esc(o.roblox_username or "")
     amount = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
+    # Имя бота — ссылка на его Roblox-профиль. username_redirect_url чисто строковая
+    # (Roblox 302-редиректит на числовой профиль), поэтому не тормозит рендер строк.
+    if o.bot_name:
+        from app.clients.roblox import username_redirect_url
+        bot_cell = (f'<a href="{username_redirect_url(o.bot_name)}" target="_blank" '
+                    f'rel="noopener" style="color:#58a6ff;text-decoration:none" '
+                    f'title="Открыть профиль бота на Roblox">{_esc(o.bot_name)} ↗</a>')
+    else:
+        bot_cell = "—"
     force_btn = (
         f'<button type="button" class="act-btn" style="background:#da3633;border-color:#da3633;color:#fff" '
         f'onclick="openForce({o.id})" title="Выкупить предмет даже в убыток (обход гарда прибыльности)">'
@@ -364,7 +373,7 @@ def _order_row(o) -> str:
   <td>{_esc(o.starpets_status or "—")}</td>
   <td>{_esc(o.starpets_custom_id or "—")}</td>
   <td>{_esc(o.starpets_purchase_id or "—")}</td>
-  <td class="col-bot" title="{_esc(o.bot_name or '')}">{_esc(o.bot_name or "—")}</td>
+  <td class="col-bot" title="{_esc(o.bot_name or '')}">{bot_cell}</td>
   <td class="col-err">{_err_badge(o.error_reason or "")}</td>
   <td>
     <div class="actions">
@@ -373,11 +382,19 @@ def _order_row(o) -> str:
         <select name="status">{opts}</select>
         <button type="submit" class="act-btn b-green" title="Обновить статус">✓</button>
       </form>
-      <form class="actform" method="post" action="/admin/redeliver"
-            onsubmit="return confirm('Создать новый трейд по заказу {o.id}? Если предмет ещё у нас — запустится новая выдача; если ушёл — покажет ошибку.')">
-        <input type="hidden" name="order_id" value="{o.id}">
-        <button type="submit" class="act-btn b-amber">Новый трейд</button>
-      </form>
+      <div class="row-pair">
+        <form class="actform" method="post" action="/admin/redeliver" style="flex:1"
+              onsubmit="return confirm('Создать новый трейд по заказу {o.id}? Если предмет ещё у нас — запустится новая выдача; если ушёл — покажет ошибку.')">
+          <input type="hidden" name="order_id" value="{o.id}">
+          <button type="submit" class="act-btn b-amber">Новый трейд</button>
+        </form>
+        <form class="actform" method="post" action="/admin/rebuy-fresh"
+              onsubmit="return confirm('Перевыкуп по заказу {o.id}? Текущий купленный предмет будет БРОШЕН и выкуплен свежий — тратит деньги. Для застрявших трейдов.')">
+          <input type="hidden" name="order_id" value="{o.id}">
+          <button type="submit" class="act-btn" style="background:#8957e5;border-color:#8957e5;color:#fff;flex:0 0 25px;width:25px;padding:0"
+                  title="Перевыкуп: бросить застрявший предмет и выкупить свежий (тратит деньги)">♻️</button>
+        </form>
+      </div>
       {force_btn}
       <div class="row-pair">
         <form class="actform" method="post" action="/admin/mark-delivered" style="flex:1"
@@ -668,6 +685,41 @@ async def admin_redeliver(
         await db.commit()
 
     print(f"[admin] order_id={order_id} redeliver: {result}", flush=True)
+    return _flash_redirect(request, order_id)
+
+
+@router.post("/admin/rebuy-fresh")
+async def admin_rebuy_fresh(
+    request: Request,
+    _user: str = Depends(require_admin),
+    order_id: int = Form(...),
+):
+    """Бросить купленный предмет и выкупить свежий (для застрявших трейдов). Тратит деньги:
+    старый предмет списывается. То же, что GET /rebuy-fresh?confirm=true, но из админки."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Task, TaskKind, DeliveryStatus
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            raise HTTPException(404, f"order {order_id} not found")
+        if order.delivery_status in (DeliveryStatus.done, DeliveryStatus.finalized):
+            print(f"[admin] order_id={order_id} rebuy-fresh skipped — {order.delivery_status.value}", flush=True)
+            return _flash_redirect(request, order_id)
+        old_pid = order.starpets_purchase_id
+        order.starpets_purchase_id = None
+        order.starpets_custom_id = None
+        order.bot_name = None
+        order.starpets_status = None
+        order.exec_price_usd = None
+        order.max_price_usd = None
+        order.delivery_status = DeliveryStatus.pending
+        order.error_reason = None
+        order.updated_at = datetime.utcnow()
+        db.add(Task(kind=TaskKind.DELIVER, priority=1, max_attempts=6, payload={"order_id": order_id}))
+        await db.commit()
+    print(f"[admin] order_id={order_id} rebuy-fresh: abandoned={old_pid}, fresh DELIVER queued", flush=True)
     return _flash_redirect(request, order_id)
 
 
