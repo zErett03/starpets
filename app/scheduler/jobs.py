@@ -221,7 +221,7 @@ async def sku_stock_sync_safe():
         return  # variant hiding disabled until validated (set SKU_STOCK_SYNC=true)
     try:
         from app.workers.sku_stock_sync import sku_stock_sync
-        await sku_stock_sync()
+        await sku_stock_sync(max_cards=settings.sku_stock_sync_max_cards)
     except Exception as e:
         print(f"[Scheduler] sku_stock_sync error: {e}", flush=True)
 
@@ -322,7 +322,9 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(sku_price_sync_safe, "interval",
                       minutes=settings.sku_price_sync_minutes, id="sku_price_sync",
                       max_instances=1, coalesce=True)
-    scheduler.add_job(sku_stock_sync_safe, "interval", minutes=10, id="sku_stock_sync")
+    scheduler.add_job(sku_stock_sync_safe, "interval",
+                      minutes=settings.sku_stock_sync_minutes, id="sku_stock_sync",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
     scheduler.add_job(floor_relive_safe, "interval", minutes=15, id="floor_relive")

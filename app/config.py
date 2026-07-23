@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     sku_price_sync_max_rebuilds: int = 50
     sku_price_sync_threshold_rub: float = 50.0
     sku_price_sync_threshold_pct: float = 0.10
+    # Охват stock-sync (прячет отсутствующие варианты). Дефолтные 40/10мин при ~1900
+    # карточках дают полный обход за 8 часов — мёртвые варианты висят и цепляют дефолт.
+    sku_stock_sync_minutes: int = 5
+    sku_stock_sync_max_cards: int = 500
     floor_reconcile: bool = False  # sweep offers.price_rub from store_items + live relive (FLOOR_RECONCILE=true)
     starpets_category_id: int = 0
 
