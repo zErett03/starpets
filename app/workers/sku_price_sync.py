@@ -57,6 +57,14 @@ async def _cheap_upsert(gid, opt, ordered, default_vid, base):
 
 
 async def _rebuild_option(gid, ordered, base, default_pid):
+    # Под общей блокировкой по gid: stock_sync пересобирает ту же опцию, и одновременная
+    # пересборка ловит промежуточное «нет дефолта» → 422. Замок сериализует оба воркера.
+    from app.workers.sku_lock import rebuild_lock
+    async with rebuild_lock(gid):
+        return await _rebuild_option_locked(gid, ordered, base, default_pid)
+
+
+async def _rebuild_option_locked(gid, ordered, base, default_pid):
     # Delete EVERY "Вариант" radio option first (including orphan empties left by earlier failed
     # rebuilds), then create exactly one fresh option -> no leftover required-empty option that
     # would block checkout. Then remap SkuVariant ids.

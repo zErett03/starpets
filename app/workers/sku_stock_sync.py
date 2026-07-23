@@ -31,7 +31,16 @@ class _P:
 
 async def _rebuild_shown(gid, opt_hint, shown, default_pid):
     """Delete all 'Вариант' options, recreate ONE with `shown` variants (default=default_pid),
-    bulk-create, and remap SkuVariant (shown -> new ids + hidden=False)."""
+    bulk-create, and remap SkuVariant (shown -> new ids + hidden=False).
+
+    Под общей блокировкой по gid: price_sync тоже пересобирает эту же опцию, и одновременная
+    пересборка ловит промежуточное «нет дефолта» → 422. Блокировка сериализует их."""
+    from app.workers.sku_lock import rebuild_lock
+    async with rebuild_lock(gid):
+        return await _rebuild_shown_locked(gid, opt_hint, shown, default_pid)
+
+
+async def _rebuild_shown_locked(gid, opt_hint, shown, default_pid):
     opts = await ggsel_office.get_options(gid)
     odata = opts.get("data") if isinstance(opts, dict) else opts
     old_ids = [o.get("id") for o in (odata or [])
