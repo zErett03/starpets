@@ -204,7 +204,13 @@ async def sku_price_sync_safe():
         from app.workers.sku_price_sync import sku_price_sync
         # scheduled pass ignores copeck-churn (FX/floor micro-shifts); manual endpoint keeps
         # its sensitive defaults for diagnostics. Big traps still caught well under 50₽/10%.
-        await sku_price_sync(threshold_rub=50.0, threshold_pct=0.10)
+        # Охват и лимиты — из конфига: при ~1900 карточках дефолтные 100/20 не поспевали.
+        await sku_price_sync(
+            threshold_rub=settings.sku_price_sync_threshold_rub,
+            threshold_pct=settings.sku_price_sync_threshold_pct,
+            max_cards=settings.sku_price_sync_max_cards,
+            max_rebuilds=settings.sku_price_sync_max_rebuilds,
+        )
     except Exception as e:
         print(f"[Scheduler] sku_price_sync error: {e}", flush=True)
 
@@ -302,6 +308,7 @@ async def tg_alerts_safe():
 
 
 def start_scheduler() -> AsyncIOScheduler:
+    from app.config import settings
     scheduler = AsyncIOScheduler()
     scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
     scheduler.add_job(reconcile, "interval", hours=1, id="reconcile")
@@ -309,8 +316,12 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")
     scheduler.add_job(monitor_delivery_safe, "interval", seconds=30, id="monitor_delivery")
     scheduler.add_job(sync_prices_safe, "interval", minutes=10, id="sync_prices")
-    scheduler.add_job(price_sync_safe, "interval", seconds=15, id="price_sync")
-    scheduler.add_job(sku_price_sync_safe, "interval", minutes=5, id="sku_price_sync")
+    scheduler.add_job(price_sync_safe, "interval",
+                      seconds=settings.price_sync_seconds, id="price_sync",
+                      max_instances=1, coalesce=True)
+    scheduler.add_job(sku_price_sync_safe, "interval",
+                      minutes=settings.sku_price_sync_minutes, id="sku_price_sync",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(sku_stock_sync_safe, "interval", minutes=10, id="sku_stock_sync")
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")

@@ -80,6 +80,18 @@ class Settings(BaseSettings):
     event_price_sync: bool = False
     sku_price_sync: bool = False   # Phase 3: periodic SKU variant price refresh (SKU_PRICE_SYNC=true)
     sku_stock_sync: bool = False   # hide out-of-stock SKU variants (SKU_STOCK_SYNC=true)
+    # Периодичность и охват SKU-синка. Дрейф копится, когда за прогон обрабатывается меньше
+    # карточек, чем успевает уехать. max_cards — бюджет ЗАПИСЕЙ за прогон (проверяются все),
+    # max_rebuilds — пересборок дефолта (каждая ~26 вызовов ggsel, это узкое место).
+    # Интервал событийного price_sync (чтение ленты /ex-buyers/updates). StarPets разрешает
+    # частый опрос; 5с вместо 15 держит цены свежее. max_instances=1+coalesce не дают
+    # прогонам наслаиваться, если один затянулся на пуши в ggsel.
+    price_sync_seconds: int = 5
+    sku_price_sync_minutes: int = 3
+    sku_price_sync_max_cards: int = 500
+    sku_price_sync_max_rebuilds: int = 50
+    sku_price_sync_threshold_rub: float = 50.0
+    sku_price_sync_threshold_pct: float = 0.10
     floor_reconcile: bool = False  # sweep offers.price_rub from store_items + live relive (FLOOR_RECONCILE=true)
     starpets_category_id: int = 0
 
