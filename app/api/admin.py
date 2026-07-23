@@ -397,18 +397,13 @@ def _order_row(o) -> str:
       </div>
       {force_btn}
       <div class="row-pair">
-        <form class="actform" method="post" action="/admin/mark-delivered" style="flex:1"
-              onsubmit="return confirm('Закрыть заказ {o.id} и отметить доставку в ggsel (высвободит оплату)?')">
-          <input type="hidden" name="order_id" value="{o.id}">
-          <button type="submit" class="act-btn b-ggsel">Отправить на ggsel</button>
-        </form>
+        <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История доставки</button>
         <form class="actform" method="post" action="/admin/cancel-order"
               onsubmit="return confirm('Отменить заказ {o.id}? Трейд будет закрыт, выдача остановлена. Возврат/отказ денег оформите на ggsel вручную.')">
           <input type="hidden" name="order_id" value="{o.id}">
           <button type="submit" class="act-btn b-red" title="Отменить заказ (закрыть трейд)">🗑</button>
         </form>
       </div>
-      <button type="button" class="act-btn b-blue" onclick="openHistory({o.id})">История доставки</button>
     </div>
   </td>
 </tr>"""
