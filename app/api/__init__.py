@@ -2667,6 +2667,52 @@ async def _run_build_all(groups):
     print(f"[BuildAllSku] DONE — total={total} built={built} skipped={skipped} errors={errors}", flush=True)
 
 
+@app.get("/debug-sku-stock")
+async def debug_sku_stock(ggsel_offer_id: int):
+    """Диагностика застрявшего дефолта: для каждого варианта сравнивает КЭШ (что видит
+    stock-sync) с ЖИВЫМ стоком и флагом hidden. Если cached_instock=true, а live_instock=false —
+    это фантом в StoreItem (лента пропустила удаление), из-за него stock-sync не прячет вариант."""
+    from sqlalchemy import select, exists, and_
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant, StoreItem, Offer
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(SkuVariant.starpets_product_id, SkuVariant.label, SkuVariant.hidden,
+                   SkuVariant.price_rub, Offer.price_rub.label("offer_live"))
+            .join(Offer, Offer.starpets_product_id == SkuVariant.starpets_product_id)
+            .where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
+        )).all()
+        if not rows:
+            return {"error": f"нет SkuVariant для ggsel_offer_id={ggsel_offer_id}"}
+
+        out = []
+        async with httpx.AsyncClient(timeout=10) as http:
+            for r in rows:
+                pid = r.starpets_product_id
+                cached = (await db.execute(
+                    select(exists().where(and_(StoreItem.product_id == pid,
+                                               StoreItem.reserve_level == 0)))
+                )).scalar()
+                try:
+                    top = await starpets.get_top_item(http, str(pid))
+                except Exception:
+                    top = None
+                out.append({
+                    "product_id": pid, "label": r.label, "hidden": r.hidden,
+                    "cached_instock": bool(cached), "live_instock": top is not None,
+                    "variant_price_rub": float(r.price_rub or 0),
+                    "offer_price_rub": float(r.offer_live or 0),
+                    "phantom": bool(cached) and top is None,
+                })
+    phantoms = [o for o in out if o["phantom"]]
+    return {"ggsel_offer_id": ggsel_offer_id, "variants": len(out),
+            "phantoms": len(phantoms), "phantom_products": [p["product_id"] for p in phantoms],
+            "detail": out,
+            "note": "phantom=true → кэш считает вариант в стоке, а живьём его нет; stock-sync "
+                    "поэтому не прячет. Чинит floor_relive; форс — /floor-relive-now если есть."}
+
+
 @app.get("/sku-card-stock")
 async def sku_card_stock(ggsel_offer_id: int):
     """Live stock per variant of a SKU card — pick an in-stock variant to test end-to-end.
