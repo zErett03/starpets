@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # карточках дают полный обход за 8 часов — мёртвые варианты висят и цепляют дефолт.
     sku_stock_sync_minutes: int = 5
     sku_stock_sync_max_cards: int = 500
+    # floor_relive живьём перепроверяет показанные варианты и УДАЛЯЕТ фантомы (мёртвые
+    # строки StoreItem, которые лента пропустила). Дефолтные 150/15мин при большой витрине
+    # не поспевают — фантомы висят и цепляют дешёвый дефолт. Троттл — как часто перепроверять
+    # один продукт (был 2ч; 1ч уменьшает окно, где фантом может уйти дешёвым дефолтом).
+    floor_relive_minutes: int = 10
+    floor_relive_max_products: int = 500
+    floor_relive_throttle_sec: int = 3600
     floor_reconcile: bool = False  # sweep offers.price_rub from store_items + live relive (FLOOR_RECONCILE=true)
     starpets_category_id: int = 0
 

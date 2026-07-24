@@ -254,7 +254,7 @@ async def floor_relive_safe():
         return  # live items/top relive of shown variants (refreshes store_items at the source)
     try:
         from app.workers.floor_reconcile import relive_active
-        await relive_active()
+        await relive_active(max_products=settings.floor_relive_max_products)
     except Exception as e:
         print(f"[Scheduler] floor_relive error: {e}", flush=True)
 
@@ -327,7 +327,9 @@ def start_scheduler() -> AsyncIOScheduler:
                       max_instances=1, coalesce=True)
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
-    scheduler.add_job(floor_relive_safe, "interval", minutes=15, id="floor_relive")
+    scheduler.add_job(floor_relive_safe, "interval",
+                      minutes=settings.floor_relive_minutes, id="floor_relive",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(resync_missing_safe, "interval", hours=12, id="resync_missing")
     scheduler.add_job(tg_alerts_safe, "interval", minutes=2, id="tg_alerts")
     scheduler.start()

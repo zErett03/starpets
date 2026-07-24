@@ -117,11 +117,13 @@ async def relive_active(max_products: int = 150, dry_run: bool = False) -> dict:
         now_m = time.monotonic()
         checked = refreshed = repriced = nostock = errors = skipped = 0
         samples = []
+        from app.config import settings as _s
+        _throttle = int(getattr(_s, "floor_relive_throttle_sec", 0) or _RELIVE_THROTTLE)
         async with httpx.AsyncClient(timeout=15) as http:
             for pid in pids:
                 if checked >= max_products:
                     break
-                if now_m - _relive_last.get(pid, 0.0) < _RELIVE_THROTTLE:
+                if now_m - _relive_last.get(pid, 0.0) < _throttle:
                     skipped += 1
                     continue
                 _relive_last[pid] = now_m
