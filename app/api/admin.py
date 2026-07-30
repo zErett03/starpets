@@ -314,6 +314,43 @@ async function confirmForce(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeForce(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='force-overlay') closeForce(); });
+var rebuyOrderId=null;
+async function openRebuy(orderId){
+  rebuyOrderId=orderId;
+  document.getElementById('rebuy-title').textContent='Перевыкуп — заказ #'+orderId;
+  document.getElementById('rebuy-body').innerHTML='Загрузка live-стоимости…';
+  var cb=document.getElementById('rebuy-confirm'); cb.disabled=true; cb.textContent='♻️ Перевыкупить';
+  document.getElementById('rebuy-overlay').style.display='flex';
+  try{
+    var res=await fetch('/rebuy-fresh?order_id='+orderId,{credentials:'same-origin'});
+    var d=await res.json();
+    if(d.error){ document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">'+d.error+'</span>'; return; }
+    var L=d.live||{};
+    if(L.in_stock===false){ document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">Нет в наличии на StarPets — свежий выкуп сейчас невозможен.</span>'; return; }
+    if(L.live_cost_rub==null){ document.getElementById('rebuy-body').innerHTML='<span style="color:#e28015">Не удалось получить live-стоимость (нет product_id). Перевыкуп возможен, но вслепую.</span>'; cb.disabled=false; return; }
+    var profit=Number(L.est_profit_rub);
+    var pl = profit>=0 ? '<b style="color:#3fb950">+'+profit+'₽ прибыль</b>' : '<b style="color:#f85149">−'+(-profit)+'₽ убыток</b>';
+    document.getElementById('rebuy-body').innerHTML=
+      '<div>Себестоимость свежего: <b>'+L.live_cost_rub+'₽</b> <span style="color:#8b949e">(item $'+L.live_price_usd+', курс '+L.fx+')</span></div>'+
+      '<div>Оплата покупателя: <b>'+L.sale_rub+'₽</b></div>'+
+      '<div>Итог: '+pl+'</div>'+
+      '<div style="margin-top:8px;color:'+(L.profitable?'#8b949e':'#e28015')+'">'+(L.profitable?'В пределах порога прибыльности.':'⚠️ Ниже порога — перевыкуп в убыток.')+'</div>';
+    cb.disabled=false;
+  }catch(e){ document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">Ошибка запроса: '+e+'</span>'; }
+}
+function closeRebuy(){ document.getElementById('rebuy-overlay').style.display='none'; }
+async function confirmRebuy(){
+  if(rebuyOrderId==null) return;
+  var b=document.getElementById('rebuy-confirm'); b.disabled=true; b.textContent='Перевыкупаем…';
+  try{
+    var res=await fetch('/rebuy-fresh?order_id='+rebuyOrderId+'&confirm=true&force=true',{credentials:'same-origin'});
+    var d=await res.json();
+    if(d.error){ document.getElementById('rebuy-body').innerHTML+='<div style="color:#f85149;margin-top:6px">'+d.error+'</div>'; b.disabled=false; b.textContent='♻️ Перевыкупить'; return; }
+    closeRebuy(); location.reload();
+  }catch(e){ document.getElementById('rebuy-body').innerHTML+='<div style="color:#f85149;margin-top:6px">Ошибка перевыкупа: '+e+'</div>'; b.disabled=false; b.textContent='♻️ Перевыкупить'; }
+}
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeRebuy(); });
+document.addEventListener('click',function(e){ if(e.target&&e.target.id==='rebuy-overlay') closeRebuy(); });
 // Strip flash_order from the URL on load: the flash is server-rendered once from the
 // post-action redirect; removing the param means a plain refresh won't re-show it,
 // while a new action re-adds the param and shows a fresh flash.
@@ -388,12 +425,9 @@ def _order_row(o) -> str:
           <input type="hidden" name="order_id" value="{o.id}">
           <button type="submit" class="act-btn b-amber">Новый трейд</button>
         </form>
-        <form class="actform" method="post" action="/admin/rebuy-fresh"
-              onsubmit="return confirm('Перевыкуп по заказу {o.id}? Текущий купленный предмет будет БРОШЕН и выкуплен свежий — тратит деньги. Для застрявших трейдов.')">
-          <input type="hidden" name="order_id" value="{o.id}">
-          <button type="submit" class="act-btn" style="background:#8957e5;border-color:#8957e5;color:#fff;flex:0 0 25px;width:25px;padding:0"
-                  title="Перевыкуп: бросить застрявший предмет и выкупить свежий (тратит деньги)">♻️</button>
-        </form>
+        <button type="button" class="act-btn" style="background:#8957e5;border-color:#8957e5;color:#fff;flex:0 0 25px;width:25px;padding:0"
+                onclick="openRebuy({o.id})"
+                title="Перевыкуп: бросить застрявший предмет и выкупить свежий (покажет прибыль/убыток)">♻️</button>
       </div>
       {force_btn}
       <div class="row-pair">
@@ -569,6 +603,19 @@ async def admin_orders(
     <div class="modal-actions">
       <button type="button" class="act-btn" onclick="closeForce()">Отмена</button>
       <button type="button" id="force-confirm" class="act-btn" style="background:#da3633;border-color:#da3633;color:#fff" onclick="confirmForce()" disabled>💥 Выкупить</button>
+    </div>
+  </div>
+</div>
+
+<div id="rebuy-overlay" class="overlay">
+  <div class="modal" style="max-width:460px">
+    <button class="modal-close" onclick="closeRebuy()" title="Закрыть">✕</button>
+    <h2 id="rebuy-title">Перевыкуп</h2>
+    <p class="sub" style="margin-bottom:10px">Бросаем застрявший предмет и выкупаем свежий. Сначала показываю <b>live-стоимость</b> и прибыль/убыток — подтвердите, чтобы перевыкупить.</p>
+    <div id="rebuy-body" style="font-size:13px;line-height:1.7">Загрузка…</div>
+    <div class="modal-actions">
+      <button type="button" class="act-btn" onclick="closeRebuy()">Отмена</button>
+      <button type="button" id="rebuy-confirm" class="act-btn" style="background:#8957e5;border-color:#8957e5;color:#fff" onclick="confirmRebuy()" disabled>♻️ Перевыкупить</button>
     </div>
   </div>
 </div>

@@ -4378,8 +4378,30 @@ async def rebuy_fresh(order_id: int, confirm: bool = False, force: bool = False)
             return {"error": f"order {order.id} is {order.delivery_status.value} — not rebuying"}
         old_pid = order.starpets_purchase_id
         if not confirm:
+            # LIVE-стоимость свежего выкупа: тот же расчёт, что у /force-deliver — свежий
+            # предмет берётся по текущей цене того же product_id. Показываем прибыль/убыток,
+            # чтобы оператор в модалке видел, в плюс перевыкуп или в минус.
+            from app.db.models import Offer as _Offer
+            from app.fx import get_usd_rub, item_cost_ok
+            offer = (await db.execute(
+                select(_Offer).where(_Offer.id == order.offer_id))).scalar_one_or_none()
+            product_id = order.sku_product_id or (offer.starpets_product_id if offer else None)
+            sale_rub = float(order.amount_rub or 0)
+            live = {"product_id": product_id}
+            if product_id:
+                async with httpx.AsyncClient(timeout=10) as http:
+                    top = await starpets.get_top_item(http, str(product_id))
+                if not top:
+                    live["in_stock"] = False
+                else:
+                    price_usd = float(top.get("price_usd") or 0)
+                    fx = await get_usd_rub()
+                    _ok, cost_rub = item_cost_ok(price_usd, fx, sale_rub, settings.max_cost_ratio)
+                    live.update({"in_stock": True, "live_price_usd": price_usd, "fx": fx,
+                                 "live_cost_rub": round(cost_rub, 2), "sale_rub": round(sale_rub, 2),
+                                 "est_profit_rub": round(sale_rub - cost_rub, 2), "profitable": _ok})
             return {"preview": True, "order_id": order.id, "would_abandon_item": old_pid,
-                    "roblox_username": order.roblox_username,
+                    "roblox_username": order.roblox_username, "live": live,
                     "current_status": order.delivery_status.value if order.delivery_status else None,
                     "note": "Абандонит купленный предмет и купит свежий. Повтори с &confirm=true (spends money)."}
         order.starpets_purchase_id = None      # force a fresh buy in deliver_order
