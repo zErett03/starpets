@@ -21,14 +21,33 @@ from app.db.models import DeliveryStatus, Task, TaskKind, TradeEvent
 
 
 async def _order_reached_in_progress(db, order_id) -> bool:
-    """True if any trade for this order ever reached IN_PROGRESS(5) or FINISHED(8),
-    per the persisted audit trail — our proof the in-game exchange actually executed.
-    Used to make the 130 -> 'delivered' inference safe (a 130 without reaching 5 usually
-    means the item is locked in a concurrent/active trade, NOT delivered)."""
+    """True если трейд заказа доходил до IN_PROGRESS(5) или FINISHED(8).
+
+    ВНИМАНИЕ: это НЕ признак доставки — только признак того, что обмен начинался.
+    Используется ровно для одного решения: не отменять предыдущий трейд, который может
+    быть в процессе передачи. Для вывода «доставлено» есть _order_finished (только 8).
+    """
     row = (await db.execute(
         select(TradeEvent.id).where(
             TradeEvent.order_id == order_id,
             TradeEvent.status.in_([5, 8]),
+        ).limit(1)
+    )).first()
+    return row is not None
+
+
+async def _order_finished(db, order_id) -> bool:
+    """True только если трейд дошёл до FINISHED(8) — ЕДИНСТВЕННОЕ доказательство доставки.
+
+    Статус 5 (IN_PROGRESS) означает, что обмен НАЧАЛСЯ, а не что покупатель забрал предмет:
+    трейд может зависнуть на 5 и истечь, а предмет остаться неотданным. Раньше 130 после
+    статуса 5 закрывал заказ как доставленный — на этом ложно финализировались заказы,
+    где покупатель ничего не получил, а оплата высвобождалась. Теперь доставка = только 8.
+    """
+    row = (await db.execute(
+        select(TradeEvent.id).where(
+            TradeEvent.order_id == order_id,
+            TradeEvent.status == 8,
         ).limit(1)
     )).first()
     return row is not None
@@ -144,12 +163,11 @@ async def redeliver_same_item(db, order) -> str:
 
         now = datetime.utcnow()
         if code == 130:
-            # 130 NOT_FOUND = item not in our purchasable inventory. That means DELIVERED
-            # ONLY if the trade actually executed (reached IN_PROGRESS=5). If the exchange
-            # never started, a 130 more likely means the item is locked in a concurrent /
-            # active trade — NOT delivered — so we must NOT auto-close (that would release
-            # the buyer's payment for nothing). Flag for the operator instead.
-            delivered = await _order_reached_in_progress(db, order.id)
+            # 130 NOT_FOUND = предмета нет в нашем доступном инвентаре. Это значит ДОСТАВЛЕНО
+            # ТОЛЬКО при подтверждённом FINISHED(8). Статус 5 доказательством НЕ является:
+            # трейд мог зависнуть на 5 и истечь, предмет остаться у StarPets, а заказ ложно
+            # закрыться с высвобождением оплаты (наблюдали живьём). Всё, что не 8, — оператору.
+            delivered = await _order_finished(db, order.id)
             if delivered:
                 order.delivery_status = DeliveryStatus.done
                 if order.delivered_at is None:
@@ -158,7 +176,7 @@ async def redeliver_same_item(db, order) -> str:
                 order.updated_at = now
                 db.add(Task(kind=TaskKind.MARK_DELIVERED, priority=1, payload={"order_id": order.id}))
                 result = (
-                    "🟢 create_trade 130 NOT_FOUND + обмен исполнялся (статус 5) — "
+                    "🟢 create_trade 130 NOT_FOUND + трейд подтверждён FINISHED(8) — "
                     "ДОСТАВЛЕНО; заказ закрыт, MARK_DELIVERED поставлен"
                 )
             else:
