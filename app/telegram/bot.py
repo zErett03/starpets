@@ -365,12 +365,21 @@ async def handle_update(update: dict) -> None:
             return
         msg = update.get("message") or update.get("edited_message")
         if not msg:
+            # Апдейт без сообщения (сервисные события, пустое тело при ручной проверке) —
+            # это нормально, но раньше он уходил в тишину без следа, и «бот не отвечает»
+            # было не отличить от «команда не дошла».
+            print(f"[tg] update без message: keys={list(update.keys())}", flush=True)
             return
         user_id = (msg.get("from") or {}).get("id")
         chat_id = (msg.get("chat") or {}).get("id")
         text = (msg.get("text") or "").strip()
+        # Диагностика: без неё отказ по авторизации выглядит как полная тишина в логах.
+        print(f"[tg] from={user_id} chat={chat_id} text={text[:60]!r} "
+              f"authorized={is_authorized(user_id)}", flush=True)
         if not is_authorized(user_id):
             # stay silent to strangers (don't reveal the bot's purpose)
+            print(f"[tg] ОТКАЗ: id {user_id} не в TELEGRAM_ADMIN_IDS "
+                  f"(разрешены: {sorted(_admin_ids())})", flush=True)
             return
         if not text.startswith("/"):
             await send_message(chat_id, "Команда не распознана. /help — список команд.")

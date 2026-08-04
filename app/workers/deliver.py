@@ -251,6 +251,16 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
             order.exec_price_usd = exec_price
             order.max_price_usd = price_usd
             order.updated_at = datetime.utcnow()
+            # Журнал: exec_price_usd у заказа один и перезаписывается при каждом
+            # перевыкупе, поэтому фиксируем КАЖДУЮ покупку отдельной строкой — иначе
+            # затраты по заказам с перевыкупами не восстановить.
+            from app.db.models import PurchaseLog
+            db.add(PurchaseLog(
+                order_id=order.id, kind="buy",
+                starpets_purchase_id=str(purchased_item_id),
+                price_usd=exec_price, source="worker",
+                note="выкуп предмета",
+            ))
             await db.commit()
 
         # 3. Create withdrawal trade

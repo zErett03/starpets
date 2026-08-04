@@ -3950,6 +3950,18 @@ async def force_deliver(order_id: int, confirm: bool = False):
         from app.deadline import item_expired
         if item_expired(order):
             # item refunded by StarPets (>1h) — abandon the dead purchase so deliver buys a FRESH one
+            # Журнал: протухший предмет StarPets забирает себе и возвращает стоимость. Пишем
+            # ДО обнуления полей — иначе цена этой покупки исчезнет, и force-выкуп окажется
+            # единственным путём, где перевыкуп не виден в отчёте.
+            if order.starpets_purchase_id:
+                from app.db.models import PurchaseLog
+                db.add(PurchaseLog(
+                    order_id=order.id, kind="refund",
+                    starpets_purchase_id=str(order.starpets_purchase_id),
+                    trade_id=(order.starpets_custom_id or None),
+                    price_usd=order.exec_price_usd, source="worker",
+                    note="предмет протух >1ч, брошен при force-выкупе — возврат от StarPets",
+                ))
             order.starpets_purchase_id = None
             order.starpets_custom_id = None
             order.bot_name = None
@@ -4238,7 +4250,14 @@ async def set_telegram_webhook(base_url: str = ""):
         return {"error": "TELEGRAM_BOT_TOKEN not set"}
     if not settings.telegram_webhook_secret:
         return {"error": "TELEGRAM_WEBHOOK_SECRET not set"}
-    base = (base_url or settings.public_url).rstrip("/")
+    # base_url — ТОЛЬКО схема и домен. Если передали полный адрес вебхука (легко скопировать
+    # из getWebhookInfo), путь отрезаем: иначе он склеится сам с собой и получится
+    # …/telegram/webhook/<secret>/telegram/webhook/<secret> — такого маршрута нет, и бот
+    # молча перестаёт отвечать.
+    from urllib.parse import urlsplit as _urlsplit
+    _raw = (base_url or settings.public_url).strip()
+    _p = _urlsplit(_raw if "//" in _raw else f"https://{_raw}")
+    base = f"{_p.scheme or 'https'}://{_p.netloc}".rstrip("/")
     url = f"{base}/telegram/webhook/{settings.telegram_webhook_secret}"
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(
@@ -4404,6 +4423,17 @@ async def rebuy_fresh(order_id: int, confirm: bool = False, force: bool = False)
                     "roblox_username": order.roblox_username, "live": live,
                     "current_status": order.delivery_status.value if order.delivery_status else None,
                     "note": "Абандонит купленный предмет и купит свежий. Повтори с &confirm=true (spends money)."}
+        # Журнал: брошенный предмет — потраченные деньги, которые StarPets вернёт на баланс.
+        # Пишем ДО обнуления полей, иначе цена покупки будет потеряна навсегда.
+        if old_pid:
+            from app.db.models import PurchaseLog
+            db.add(PurchaseLog(
+                order_id=order.id, kind="abandon",
+                starpets_purchase_id=str(old_pid),
+                trade_id=(order.starpets_custom_id or None),
+                price_usd=order.exec_price_usd, source="worker",
+                note="предмет брошен при перевыкупе (ожидается возврат от StarPets)",
+            ))
         order.starpets_purchase_id = None      # force a fresh buy in deliver_order
         order.starpets_custom_id = None
         order.bot_name = None

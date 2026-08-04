@@ -211,6 +211,36 @@ class TradeEvent(Base):
     recorded_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class PurchaseLog(Base):
+    """Журнал денежных событий по заказу: каждый выкуп, брошенный предмет и возврат.
+
+    Зачем отдельная таблица: у заказа есть ровно одно поле цены (exec_price_usd), и
+    перевыкуп его ПЕРЕЗАПИСЫВАЕТ. Из-за этого бухгалтерия видела последнюю покупку, а не
+    все — при двух-трёх перевыкупах реальные затраты выше показанных, и понять это по базе
+    было нельзя. Здесь же остаётся полная история: сколько раз покупали, на какую сумму,
+    что бросили и что StarPets вернул.
+
+    kind:
+      buy     — предмет куплен (деньги ушли);
+      abandon — предмет брошен (перевыкуп/форс): StarPets заберёт его себе и вернёт деньги;
+      refund  — возврат подтверждён/ожидается (предмет не дошёл за час либо был брошен).
+
+    price_usd хранится в долларах, как и exec_price_usd: курс на дату применяет отчёт.
+    """
+    __tablename__ = "purchase_log"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)          # buy / abandon / refund
+    starpets_purchase_id = Column(String, nullable=True)
+    trade_id = Column(String, nullable=True)
+    price_usd = Column(Numeric(10, 3), nullable=True)
+    note = Column(Text, nullable=True)
+    # Источник записи: worker (живое событие) или import (восстановление из логов).
+    source = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+
+
 class StoreItem(Base):
     """Mirror of StarPets store items for OUR products, kept live via the
     /ex-buyers/updates event feed. The floor of a product = the minimum price_usd

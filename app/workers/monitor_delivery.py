@@ -214,6 +214,17 @@ async def monitor_all_deliveries() -> None:
                 "предмет протух >1ч: StarPets вернул за него деньги — доставка этим предметом "
                 "невозможна. Перекупить свежий (Force) или вернуть деньги покупателю."
             )
+            # Журнал: через час StarPets забирает невыданный предмет и возвращает деньги
+            # на баланс. Фиксируем это как возврат, иначе в отчёте покупка выглядит
+            # безвозвратной тратой.
+            from app.db.models import PurchaseLog as _PLog
+            db.add(_PLog(
+                order_id=order.id, kind="refund",
+                starpets_purchase_id=(order.starpets_purchase_id or None),
+                trade_id=(order.starpets_custom_id or None),
+                price_usd=order.exec_price_usd, source="worker",
+                note="предмет не дошёл за час — StarPets вернул стоимость на баланс",
+            ))
             order.updated_at = now
             print(f"[MonitorDelivery] order_id={order.id} item lifetime >1h expired "
                   f"→ needs_attention (StarPets refund)", flush=True)

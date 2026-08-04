@@ -403,7 +403,7 @@ document.addEventListener('click',function(e){ if(e.target&&e.target.id==='rebuy
 """
 
 
-def _order_row(o) -> str:
+def _order_row(o, money: dict | None = None) -> str:
     cur = o.delivery_status.value if o.delivery_status else ""
     # Текущий статус показываем всегда, даже если он не из ручного списка (иначе селект
     # молча «переставил» бы заказ на первый пункт при случайном сохранении).
@@ -432,7 +432,25 @@ def _order_row(o) -> str:
         f'<button type="submit" class="act-btn" style="width:30px" '
         f'title="{_nick_hint}">✓</button></form>'
     )
-    amount = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
+    # Деньги по заказу: сколько раз покупали предмет, на какую сумму и сколько вернётся
+    # (брошенные и протухшие предметы StarPets забирает себе и возвращает стоимость).
+    # Перевыкупы раньше были не видны вообще — цена предыдущей покупки затиралась.
+    _m = money or {}
+    _buys = int(_m.get("buys") or 0)
+    _spent = float(_m.get("spent") or 0.0)
+    _back = float(_m.get("back") or 0.0)
+    if _buys > 1 or _back > 0:
+        _net = _spent - _back
+        _rebuy_badge = (
+            f'<div style="font-size:11px;margin-top:3px;color:#8b949e" '
+            f'title="Куплено раз: {_buys}; потрачено ${_spent:.2f}; вернётся ${_back:.2f}">'
+            f'<span style="color:#e3b341">♻ {_buys}×</span> '
+            f'${_spent:.2f} − ${_back:.2f} = <b style="color:#c9d1d9">${_net:.2f}</b></div>'
+        )
+    else:
+        _rebuy_badge = ""
+
+    amount = (f"{o.amount_rub}₽" if o.amount_rub is not None else "—") + _rebuy_badge
     # Номер ggsel — ссылка в кабинет продавца, если задан шаблон (GGSEL_ORDER_URL_TEMPLATE).
     _gid = _esc(str(o.ggsel_order_id))
     _tpl = (settings.ggsel_order_url_template or "").strip()
@@ -568,6 +586,31 @@ async def admin_orders(
         q = q.limit(page_size).offset(offset)
         orders = (await db.execute(q)).scalars().all()
 
+        # Журнал покупок по заказам страницы: сколько раз покупали, на сколько и что
+        # вернулось. Одним запросом на всю страницу, а не по строке на заказ.
+        from app.db.models import PurchaseLog
+        money = {}
+        if orders:
+            log_rows = (await db.execute(
+                select(PurchaseLog).where(PurchaseLog.order_id.in_([o.id for o in orders]))
+            )).scalars().all()
+            for r in log_rows:
+                m = money.setdefault(r.order_id,
+                                     {"buys": 0, "spent": 0.0, "_back": {}})
+                price = float(r.price_usd or 0)
+                if r.kind == "buy":
+                    m["buys"] += 1
+                    m["spent"] += price
+                elif r.kind in ("abandon", "refund"):
+                    # Один и тот же предмет может дать и abandon (бросили), и refund
+                    # (StarPets вернул) — это ОДНА возвращаемая сумма. Поэтому копим по
+                    # предмету, а не складываем события: иначе возврат задвоится. Разные
+                    # брошенные предметы при этом суммируются корректно.
+                    key = r.starpets_purchase_id or f"#{r.id}"
+                    m["_back"][key] = max(m["_back"].get(key, 0.0), price)
+            for m in money.values():
+                m["back"] = round(sum(m.pop("_back").values()), 3)
+
         if flash_order is not None:
             fo = (await db.execute(select(Order).where(Order.id == flash_order))).scalar_one_or_none()
             if fo and fo.last_redeliver_result:
@@ -612,7 +655,7 @@ async def admin_orders(
         f'</div>'
     )
 
-    rows_html = "".join(_order_row(o) for o in orders) or (
+    rows_html = "".join(_order_row(o, money.get(o.id)) for o in orders) or (
         '<tr><td colspan="13" style="padding:24px;text-align:center;color:#8b949e">Заказов нет</td></tr>'
     )
 
@@ -624,6 +667,7 @@ async def admin_orders(
 <header>
   <h1>Заказы StarPets — Adopt Me
     <a class="xlink" href="{settings.sibling_admin_url}" title="Открыть админку MM2">↗ MM2</a>
+    <a class="xlink" href="/admin/import-purchase-log" title="Восстановить историю перевыкупов из логов">⟲ импорт журнала</a>
   </h1>
   <div class="sub">Операторская панель · всего {total_all} · обновлено {datetime.utcnow().strftime("%H:%M:%S")} UTC</div>
 </header>
@@ -782,6 +826,166 @@ async def admin_mark_delivered(
     return _back(request)
 
 
+@router.post("/admin/import-purchase-log")
+async def admin_import_purchase_log(
+    _user: str = Depends(require_admin),
+    log_text: str = Form(""),
+    confirm: bool = Form("") ,
+):
+    """Восстанавливает журнал покупок из логов Railway.
+
+    Историю перевыкупов из базы не поднять: цена предыдущей покупки затиралась при каждом
+    новом выкупе. Но в логах она есть — воркер печатает каждую покупку и каждый брошенный
+    предмет. Разбираем эти строки и заводим записи задним числом.
+
+    Понимаем два формата:
+      [Deliver] bought purchased_item_id=<id> exec_price=<usd>   → buy
+      [admin] order_id=<id> rebuy-fresh: abandoned=<item_id>     → abandon
+
+    Первая строка не содержит order_id, поэтому заказ ищем по purchased_item_id: он
+    сохранён в orders.starpets_purchase_id, а для прошлых покупок — в уже импортированных
+    записях журнала. Что не сопоставилось — возвращаем списком, без выдумывания.
+
+    Идемпотентно: повторный импорт того же лога не задваивает записи (проверяем пару
+    kind+purchase_id). Без confirm — только разбор, без записи.
+    """
+    import re
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, PurchaseLog
+
+    buys = re.findall(r"bought purchased_item_id=(\S+?)\s+exec_price=([\d.]+)", log_text or "")
+    abandons = re.findall(r"order_id=(\d+)\s+rebuy-fresh:\s*abandoned=(\S+)", log_text or "")
+    # Прямая связь «заказ ↔ предмет». Без неё покупки, вытесненные перевыкупом (особенно
+    # через force — он не печатает строку про брошенный предмет), не привязать к заказу:
+    # в orders остаётся только последняя покупка, а предыдущие item_id там уже затёрты.
+    links = re.findall(r"create_trade order_id=(\d+)\s+purchased_item_id=(\S+)", log_text or "")
+
+    parsed = {"buys": len(buys), "abandons": len(abandons), "order_item_links": len(links)}
+    created, skipped, unmatched = 0, 0, []
+
+    async with AsyncSessionLocal() as db:
+        # item_id -> order_id: сначала по текущим заказам, затем по уже собранному журналу.
+        idx: dict[str, int] = {}
+        for oid, pid in (await db.execute(
+            select(Order.id, Order.starpets_purchase_id)
+            .where(Order.starpets_purchase_id.isnot(None))
+        )).all():
+            idx[str(pid)] = oid
+        for oid, pid in (await db.execute(
+            select(PurchaseLog.order_id, PurchaseLog.starpets_purchase_id)
+            .where(PurchaseLog.starpets_purchase_id.isnot(None))
+        )).all():
+            idx.setdefault(str(pid), oid)
+        # Связки из лога — самый надёжный источник: они есть на КАЖДУЮ выдачу, включая те,
+        # что потом были вытеснены перевыкупом или force-выкупом.
+        for oid, item in links:
+            idx[str(item)] = int(oid)
+        # Брошенные предметы дают прямую связь item -> order, добавляем её в индекс.
+        for oid, item in abandons:
+            idx.setdefault(str(item), int(oid))
+
+        existing = {
+            (k, str(p)) for k, p in (await db.execute(
+                select(PurchaseLog.kind, PurchaseLog.starpets_purchase_id)
+            )).all()
+        }
+
+        def _add(order_id: int, kind: str, item: str, price=None, note=""):
+            nonlocal created, skipped
+            if (kind, str(item)) in existing:
+                skipped += 1
+                return
+            db.add(PurchaseLog(order_id=order_id, kind=kind,
+                               starpets_purchase_id=str(item), price_usd=price,
+                               source="import", note=note))
+            existing.add((kind, str(item)))
+            created += 1
+
+        for item, price in buys:
+            oid = idx.get(str(item))
+            if oid is None:
+                unmatched.append({"kind": "buy", "item": item, "price_usd": price})
+                continue
+            _add(oid, "buy", item, price, "восстановлено из лога")
+
+        for oid, item in abandons:
+            _add(int(oid), "abandon", item, None,
+                 "восстановлено из лога: предмет брошен при перевыкупе")
+
+        # Вытесненные покупки. Если по заказу куплено несколько предметов, то все, кроме
+        # ПОСЛЕДНЕГО, были заменены перевыкупом — неважно, через ♻ или через force. Такой
+        # предмет StarPets забирает себе и возвращает стоимость, поэтому помечаем возврат.
+        # Именно так учитываются force-перевыкупы: своей строки в логе они не печатают,
+        # но лишняя покупка по тому же заказу их выдаёт.
+        by_order: dict[int, list[str]] = {}
+        price_of: dict[str, str] = {}
+        for item, price in buys:
+            price_of[str(item)] = price
+            oid = idx.get(str(item))
+            if oid is not None:
+                by_order.setdefault(oid, []).append(str(item))
+        superseded = 0
+        for oid, items in by_order.items():
+            if len(items) < 2:
+                continue
+            for item in items[:-1]:          # всё, кроме последней покупки заказа
+                before = created
+                # Сумма возврата = цена той самой покупки, иначе возврат посчитается нулём
+                # и «потрачено» в админке будет выглядеть больше реального.
+                _add(oid, "refund", item, price_of.get(item),
+                     "восстановлено из лога: покупка заменена перевыкупом — "
+                     "StarPets вернул стоимость")
+                superseded += created - before
+        parsed["superseded_refunds"] = superseded
+
+        if confirm:
+            await db.commit()
+        else:
+            await db.rollback()
+
+    return JSONResponse({
+        "parsed": parsed,
+        ("created" if confirm else "would_create"): created,
+        "skipped_duplicates": skipped, "unmatched": unmatched[:50],
+        "note": ("Журнал пополнен. Суммы появятся в админке." if confirm else
+                 "Это разбор без записи. Отметь «сохранить», чтобы записать."),
+    })
+
+
+@router.get("/admin/import-purchase-log", response_class=HTMLResponse)
+async def admin_import_purchase_log_page(_user: str = Depends(require_admin)):
+    """Страница для разового восстановления журнала покупок из логов Railway."""
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<title>Импорт журнала покупок</title><style>{_CSS}
+.wrap2{{padding:18px 40px;max-width:960px}}
+textarea{{width:100%;height:340px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;
+  border-radius:8px;padding:10px;font:12px/1.4 Consolas,monospace}}
+label{{display:block;margin:10px 0;font-size:13px}}
+.btn{{background:#1f6feb;border:1px solid #1f6feb;color:#fff;border-radius:6px;
+  padding:7px 16px;font-size:13px;cursor:pointer}}
+p.hint{{color:#8b949e;font-size:12px;line-height:1.6}}
+</style></head><body>
+<header><h1>Импорт журнала покупок
+  <a class="xlink" href="/admin">← к заказам</a></h1>
+  <div class="sub">Восстановление истории перевыкупов из логов Railway</div>
+</header>
+<div class="wrap2">
+  <p class="hint">Вставьте логи сервиса. Разбираются строки
+  <code>[Deliver] bought purchased_item_id=… exec_price=…</code> (покупки) и
+  <code>[admin] order_id=… rebuy-fresh: abandoned=…</code> (брошенные предметы).
+  Повторный импорт того же лога записи не задваивает. Сначала запустите без галочки —
+  увидите, что будет создано.</p>
+  <form method="post" action="/admin/import-purchase-log">
+    <textarea name="log_text" placeholder="Вставьте сюда вывод логов…"></textarea>
+    <label><input type="checkbox" name="confirm" value="1"> сохранить в базу (без галочки — только разбор)</label>
+    <button class="btn" type="submit">Разобрать</button>
+  </form>
+</div>
+</body></html>""")
+
+
 @router.post("/admin/edit-username")
 async def admin_edit_username(
     request: Request,
@@ -846,6 +1050,18 @@ async def admin_rebuy_fresh(
             print(f"[admin] order_id={order_id} rebuy-fresh skipped — {order.delivery_status.value}", flush=True)
             return _flash_redirect(request, order_id)
         old_pid = order.starpets_purchase_id
+        # Журнал: брошенный предмет — деньги за него уже потрачены, StarPets заберёт его
+        # себе и вернёт стоимость на баланс. Без этой записи цена старой покупки просто
+        # исчезает (exec_price_usd обнуляется ниже), и в отчёте её не видно.
+        if old_pid:
+            from app.db.models import PurchaseLog
+            db.add(PurchaseLog(
+                order_id=order.id, kind="abandon",
+                starpets_purchase_id=str(old_pid),
+                trade_id=(order.starpets_custom_id or None),
+                price_usd=order.exec_price_usd, source="worker",
+                note="предмет брошен при перевыкупе (ожидается возврат от StarPets)",
+            ))
         order.starpets_purchase_id = None
         order.starpets_custom_id = None
         order.bot_name = None
