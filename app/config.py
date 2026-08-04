@@ -54,6 +54,14 @@ class Settings(BaseSettings):
 
     public_url: str = "https://starpets-production.up.railway.app"
     delivery_base_url: str = ""            # buyer-facing delivery page domain (RU VPS). Webhooks stay on public_url; only /delivery uses this. Empty -> public_url.
+    # Соседний сервис на том же движке: ссылка-переход в шапке админки. Оператор ведёт
+    # обе игры и постоянно прыгает между ними — без ссылки приходится править домен руками.
+    sibling_admin_url: str = "https://mm2.bebrshop.pro/admin"
+    # Шаблон ссылки с номера заказа ggsel в кабинет продавца. {order} подставляется.
+    # Ведём на страницу заказа, а не в чат: у чата свой chatId, который ggsel не отдаёт
+    # ни в вебхуке, ни в Seller API. Со страницы заказа диалог открывается одной кнопкой.
+    # Пустое значение отключает ссылку (номер останется текстом).
+    ggsel_order_url_template: str = "https://seller.ggsel.com/orders/{order}"
 
     # Operator admin panel (Basic Auth). Set ADMIN_PASSWORD in env to enable.
     # If admin_password is empty the panel is fail-closed (denies every request).

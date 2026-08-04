@@ -8,7 +8,7 @@ import math
 import secrets
 from datetime import datetime
 from html import escape as _esc
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, quote as _url_quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Form, Request, Query
@@ -49,6 +49,20 @@ _STATUS_COLORS = {
     "needs_attention": "#db61a2",
     "closed": "#ffffff",
 }
+
+# Подписи статусов для оператора. В БД значение остаётся `closed` (его знают учёт, отчёты
+# и старые записи), а в панели оно называется тем, чем является по смыслу, — REFUND:
+# этим статусом закрывают заказ, по которому вернули деньги.
+_STATUS_LABELS = {"closed": "REFUND"}
+
+# Статусы, которые оператор ставит руками. Из семи возможных в работе нужны три: заказ
+# либо выдан (done), либо возвращён (closed/REFUND), либо провален (failed). Остальные
+# выставляет сам сервис по ходу доставки, и ручной выбор их только путал.
+_MANUAL_STATUSES = ("closed", "done", "failed")
+
+
+def _status_label(status: str) -> str:
+    return _STATUS_LABELS.get(status, status)
 
 _TRADE_STATUS_LABEL = {
     0: "CREATED", 1: "DELAYED_START", 2: "PENDING_FRIEND", 3: "PENDING_START",
@@ -106,7 +120,7 @@ def _badge(status: str) -> str:
     color = _STATUS_COLORS.get(status, "#8b949e")
     return (
         f'<span class="badge" style="background:{color}22;color:{color};'
-        f'border:1px solid {color}55">{_esc(status)}</span>'
+        f'border:1px solid {color}55">{_esc(_status_label(status))}</span>'
     )
 
 
@@ -155,6 +169,16 @@ h1{margin:0;font-size:16px;font-weight:600}
 .flash{margin:12px 40px 0;padding:10px 14px;border-radius:8px;background:#1f6feb22;border:1px solid #1f6feb66;color:#c9d1d9;font-size:13px}
 .flash .x{float:right;color:#8b949e;cursor:pointer}
 .toolbar{padding:12px 40px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #30363d}
+.search{display:flex;gap:6px;align-items:center}
+.search input[type=text]{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;
+  padding:5px 10px;font-size:12px;min-width:260px}
+.search input[type=text]:focus{outline:none;border-color:#1f6feb}
+.search button{background:#1f6feb;border:1px solid #1f6feb;color:#fff;border-radius:6px;
+  padding:5px 12px;font-size:12px;cursor:pointer}
+.search .clear{color:#8b949e;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:12px}
+.xlink{margin-left:12px;font-size:12px;font-weight:500;color:#58a6ff;border:1px solid #30363d;
+  border-radius:6px;padding:3px 9px;vertical-align:middle}
+.xlink:hover{border-color:#58a6ff;background:#1f6feb22}
 .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .filters a{padding:4px 10px;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12px}
 .filters a.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
@@ -288,6 +312,11 @@ async function openForce(orderId){
   try{
     var res=await fetch('/force-deliver?order_id='+orderId,{credentials:'same-origin'});
     var d=await res.json();
+    // Та же защита от гонки, что и в модалке перевыкупа: показывать цифры чужого заказа
+    // нельзя — по ним принимают решение тратить деньги.
+    if(forceOrderId!==orderId) return;
+    if(d.order_id!=null && Number(d.order_id)!==Number(orderId)){
+      document.getElementById('force-body').innerHTML='<span style="color:#f85149">Ответ не совпал с заказом #'+orderId+' (пришёл #'+d.order_id+'). Обнови страницу.</span>'; return; }
     if(d.error){ document.getElementById('force-body').innerHTML='<span style="color:#f85149">'+d.error+'</span>'; return; }
     var L=d.live||{};
     if(L.in_stock===false){ document.getElementById('force-body').innerHTML='<span style="color:#f85149">Нет в наличии на StarPets — выкупить сейчас нельзя.</span>'; return; }
@@ -324,6 +353,14 @@ async function openRebuy(orderId){
   try{
     var res=await fetch('/rebuy-fresh?order_id='+orderId,{credentials:'same-origin'});
     var d=await res.json();
+    // Пока грузился ответ, оператор мог открыть другой заказ — тогда эти цифры уже не
+    // про то окно, что перед ним. Молча выходим: иначе в модалке показывались суммы
+    // (оплата, цена предмета) от предыдущего заказа.
+    if(rebuyOrderId!==orderId) return;
+    // И сверяем, что сервер вернул ИМЕННО запрошенный заказ: /rebuy-fresh ищет и по
+    // внутреннему id, и по ggsel_order_id, так что подмена в принципе возможна.
+    if(d.order_id!=null && Number(d.order_id)!==Number(orderId)){
+      document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">Ответ не совпал с заказом #'+orderId+' (пришёл #'+d.order_id+'). Обнови страницу.</span>'; return; }
     if(d.error){ document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">'+d.error+'</span>'; return; }
     var L=d.live||{};
     if(L.in_stock===false){ document.getElementById('rebuy-body').innerHTML='<span style="color:#f85149">Нет в наличии на StarPets — свежий выкуп сейчас невозможен.</span>'; return; }
@@ -367,14 +404,43 @@ document.addEventListener('click',function(e){ if(e.target&&e.target.id==='rebuy
 
 
 def _order_row(o) -> str:
-    statuses = list(_STATUS_COLORS.keys())
     cur = o.delivery_status.value if o.delivery_status else ""
+    # Текущий статус показываем всегда, даже если он не из ручного списка (иначе селект
+    # молча «переставил» бы заказ на первый пункт при случайном сохранении).
+    statuses = list(_MANUAL_STATUSES)
+    if cur and cur not in statuses:
+        statuses = [cur] + statuses
     opts = "".join(
-        f'<option value="{s}"{" selected" if s == cur else ""}>{s}</option>'
+        f'<option value="{s}"{" selected" if s == cur else ""}>{_status_label(s).upper()}</option>'
         for s in statuses
     )
     uname = _esc(o.roblox_username or "")
+    # Правка ника В БАЗЕ имеет смысл, только пока трейд не создан: существующий трейд она
+    # не переназначает — он уйдёт на старый ник. Как только трейд есть, единственный
+    # честный путь — «Новый логин» (отменяет трейд, ставит ник, пересоздаёт). Поэтому поле
+    # показываем лишь до создания трейда, а дальше — только ник текстом.
+    if (o.starpets_custom_id or "").strip():
+        nick_cell = f'<div style="font-size:12px">{uname or "—"}</div>'
+    else:
+        nick_cell = (
+            f'<form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">'
+            f'<input type="hidden" name="order_id" value="{o.id}">'
+            f'<input type="text" name="username" id="nick-{o.id}" value="{uname}" placeholder="ник" '
+            f'style="width:110px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;'
+            f'border-radius:6px;padding:4px 6px;font-size:12px">'
+            f'<button type="submit" class="act-btn" style="width:30px" '
+            f'title="Сохранить ник (до создания трейда)">✓</button></form>'
+        )
     amount = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
+    # Номер ggsel — ссылка в кабинет продавца, если задан шаблон (GGSEL_ORDER_URL_TEMPLATE).
+    _gid = _esc(str(o.ggsel_order_id))
+    _tpl = (settings.ggsel_order_url_template or "").strip()
+    if _tpl and o.ggsel_order_id:
+        ggsel_cell = (f'<a href="{_tpl.replace("{order}", str(o.ggsel_order_id))}" target="_blank" '
+                      f'rel="noopener" style="color:#58a6ff;text-decoration:none" '
+                      f'title="Открыть заказ в кабинете ggsel">{_gid} ↗</a>')
+    else:
+        ggsel_cell = _gid
     # Имя бота — ссылка на его Roblox-профиль. username_redirect_url чисто строковая
     # (Roblox 302-редиректит на числовой профиль), поэтому не тормозит рендер строк.
     if o.bot_name:
@@ -392,17 +458,12 @@ def _order_row(o) -> str:
 
     return f"""<tr>
   <td>{o.id}</td>
-  <td>{_esc(str(o.ggsel_order_id))}</td>
+  <td>{ggsel_cell}</td>
   <td>{_esc(o.item_name or "—")}</td>
   <td>{amount}</td>
   <td>{_fmt_dt(o.created_at)}</td>
   <td>
-    <form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">
-      <input type="hidden" name="order_id" value="{o.id}">
-      <input type="text" name="username" id="nick-{o.id}" value="{uname}" placeholder="ник"
-             style="width:110px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 6px;font-size:12px">
-      <button type="submit" class="act-btn" style="width:30px" title="Сохранить ник">✓</button>
-    </form>
+    {nick_cell}
     <button type="button" class="act-btn b-amber reissue-btn" onclick="openReissue({o.id})" title="Отменить текущий трейд и пересоздать на новый логин">Новый логин</button>
     <div id="nickerr-{o.id}" class="nick-err"></div>
   </td>
@@ -450,8 +511,9 @@ async def admin_orders(
     page: int = Query(1),
     page_size: int = Query(DEFAULT_PAGE_SIZE),
     flash_order: int = Query(None),
+    q: str = Query(None),
 ):
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, or_
     from app.db import AsyncSessionLocal
     from app.db.models import Order, DeliveryStatus
 
@@ -471,6 +533,24 @@ async def admin_orders(
         base_where = []
         if status and status in _STATUS_COLORS:
             base_where.append(Order.delivery_status == DeliveryStatus(status))
+
+        # Универсальный поиск: одно поле вместо пяти. Оператор ищет по тому, что у него
+        # под рукой — ник из переписки, номер заказа с ggsel, id трейда из лога. Числовой
+        # запрос проверяем и как внутренний id, и как ggsel-номер; текстовый — по нику,
+        # боту, трейду и коду выдачи (частичное совпадение, регистр не важен).
+        needle = (q or "").strip()
+        if needle:
+            like = f"%{needle}%"
+            conds = [
+                Order.roblox_username.ilike(like),
+                Order.bot_name.ilike(like),
+                Order.starpets_custom_id.ilike(like),
+                Order.uniquecode.ilike(like),
+            ]
+            if needle.isdigit():
+                conds.append(Order.id == int(needle))
+                conds.append(Order.ggsel_order_id == int(needle))
+            base_where.append(or_(*conds))
 
         cnt_q = select(func.count()).select_from(Order)
         for w in base_where:
@@ -495,19 +575,25 @@ async def admin_orders(
                     f'Заказ #{fo.id}: {_esc(fo.last_redeliver_result)}</div>'
                 )
 
+    # Поиск не должен теряться при переключении фильтра/страницы — иначе оператор
+    # каждый раз набирает ник заново.
+    q_qs = f"&q={_url_quote(needle)}" if needle else ""
+
     def _f(label, value, n):
         active = " active" if (value or None) == (status or None) else ""
-        href = f"/admin?page_size={page_size}" if value is None else f"/admin?status={value}&page_size={page_size}"
+        href = (f"/admin?page_size={page_size}{q_qs}" if value is None
+                else f"/admin?status={value}&page_size={page_size}{q_qs}")
         cnt = f' <span class="count">{n}</span>' if n is not None else ""
         return f'<a class="filter{active}" href="{href}">{label}{cnt}</a>'
 
     filters = [_f("Все", None, total_all)]
     for s in _STATUS_COLORS:
-        filters.append(_f(s, s, counts.get(s, 0)))
+        filters.append(_f(_status_label(s), s, counts.get(s, 0)))
     filters_html = "".join(filters)
 
     def _page_link(p, label, disabled):
-        qs = f"page={p}&page_size={page_size}" + (f"&status={status}" if status else "")
+        qs = (f"page={p}&page_size={page_size}"
+              + (f"&status={status}" if status else "") + q_qs)
         cls = "disabled" if disabled else ""
         return f'<a class="{cls}" href="/admin?{qs}">{label}</a>'
 
@@ -535,11 +621,20 @@ async def admin_orders(
 <title>StarPets — заказы</title><style>{_CSS}</style></head>
 <body>
 <header>
-  <h1>Заказы StarPets</h1>
+  <h1>Заказы StarPets — Adopt Me
+    <a class="xlink" href="{settings.sibling_admin_url}" title="Открыть админку MM2">↗ MM2</a>
+  </h1>
   <div class="sub">Операторская панель · всего {total_all} · обновлено {datetime.utcnow().strftime("%H:%M:%S")} UTC</div>
 </header>
 {flash_html}
 <div class="toolbar">
+  <form class="search" method="get" action="/admin">
+    <input type="hidden" name="page_size" value="{page_size}">
+    {f'<input type="hidden" name="status" value="{_esc(status)}">' if status else ''}
+    <input type="text" name="q" value="{_esc(needle)}" placeholder="Поиск: ник, № заказа, ggsel, бот, трейд…" autocomplete="off">
+    <button type="submit">Найти</button>
+    {f'<a class="clear" href="/admin?page_size={page_size}" title="Сбросить поиск">✕</a>' if needle else ''}
+  </form>
   <div class="filters">{filters_html}</div>
   {pager_html}
 </div>
