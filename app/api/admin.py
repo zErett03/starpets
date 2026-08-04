@@ -415,22 +415,23 @@ def _order_row(o) -> str:
         for s in statuses
     )
     uname = _esc(o.roblox_username or "")
-    # Правка ника В БАЗЕ имеет смысл, только пока трейд не создан: существующий трейд она
-    # не переназначает — он уйдёт на старый ник. Как только трейд есть, единственный
-    # честный путь — «Новый логин» (отменяет трейд, ставит ник, пересоздаёт). Поэтому поле
-    # показываем лишь до создания трейда, а дальше — только ник текстом.
-    if (o.starpets_custom_id or "").strip():
-        nick_cell = f'<div style="font-size:12px">{uname or "—"}</div>'
-    else:
-        nick_cell = (
-            f'<form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">'
-            f'<input type="hidden" name="order_id" value="{o.id}">'
-            f'<input type="text" name="username" id="nick-{o.id}" value="{uname}" placeholder="ник" '
-            f'style="width:110px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;'
-            f'border-radius:6px;padding:4px 6px;font-size:12px">'
-            f'<button type="submit" class="act-btn" style="width:30px" '
-            f'title="Сохранить ник (до создания трейда)">✓</button></form>'
-        )
+    # Правка ника МЕНЯЕТ ТОЛЬКО НАШУ БАЗУ: уже созданный трейд она не переназначает,
+    # он уйдёт на старый ник — для этого есть «Новый логин» (отменяет трейд, ставит ник,
+    # пересоздаёт). Поле оставляем активным всегда (нужно править опечатки до выдачи и
+    # хранить верный ник для истории), но подсказка честно говорит, что произойдёт.
+    _has_trade = bool((o.starpets_custom_id or "").strip())
+    _nick_hint = ("Сохранить ник в базе. Трейд уже создан — он уйдёт на СТАРЫЙ ник, "
+                  "для смены получателя нажми «Новый логин»") if _has_trade else \
+                 "Сохранить ник (трейда ещё нет — выдача пойдёт на него)"
+    nick_cell = (
+        f'<form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">'
+        f'<input type="hidden" name="order_id" value="{o.id}">'
+        f'<input type="text" name="username" id="nick-{o.id}" value="{uname}" placeholder="ник" '
+        f'style="width:110px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;'
+        f'border-radius:6px;padding:4px 6px;font-size:12px">'
+        f'<button type="submit" class="act-btn" style="width:30px" '
+        f'title="{_nick_hint}">✓</button></form>'
+    )
     amount = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
     # Номер ggsel — ссылка в кабинет продавца, если задан шаблон (GGSEL_ORDER_URL_TEMPLATE).
     _gid = _esc(str(o.ggsel_order_id))
