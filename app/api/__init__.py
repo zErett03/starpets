@@ -1318,7 +1318,8 @@ async def _run_fix_post_payment_url():
         await asyncio.gather(*[_fix(g) for g in offer_ids[i:i + 500]])
         print(
             f"[FixPostPaymentUrl] progress {min(i + 500, total)}/{total} "
-            f"updated={counters['updated']} errors={counters['errors']}",
+            f"updated={counters['updated']} errors={counters['errors']} "
+            f"skipped={counters['skipped']}",
             flush=True,
         )
     print(f"[FixPostPaymentUrl] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
@@ -1380,7 +1381,8 @@ async def _run_fix_webhooks():
         await asyncio.gather(*[_fix(gid) for gid in chunk])
         print(
             f"[FixWebhooks] progress {min(chunk_start + 500, total)}/{total} "
-            f"updated={counters['updated']} errors={counters['errors']}",
+            f"updated={counters['updated']} errors={counters['errors']} "
+            f"skipped={counters['skipped']}",
             flush=True,
         )
 
@@ -1398,23 +1400,53 @@ async def _run_fix_descriptions():
     import asyncio
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
-    from app.db.models import Offer
-    from app.workers.offer_creator import _build_description
+    from app.db.models import Offer, SkuProduct, SkuVariant
+    from app.workers.offer_creator import (_build_description, _INSTRUCTIONS_RU,
+                                           _INSTRUCTIONS_EN)
+    from app.workers.sku_builder import _card_description
 
     async with AsyncSessionLocal() as db:
         offers = (await db.execute(
             select(Offer).where(Offer.ggsel_offer_id.isnot(None))
         )).scalars().all()
 
+        # SKU-карточки описываются ИНАЧЕ (одна карточка на группу, выбор комбинации в
+        # радио-опции), поэтому обычный _build_description для них не годится — он
+        # затёр бы описание форматом одиночного оффера. Помечены они age="__sku__";
+        # исходные name/rare/pumping достаём через привязанные варианты.
+        sku_meta: dict[int, tuple[str, str, str]] = {}
+        sku_gids = [o.ggsel_offer_id for o in offers if (o.age or "") == "__sku__"]
+        if sku_gids:
+            rows = (await db.execute(
+                select(SkuVariant.ggsel_offer_id, SkuProduct.name,
+                       SkuProduct.rare, SkuProduct.pumping)
+                .join(SkuProduct, SkuProduct.product_id == SkuVariant.starpets_product_id)
+                .where(SkuVariant.ggsel_offer_id.in_(sku_gids))
+            )).all()
+            for gid, name, rare, pumping in rows:
+                sku_meta.setdefault(gid, (name, rare or "", pumping or "default"))
+
     total = len(offers)
-    print(f"[FixDescriptions] starting — {total} offers (concurrency={settings.sync_concurrency})", flush=True)
-    counters = {"updated": 0, "errors": 0}
+    print(f"[FixDescriptions] starting — {total} offers "
+          f"(из них SKU: {len(sku_meta)})", flush=True)
+    counters = {"updated": 0, "errors": 0, "skipped": 0}
     sem = asyncio.Semaphore(3)   # gentler on ggsel — 500s appear under high concurrency; maintenance op
 
     async def _fix(offer):
         async with sem:
             try:
-                desc_ru, desc_en, instr_ru, instr_en = _build_description(offer)
+                meta = sku_meta.get(offer.ggsel_offer_id) if (offer.age or "") == "__sku__" else None
+                if meta:
+                    name, rare, pumping = meta
+                    desc_ru, desc_en = _card_description(name, rare, pumping)
+                    instr_ru, instr_en = _INSTRUCTIONS_RU, _INSTRUCTIONS_EN
+                elif (offer.age or "") == "__sku__":
+                    # SKU-карточка без вариантов в базе: восстановить исходное описание
+                    # нечем, а писать формат одиночного оффера — испортить карточку.
+                    counters["skipped"] += 1
+                    return
+                else:
+                    desc_ru, desc_en, instr_ru, instr_en = _build_description(offer)
                 await ggsel_office.update_content(
                     offer.ggsel_offer_id, desc_ru, desc_en, instr_ru, instr_en
                 )
@@ -1427,11 +1459,13 @@ async def _run_fix_descriptions():
         await asyncio.gather(*[_fix(o) for o in offers[i:i + 500]])
         print(
             f"[FixDescriptions] progress {min(i + 500, total)}/{total} "
-            f"updated={counters['updated']} errors={counters['errors']}",
+            f"updated={counters['updated']} errors={counters['errors']} "
+            f"skipped={counters['skipped']}",
             flush=True,
         )
 
-    print(f"[FixDescriptions] done — updated={counters['updated']} errors={counters['errors']} total={total}", flush=True)
+    print(f"[FixDescriptions] done — updated={counters['updated']} "
+          f"errors={counters['errors']} skipped={counters['skipped']} total={total}", flush=True)
 
 
 @app.get("/add-consent-option")
