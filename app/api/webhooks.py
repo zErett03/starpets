@@ -8,6 +8,7 @@ from app.config import settings
 from app.db import AsyncSessionLocal
 from app.db.models import Offer, Order, Task, WebhookEvent, TaskKind, DeliveryStatus, WebhookKind, SkuVariant
 from app.clients.starpets import starpets
+from app.clients.ggsel import ggsel_office
 
 router = APIRouter()
 
@@ -227,6 +228,94 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
     return {"error": None}
 
 
+# Ключи, под которыми ggsel может прислать валюту оплаты. Единого имени в уведомлениях нет,
+# поэтому проверяем известные варианты, а не гадаем на одном.
+_CURRENCY_KEYS = ("currency", "cur", "curr", "valuta", "type_curr", "cnt_type")
+
+
+# Ключи, под которыми ggsel отдаёт сумму заказа в ответе API.
+_AMOUNT_KEYS = ("amount_rub", "amount", "price", "sum", "total", "cost", "paid")
+
+
+def _dig_amount(data) -> float | None:
+    """Ищет сумму в ответе API (структура вложенная и не документирована)."""
+    if isinstance(data, dict):
+        for k in _AMOUNT_KEYS:
+            v = data.get(k)
+            if isinstance(v, (int, float, str)):
+                try:
+                    f = float(v)
+                    if f > 0:
+                        return f
+                except (TypeError, ValueError):
+                    pass
+        for v in data.values():
+            got = _dig_amount(v)
+            if got is not None:
+                return got
+    elif isinstance(data, list):
+        for v in data:
+            got = _dig_amount(v)
+            if got is not None:
+                return got
+    return None
+
+
+async def _amount_to_rub(body: dict) -> float | None:
+    """Сумма заказа В РУБЛЯХ.
+
+    Полю валюты в уведомлении доверять нельзя: живой заказ, оплаченный в евро, приходил
+    как `amount: 3.64, currency: RUB`. Из-за этого 3.64 € записывались как 3.64 ₽,
+    профит-гард видел «убыток 242 ₽» и блокировал выкуп ВЫГОДНОЙ сделки.
+
+    Поэтому сумму спрашиваем у ggsel через API заказа — там запрос идёт с заголовком
+    currency=RUB, и площадка сама приводит её к рублям. Тело вебхука остаётся запасным
+    вариантом: если API недоступен, берём сумму как есть (прежнее поведение).
+    """
+    raw = body.get("amount")
+    fallback: float | None = None
+    if raw is not None:
+        try:
+            fallback = float(raw)
+        except (TypeError, ValueError):
+            fallback = None
+
+    order_id = body.get("id_i")
+    if order_id:
+        try:
+            data = await ggsel_office.get_order(int(order_id))
+            api_amount = _dig_amount(data)
+            if api_amount is not None:
+                if fallback is not None and abs(api_amount - fallback) > 0.01:
+                    print(f"[notification] сумма уточнена по API: {fallback} (вебхук) → "
+                          f"{api_amount} ₽ — оплата была не в рублях", flush=True)
+                return round(api_amount, 2)
+            print(f"[notification] сумма в ответе API не найдена, ответ: {str(data)[:400]}",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001 — уведомление важнее, чем точность суммы
+            print(f"[notification] API заказа {order_id} недоступен ({e}) — "
+                  f"беру сумму из вебхука", flush=True)
+
+    if fallback is None:
+        return None
+    code = ""
+    for k in _CURRENCY_KEYS:
+        v = body.get(k)
+        if isinstance(v, str) and v.strip():
+            code = v.strip().upper()
+            break
+    if code and code not in ("RUB", "RUR", "643"):
+        from app.fx import get_rate_to_rub
+        try:
+            rate = await get_rate_to_rub(code)
+            rub = round(fallback * rate, 2)
+            print(f"[notification] оплата {fallback} {code} → {rub} ₽ (курс {rate})", flush=True)
+            return rub
+        except Exception as e:  # noqa: BLE001
+            print(f"[notification] курс {code} недоступен ({e})", flush=True)
+    return fallback
+
+
 @router.post("/hooks/ggsel/notification/{offer_id}")
 async def notification(offer_id: int, request: Request, secret: str = ""):
     check_secret(secret)
@@ -234,7 +323,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
     print(f"[notification] offer_id={offer_id} body: {body}", flush=True)
 
     id_i = body.get("id_i")
-    amount = body.get("amount")
+    amount = await _amount_to_rub(body)
     email = body.get("email")
     ip = body.get("ip")
     date_str = body.get("date")

@@ -2859,6 +2859,78 @@ async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
     }
 
 
+@app.get("/order-detail")
+async def order_detail(order_id: int):
+    """Что РЕАЛЬНО лежит в базе по заказу: сумма, предмет, статусы, журнал покупок и
+    последние события трейда.
+
+    Нужен, когда цифры в разных местах панели расходятся (таблица против модалки):
+    показывает первоисточник, а не пересчёт, и сразу отвечает на вопрос «какая сумма
+    записана» и «что с ней происходило».
+    """
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Offer, PurchaseLog, TradeEvent, WebhookEvent, WebhookKind
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            order = (await db.execute(
+                select(Order).where(Order.ggsel_order_id == order_id)
+            )).scalar_one_or_none()
+        if not order:
+            return {"error": f"заказ {order_id} не найден (пробовали внутренний и ggsel id)"}
+
+        offer = (await db.execute(
+            select(Offer).where(Offer.id == order.offer_id))).scalar_one_or_none()
+        logs = (await db.execute(
+            select(PurchaseLog).where(PurchaseLog.order_id == order.id)
+            .order_by(PurchaseLog.id.asc()))).scalars().all()
+        events = (await db.execute(
+            select(TradeEvent).where(TradeEvent.order_id == order.id)
+            .order_by(TradeEvent.id.desc()).limit(15))).scalars().all()
+        # Сырое тело уведомления ggsel — источник суммы. По нему видно, пришла ли оплата
+        # в рублях и не была ли она уточнена через API.
+        hook = (await db.execute(
+            select(WebhookEvent).where(
+                WebhookEvent.kind == WebhookKind.notification,
+                WebhookEvent.external_id == str(order.ggsel_order_id),
+            ))).scalar_one_or_none()
+
+    return {
+        "order": {
+            "id": order.id, "ggsel_order_id": order.ggsel_order_id,
+            "item": order.item_name,
+            "amount_rub": float(order.amount_rub) if order.amount_rub is not None else None,
+            "roblox_username": order.roblox_username,
+            "status": order.delivery_status.value if order.delivery_status else None,
+            "error_reason": order.error_reason,
+            "starpets_purchase_id": order.starpets_purchase_id,
+            "starpets_custom_id": order.starpets_custom_id,
+            "starpets_status": order.starpets_status,
+            "exec_price_usd": float(order.exec_price_usd) if order.exec_price_usd is not None else None,
+            "sku_product_id": order.sku_product_id,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+        },
+        "offer": ({"id": offer.id, "name": offer.name, "price_rub": float(offer.price_rub or 0),
+                   "starpets_product_id": offer.starpets_product_id} if offer else None),
+        "purchase_log": [
+            {"kind": r.kind, "item": r.starpets_purchase_id,
+             "price_usd": float(r.price_usd) if r.price_usd is not None else None,
+             "source": r.source, "note": r.note,
+             "at": r.created_at.isoformat() if r.created_at else None}
+            for r in logs
+        ],
+        "trade_events": [
+            {"trade_id": e.trade_id, "status": e.status,
+             "at": e.recorded_at.isoformat() if e.recorded_at else None}
+            for e in events
+        ],
+        "notification_payload": (hook.payload if hook else None),
+    }
+
+
 @app.get("/retry-delivery")
 async def retry_delivery(order_id: int):
     """Re-enqueue delivery for an order that failed on a transient issue (e.g. no_items_available

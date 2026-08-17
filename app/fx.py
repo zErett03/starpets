@@ -3,6 +3,44 @@ import httpx
 from datetime import datetime, timedelta
 
 _cache: dict = {"rate": None, "valid_until": None}
+# Курсы прочих валют (EUR и т.п.): {код: (курс, действителен_до)}. Отдельно от _cache,
+# чтобы не трогать проверенный путь USD, по которому считается вся закупка.
+_rates: dict = {}
+
+
+async def get_rate_to_rub(code: str) -> float:
+    """Курс валюты к рублю по ЦБ. RUB -> 1.0.
+
+    Нужен для сумм, приходящих в уведомлении ggsel: покупатель может заплатить в евро
+    или долларах, а в заказ сумма попадала как рубли — заказ на 3.64 € выглядел как
+    3.64 ₽, профит-гард видел «убыток 242 ₽» и блокировал выкуп выгодной сделки.
+    """
+    code = (code or "RUB").strip().upper()
+    if code in ("RUB", "RUR", "₽", ""):
+        return 1.0
+    if code == "USD":
+        return await get_usd_rub()
+
+    now = datetime.utcnow()
+    cached = _rates.get(code)
+    if cached and cached[1] and now < cached[1]:
+        return cached[0]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://www.cbr-xml-daily.ru/daily_json.js")
+            resp.raise_for_status()
+            data = resp.json()
+            v = data["Valute"][code]
+            # Курс ЦБ даётся за Nominal единиц (например, 100 JPY) — приводим к одной.
+            rate = float(v["Value"]) / float(v.get("Nominal") or 1)
+        _rates[code] = (rate, now + timedelta(hours=1))
+        print(f"[FX] {code}/RUB = {rate}", flush=True)
+        return rate
+    except Exception as e:
+        print(f"[FX] курс {code} недоступен: {e}", flush=True)
+        if cached:
+            return cached[0]
+        raise RuntimeError(f"FX rate for {code} unavailable") from e
 
 
 async def get_usd_rub() -> float:
