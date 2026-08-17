@@ -226,6 +226,20 @@ async def sku_stock_sync_safe():
         print(f"[Scheduler] sku_stock_sync error: {e}", flush=True)
 
 
+async def price_watch_safe():
+    """Сторож цен: ищет карточки дешевле себестоимости и зовёт оператора в Telegram.
+
+    Нужен потому, что расхождение нашей цены и цены на витрине ggsel обнаруживалось
+    только постфактум, по убыточным заказам: «Ornament» собрал два десятка продаж
+    в минус, прежде чем это заметили.
+    """
+    try:
+        from app.workers.price_watch import price_watch
+        await price_watch()
+    except Exception as e:
+        print(f"[Scheduler] price_watch error: {e}", flush=True)
+
+
 async def reconcile_stuck_safe():
     from app.config import settings
     if not settings.sku_price_sync:
@@ -326,6 +340,8 @@ def start_scheduler() -> AsyncIOScheduler:
                       minutes=settings.sku_stock_sync_minutes, id="sku_stock_sync",
                       max_instances=1, coalesce=True)
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
+    scheduler.add_job(price_watch_safe, "interval",
+                      minutes=settings.price_watch_minutes, id="price_watch")
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
     scheduler.add_job(floor_relive_safe, "interval",
                       minutes=settings.floor_relive_minutes, id="floor_relive",

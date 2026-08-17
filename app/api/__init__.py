@@ -2859,6 +2859,14 @@ async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
     }
 
 
+@app.get("/price-watch")
+async def price_watch_ep():
+    """Ручной прогон сторожа цен: ищет карточки дешевле себестоимости и, если появились
+    НОВЫЕ, шлёт алерт в Telegram. По расписанию крутится сам (PRICE_WATCH_MINUTES)."""
+    from app.workers.price_watch import price_watch
+    return await price_watch()
+
+
 @app.get("/underpriced-offers")
 async def underpriced_offers(limit: int = 300, min_gap_rub: float = 0.0):
     """АКТИВНЫЕ карточки, которые продаются дешевле, чем стоит сам предмет.
