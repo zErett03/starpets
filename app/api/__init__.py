@@ -2859,6 +2859,52 @@ async def debug_sku_order(ggsel_order_id: int = 0, order_id: int = 0):
     }
 
 
+@app.get("/loss-orders")
+async def loss_orders(days: int = 30, limit: int = 200):
+    """Заказы, выкупленные ДОРОЖЕ оплаты покупателя — где мы ушли в минус.
+
+    Контрольная ручка: показывает, не пропускает ли профит-гард убыточные сделки
+    (например, если цена карточки разошлась с фактической оплатой) и на какую сумму.
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+    from app.fx import get_usd_rub
+
+    fx = await get_usd_rub()
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    async with AsyncSessionLocal() as db:
+        orders = (await db.execute(
+            select(Order)
+            .where(Order.exec_price_usd.isnot(None), Order.created_at >= since)
+            .order_by(Order.created_at.desc())
+        )).scalars().all()
+
+    rows, total_loss = [], 0.0
+    for o in orders:
+        paid = float(o.amount_rub or 0)
+        cost = float(o.exec_price_usd or 0) * fx
+        if paid <= 0 or cost <= paid:
+            continue
+        loss = round(cost - paid, 2)
+        total_loss += loss
+        rows.append({
+            "order_id": o.id, "ggsel_order_id": o.ggsel_order_id, "item": o.item_name,
+            "paid_rub": round(paid, 2), "cost_rub": round(cost, 2),
+            "loss_rub": loss, "status": o.delivery_status.value if o.delivery_status else None,
+            "created_at": o.created_at.isoformat() if o.created_at else None,
+        })
+        if len(rows) >= limit:
+            break
+
+    return {"days": days, "fx": round(fx, 4), "count": len(rows),
+            "total_loss_rub": round(total_loss, 2), "orders": rows,
+            "note": ("Убыток считается по текущему курсу, поэтому по старым заказам он "
+                     "приблизительный. Заказы со статусом refund/closed деньги покупателю "
+                     "уже вернули — там потерь обычно нет, предмет возвращается StarPets.")}
+
+
 @app.get("/order-detail")
 async def order_detail(order_id: int):
     """Что РЕАЛЬНО лежит в базе по заказу: сумма, предмет, статусы, журнал покупок и
