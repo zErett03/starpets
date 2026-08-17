@@ -2881,28 +2881,40 @@ async def loss_orders(days: int = 30, limit: int = 200):
             .order_by(Order.created_at.desc())
         )).scalars().all()
 
-    rows, total_loss = [], 0.0
+    # Выданные заказы — реальные потери: предмет ушёл покупателю, деньги потрачены.
+    # Возвращённые и провалившиеся — бумажные: покупателю вернули оплату, а предмет
+    # возвращается StarPets на баланс. Смешивать их в одну сумму нельзя — итог раздувается
+    # на заказах, по которым мы ничего не потеряли.
+    _REAL = {"done", "finalized", "dispatched"}
+    rows, real_loss, paper_loss = [], 0.0, 0.0
     for o in orders:
         paid = float(o.amount_rub or 0)
         cost = float(o.exec_price_usd or 0) * fx
         if paid <= 0 or cost <= paid:
             continue
         loss = round(cost - paid, 2)
-        total_loss += loss
+        status = o.delivery_status.value if o.delivery_status else None
+        is_real = status in _REAL
+        if is_real:
+            real_loss += loss
+        else:
+            paper_loss += loss
         rows.append({
             "order_id": o.id, "ggsel_order_id": o.ggsel_order_id, "item": o.item_name,
             "paid_rub": round(paid, 2), "cost_rub": round(cost, 2),
-            "loss_rub": loss, "status": o.delivery_status.value if o.delivery_status else None,
+            "loss_rub": loss, "status": status, "real_loss": is_real,
             "created_at": o.created_at.isoformat() if o.created_at else None,
         })
         if len(rows) >= limit:
             break
 
     return {"days": days, "fx": round(fx, 4), "count": len(rows),
-            "total_loss_rub": round(total_loss, 2), "orders": rows,
-            "note": ("Убыток считается по текущему курсу, поэтому по старым заказам он "
-                     "приблизительный. Заказы со статусом refund/closed деньги покупателю "
-                     "уже вернули — там потерь обычно нет, предмет возвращается StarPets.")}
+            "real_loss_rub": round(real_loss, 2),
+            "paper_loss_rub": round(paper_loss, 2),
+            "total_loss_rub": round(real_loss + paper_loss, 2), "orders": rows,
+            "note": ("real_loss_rub — выданные заказы, деньги потеряны. paper_loss_rub — "
+                     "возвраты и сбои: оплату вернули покупателю, предмет вернулся StarPets. "
+                     "Убыток считается по ТЕКУЩЕМУ курсу, по старым заказам он приблизителен.")}
 
 
 @app.get("/order-detail")
