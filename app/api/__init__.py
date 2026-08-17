@@ -2869,7 +2869,7 @@ async def underpriced_offers(limit: int = 300, min_gap_rub: float = 0.0):
     """
     from sqlalchemy import select, func
     from app.db import AsyncSessionLocal
-    from app.db.models import Offer, OfferStatus, StoreItem
+    from app.db.models import Offer, OfferStatus, StoreItem, SkuVariant
     from app.fx import get_usd_rub
 
     fx = await get_usd_rub()
@@ -2888,6 +2888,16 @@ async def underpriced_offers(limit: int = 300, min_gap_rub: float = 0.0):
                 Offer.starpets_product_id.isnot(None),
             )
         )).scalars().all()
+        # SKU-карточки: у backing-оффера starpets_product_id всегда NULL (карточка
+        # многопродуктовая), поэтому по офферам их не проверить — цена и продукт живут
+        # в вариантах. Без этой ветки отчёт слеп к основной части ассортимента.
+        variants = (await db.execute(
+            select(SkuVariant).where(SkuVariant.hidden.is_(False))
+        )).scalars().all()
+        sku_names = dict((await db.execute(
+            select(Offer.ggsel_offer_id, Offer.name)
+            .where(Offer.age == "__sku__", Offer.status == OfferStatus.active)
+        )).all())
 
     rows = []
     for o in offers:
@@ -2902,11 +2912,35 @@ async def underpriced_offers(limit: int = 300, min_gap_rub: float = 0.0):
         if gap <= min_gap_rub:
             continue
         rows.append({
+            "kind": "offer",
             "offer_id": o.id, "ggsel_offer_id": o.ggsel_offer_id, "name": o.name,
             "product_id": o.starpets_product_id,
             "price_rub": round(price_rub, 2), "cost_rub": round(cost_rub, 2),
             "gap_rub": gap, "ratio": round(cost_rub / price_rub, 2),
         })
+
+    for v in variants:
+        if v.ggsel_offer_id not in sku_names:      # карточка не активна — не мишень
+            continue
+        floor_usd = floors.get(v.starpets_product_id)
+        if floor_usd is None:
+            continue
+        cost_rub = float(floor_usd) * fx
+        price_rub = float(v.price_rub or 0)
+        if price_rub <= 0:
+            continue
+        gap = round(cost_rub - price_rub, 2)
+        if gap <= min_gap_rub:
+            continue
+        rows.append({
+            "kind": "sku_variant",
+            "ggsel_offer_id": v.ggsel_offer_id,
+            "name": f"{sku_names.get(v.ggsel_offer_id, '?')} · {v.label or ''}".strip(),
+            "product_id": v.starpets_product_id,
+            "price_rub": round(price_rub, 2), "cost_rub": round(cost_rub, 2),
+            "gap_rub": gap, "ratio": round(cost_rub / price_rub, 2),
+        })
+
     rows.sort(key=lambda r: r["gap_rub"], reverse=True)
     rows = rows[:limit]
 
