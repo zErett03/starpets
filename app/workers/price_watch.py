@@ -43,8 +43,17 @@ async def _save_seen(db, keys: set[str]) -> None:
         db.add(KVState(key=_STATE_KEY, value=value))
 
 
-async def find_underpriced(min_gap_rub: float, min_ratio: float) -> list[dict]:
-    """Позиции, где себестоимость выше цены продажи. Только активные карточки."""
+async def find_underpriced(min_gap_rub: float, min_ratio: float,
+                           live_top: int = 0) -> tuple[list[dict], dict]:
+    """Позиции, где себестоимость выше цены продажи. Только активные карточки.
+
+    Возвращает (находки, охват). Охват важен не меньше находок: цены берутся из кэша
+    store_items, и если предмета там нет, позиция ПРОПУСКАЕТСЯ. Пустой результат при
+    большом `no_floor` означает не «всё хорошо», а «сравнивать было не с чем».
+
+    live_top>0 — дополнительно проверить N самых дорогих карточек без цены в кэше
+    напрямую через API StarPets: там, где кэш молчит, ошибка стоит дороже всего.
+    """
     fx = await get_usd_rub()
     async with AsyncSessionLocal() as db:
         floors = dict((await db.execute(
@@ -68,11 +77,19 @@ async def find_underpriced(min_gap_rub: float, min_ratio: float) -> list[dict]:
         )).all())
 
     found: list[dict] = []
+    stats = {"checked": 0, "no_floor": 0, "live_checked": 0}
+    no_floor_offers: list = []          # кандидаты на живую проверку через API
 
-    def _check(key: str, name: str, gid, price_rub: float, product_id: int) -> None:
-        floor_usd = floors.get(product_id)
-        if floor_usd is None or price_rub <= 0:
+    def _check(key: str, name: str, gid, price_rub: float, product_id: int,
+               floor_override: float | None = None) -> None:
+        floor_usd = floor_override if floor_override is not None else floors.get(product_id)
+        if price_rub <= 0:
             return
+        if floor_usd is None:
+            stats["no_floor"] += 1
+            no_floor_offers.append((key, name, gid, price_rub, product_id))
+            return
+        stats["checked"] += 1
         cost_rub = float(floor_usd) * fx
         gap = round(cost_rub - price_rub, 2)
         ratio = cost_rub / price_rub
@@ -93,15 +110,35 @@ async def find_underpriced(min_gap_rub: float, min_ratio: float) -> list[dict]:
         _check(f"v{v.id}", f"{sku_names.get(v.ggsel_offer_id, '?')} · {v.label or ''}".strip(),
                v.ggsel_offer_id, float(v.price_rub or 0), v.starpets_product_id)
 
+    # Живая проверка дорогих позиций, по которым кэш пуст. Берём самые дорогие: ошибка
+    # в карточке за 3000 ₽ стоит на порядок больше, чем в карточке за 100 ₽, а запросов
+    # к StarPets тратим ровно столько, сколько разрешено параметром.
+    if live_top > 0 and no_floor_offers:
+        import httpx
+        from app.clients.starpets import starpets
+        no_floor_offers.sort(key=lambda t: t[3], reverse=True)
+        async with httpx.AsyncClient(timeout=10) as http:
+            for key, name, gid, price_rub, product_id in no_floor_offers[:live_top]:
+                try:
+                    top = await starpets.get_top_item(http, str(product_id))
+                except Exception:  # noqa: BLE001 — недоступность API не должна ронять проход
+                    continue
+                if not top:
+                    continue
+                stats["live_checked"] += 1
+                _check(key, name, gid, price_rub, product_id,
+                       floor_override=float(top.get("price_usd") or 0) or None)
+
     found.sort(key=lambda r: r["gap_rub"], reverse=True)
-    return found
+    return found, stats
 
 
 async def price_watch() -> dict:
     """Один проход сторожа. Возвращает сводку; при новых находках шлёт алерт в Telegram."""
     min_gap = settings.price_watch_min_gap_rub
     min_ratio = settings.price_watch_min_ratio
-    found = await find_underpriced(min_gap, min_ratio)
+    found, stats = await find_underpriced(min_gap, min_ratio,
+                                          live_top=settings.price_watch_live_top)
 
     async with AsyncSessionLocal() as db:
         seen = await _load_seen(db)
@@ -111,7 +148,13 @@ async def price_watch() -> dict:
         await db.commit()
 
     print(f"[PriceWatch] найдено {len(found)} (новых {len(fresh)}) "
-          f"порог {min_gap}₽/{min_ratio}x", flush=True)
+          f"порог {min_gap}₽/{min_ratio}x · проверено {stats['checked']}, "
+          f"без цены в кэше {stats['no_floor']} (из них живьём {stats['live_checked']})",
+          flush=True)
+    # Пустой кэш — не «всё хорошо», а слепая зона: предупреждаем отдельно.
+    if stats["no_floor"] > stats["checked"]:
+        print(f"[PriceWatch] ВНИМАНИЕ: у большинства карточек нет цены в store_items — "
+              f"проверка почти не работает, посмотри ленту обновлений", flush=True)
 
     if fresh:
         worst = fresh[0]
@@ -132,4 +175,4 @@ async def price_watch() -> dict:
         except Exception as e:  # noqa: BLE001 — сбой алерта не должен ронять задание
             print(f"[PriceWatch] алерт не отправлен: {e}", flush=True)
 
-    return {"found": len(found), "new": len(fresh), "items": found[:20]}
+    return {"found": len(found), "new": len(fresh), "coverage": stats, "items": found[:20]}
