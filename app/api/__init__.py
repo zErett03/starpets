@@ -2971,7 +2971,11 @@ async def order_detail(order_id: int):
             "created_at": order.created_at.isoformat() if order.created_at else None,
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         },
-        "offer": ({"id": offer.id, "name": offer.name, "price_rub": float(offer.price_rub or 0),
+        # ggsel_offer_id обязателен: id оффера — наш внутренний, а все ручки диагностики
+        # (debug-sku-stock, offer-status и прочие) принимают именно ggsel-номер карточки.
+        "offer": ({"id": offer.id, "ggsel_offer_id": offer.ggsel_offer_id,
+                   "name": offer.name, "price_rub": float(offer.price_rub or 0),
+                   "status": offer.status.value if offer.status else None,
                    "starpets_product_id": offer.starpets_product_id} if offer else None),
         "purchase_log": [
             {"kind": r.kind, "item": r.starpets_purchase_id,
