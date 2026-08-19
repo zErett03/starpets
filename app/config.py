@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     telegram_chat_id_critical: str = ""
     telegram_chat_id_warn: str = ""
     telegram_chat_id_orders: str = ""     # new-order + problem alerts go here (default: first admin id)
+    telegram_chat_id_prices: str = ""     # ценовые сводки — отдельно от оператора поддержки
     telegram_admin_ids: str = ""          # comma-separated Telegram user ids allowed to use the bot
     telegram_webhook_secret: str = ""     # secret path segment for /telegram/webhook/<secret>
     mm2_public_url: str = ""              # MM2 Railway URL — router relays _mm2 commands here
@@ -68,6 +69,26 @@ class Settings(BaseSettings):
     # Кэш store_items наполняется событийной лентой и покрывает не всё, а ошибка в дорогой
     # карточке стоит на порядок больше — их досматриваем вручную, счёт запросов ограничен.
     price_watch_live_top: int = 40
+    # Сверка с ВИТРИНОЙ ggsel. Отдельная проверка, потому что все прочие отчёты смотрят на
+    # НАШУ цену в базе, а покупатель платит по цене витрины: заказ #317 оплачен по 104 ₽,
+    # когда в базе стояло 228 ₽. Спрашивать витрину по каждой из тысяч карточек накладно,
+    # поэтому берём места, где ошибка дороже всего: самые дорогие карточки и «горячие»
+    # (много заказов за сутки — там убыток набегает быстрее всего).
+    price_watch_showcase_max_price_rub: float = 15000.0
+    price_watch_showcase_top: int = 40
+    price_watch_hot_orders: int = 5          # заказов за сутки, чтобы карточка считалась горячей
+    price_watch_showcase_tolerance_rub: float = 5.0   # копеечная разница = округление, не дрейф
+    # Чинить дрейф сразу, а не только сообщать. Наша цена посчитана от живого пола StarPets,
+    # витрина просто отстала — поэтому «правильная» сторона известна. Само по себе это не
+    # рассосётся: ценник сравнивает новую цену с базой, а в базе она уже верная.
+    price_watch_showcase_fix: bool = True
+    # Сторож не только сообщает, но и чинит: занижённые карточки переоцениваются, SKU-варианты
+    # догоняются штатным синком. Ручное «проверь и запусти» здесь бессмысленно — действие
+    # известно заранее, а пока оно ждёт человека, товар продаётся в убыток.
+    price_watch_autofix: bool = True
+    # Как часто отправлять сводку. Ежечасные сообщения о том же самом приучают не читать
+    # бота; случаи, где нужны руки, уходят вне графика.
+    price_watch_digest_hours: int = 4
     # Шаблон ссылки с номера заказа ggsel в кабинет продавца. {order} подставляется.
     # Ведём на страницу заказа, а не в чат: у чата свой chatId, который ggsel не отдаёт
     # ни в вебхуке, ни в Seller API. Со страницы заказа диалог открывается одной кнопкой.
@@ -123,6 +144,11 @@ class Settings(BaseSettings):
     floor_relive_max_products: int = 500
     floor_relive_throttle_sec: int = 3600
     floor_reconcile: bool = False  # sweep offers.price_rub from store_items + live relive (FLOOR_RECONCILE=true)
+    # Переоценка ОБЫЧНЫХ карточек (не SKU) по устойчивому полу + пуш на витрину + пауза
+    # карточек без товара. Событийная лента трогает лишь продукты со всплеском активности,
+    # поэтому «тихая» карточка иначе не переоценивается никогда.
+    reprice_cards: bool = False
+    reprice_cards_minutes: int = 30
     starpets_category_id: int = 0
 
     class Config:

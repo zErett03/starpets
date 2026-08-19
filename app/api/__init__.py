@@ -87,6 +87,87 @@ async def db_stats():
     }
 
 
+@app.get("/reprice-cards")
+async def reprice_cards_ep(dry_run: bool = True, max_offers: int = 20000,
+                           only_active: bool = True):
+    """Переоценка обычных карточек по устойчивому полу store_items + пуш цены в ggsel,
+    плюс пауза карточек без товара. ?dry_run=true — показать, что поедет, ничего не меняя."""
+    from app.workers.floor_reconcile import reprice_cards
+    if dry_run:
+        return await reprice_cards(dry_run=True, max_offers=max_offers, only_active=only_active)
+    import asyncio
+    asyncio.create_task(reprice_cards(dry_run=False, max_offers=max_offers,
+                                      only_active=only_active))
+    return {"started": True, "note": "фоново; см. [Reprice] в логах"}
+
+
+@app.get("/reconcile-card-status")
+async def reconcile_card_status(dry_run: bool = True, limit: int = 1000):
+    """Сверяет статус карточки в базе со статусом на витрине ggsel и чинит расхождения.
+
+    Зачем. Статус в базе — не отчёт о витрине, а наше предположение о ней: он ставится при
+    создании карточки и обновляется, только когда мы сами её паузим или активируем. Любой
+    сбой в этот момент — и запись расходится с реальностью навсегда. Расхождение дорогое:
+    ценник, sweep и сторож цен работают ИСКЛЮЧИТЕЛЬНО по active, поэтому карточка, живая на
+    витрине, но числящаяся draft, продаётся по цене, которую никто больше не обновляет.
+    На MM2 так разошлись 23 карточки из 25 проверенных.
+
+    Опрашиваем каждую карточку поимённо, а не общим списком офферов: тот отдаёт одну
+    страницу и молча теряет хвост, что для сверки хуже, чем медленно.
+    """
+    import asyncio
+
+    from sqlalchemy import select
+    from app.clients.ggsel import ggsel_office
+    from app.db import AsyncSessionLocal
+    from app.db.models import Offer, OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(Offer.id, Offer.ggsel_offer_id, Offer.name, Offer.status)
+            .where(Offer.ggsel_offer_id.isnot(None))
+            .limit(limit)
+        )).all()
+
+    async def _run():
+        checked = fixed = failed = 0
+        diffs = []
+        for oid, gid, name, status in rows:
+            try:
+                data = await ggsel_office.get_offer(gid)
+            except Exception as e:  # noqa: BLE001 — одна недоступная карточка не рушит проход
+                failed += 1
+                print(f"[CardStatus] {gid}: {type(e).__name__}: {e}", flush=True)
+                continue
+            body = data.get("data") if isinstance(data, dict) and "data" in data else data
+            live = (body or {}).get("status") if isinstance(body, dict) else None
+            if not live:
+                failed += 1
+                continue
+            checked += 1
+            ours = status.value if hasattr(status, "value") else str(status)
+            if live == ours:
+                continue
+            diffs.append({"offer_id": oid, "ggsel_offer_id": gid, "name": name,
+                          "db": ours, "showcase": live})
+            if not dry_run and live in OfferStatus.__members__:
+                async with AsyncSessionLocal() as db2:
+                    o = (await db2.execute(select(Offer).where(Offer.id == oid))).scalar_one_or_none()
+                    if o:
+                        o.status = OfferStatus[live]
+                        await db2.commit()
+                        fixed += 1
+        print(f"[CardStatus] опрошено {checked}, расхождений {len(diffs)}, "
+              f"исправлено {fixed}, не ответили {failed}", flush=True)
+        return {"checked": checked, "mismatched": len(diffs), "fixed": fixed,
+                "failed": failed, "items": diffs[:50]}
+
+    if dry_run:
+        return await _run()
+    asyncio.create_task(_run())
+    return {"started": True, "cards": len(rows), "note": "фоново; см. [CardStatus] в логах"}
+
+
 @app.get("/offer-errors")
 async def offer_errors():
     from sqlalchemy import select

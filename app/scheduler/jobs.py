@@ -251,6 +251,17 @@ async def reconcile_stuck_safe():
         print(f"[Scheduler] reconcile_stuck error: {e}", flush=True)
 
 
+async def reprice_cards_safe():
+    from app.config import settings
+    if not settings.reprice_cards:
+        return  # включается REPRICE_CARDS=true
+    try:
+        from app.workers.floor_reconcile import reprice_cards
+        await reprice_cards(dry_run=False)
+    except Exception as e:
+        print(f"[Scheduler] reprice_cards error: {e}", flush=True)
+
+
 async def floor_sweep_safe():
     from app.config import settings
     if not settings.floor_reconcile:
@@ -343,6 +354,9 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(price_watch_safe, "interval",
                       minutes=settings.price_watch_minutes, id="price_watch")
     scheduler.add_job(floor_sweep_safe, "interval", minutes=10, id="floor_sweep")
+    scheduler.add_job(reprice_cards_safe, "interval",
+                      minutes=settings.reprice_cards_minutes, id="reprice_cards",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(floor_relive_safe, "interval",
                       minutes=settings.floor_relive_minutes, id="floor_relive",
                       max_instances=1, coalesce=True)

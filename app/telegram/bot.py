@@ -32,6 +32,18 @@ def _admin_ids() -> set[int]:
     return out
 
 
+def _price_chats() -> list[str]:
+    """Чаты для ценовых сводок. Отдельно от чата заказов намеренно: оператору поддержки
+    ценники не нужны и не действуемы, а поток бесполезных сообщений приучает пролистывать
+    и те, что важны. TELEGRAM_CHAT_ID_PRICES, иначе TELEGRAM_CHAT_ID_WARN, иначе владелец."""
+    for raw in (settings.telegram_chat_id_prices, settings.telegram_chat_id_warn):
+        chats = [c.strip() for c in (raw or "").replace(";", ",").split(",") if c.strip()]
+        if chats:
+            return chats
+    ids = sorted(_admin_ids())
+    return [str(ids[0])] if ids else []
+
+
 def _orders_chats() -> list[str]:
     """Chats that receive new-order + problem alerts. TELEGRAM_CHAT_ID_ORDERS (comma-separated)
     if set, else EVERY whitelisted admin id — so notifications reach several people."""

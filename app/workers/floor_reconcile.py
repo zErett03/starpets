@@ -89,6 +89,97 @@ async def sweep_floors(max_offers: int = 20000, dry_run: bool = False) -> dict:
             _sweep_running = False
 
 
+async def reprice_cards(dry_run: bool = True, max_offers: int = 20000,
+                        only_active: bool = True) -> dict:
+    """Переоценка ОБЫЧНЫХ карточек (не SKU) по устойчивому полу + пуш цены на витрину.
+
+    Зачем отдельно от sweep_floors. Тот отбирает только карточки, за которыми стоит
+    SkuVariant, и в ggsel не ходит — цену на витрину доносит SKU-фаза. Событийный ценник трогает лишь
+    те продукты, по которым в ленте был всплеск. Карточка, чей дешёвый лот исчез тихо,
+    остаётся с ценой месячной давности навсегда.
+
+    Почему не переиспользуем /sync-prices: он берёт минимальную цену из items/top как
+    есть — вместе с приманками и зарезервированными лотами. Здесь берётся robust_floor:
+    он отбрасывает выбросы и несвежие строки, то есть та же цена, по которой считает
+    профит-гард. Иначе переоценка сама завела бы карточки в убыток.
+
+    Порядок операций важен: сначала пуш в ggsel, и только после успеха — запись в базу.
+    Обратный порядок и создал дрейф, из-за которого Ornament месяц стоял дешевле нашей цены.
+    """
+    from app.clients.ggsel import ggsel_office
+    from app.db.models import OfferStatus
+
+    async with AsyncSessionLocal() as db:
+        q = select(Offer.id, Offer.ggsel_offer_id, Offer.name, Offer.starpets_product_id,
+                   Offer.price_usd, Offer.price_rub, Offer.status).where(
+            Offer.starpets_product_id.isnot(None),
+            Offer.ggsel_offer_id.isnot(None),
+        )
+        if only_active:
+            q = q.where(Offer.status == OfferStatus.active)
+        rows = (await db.execute(q.limit(max_offers))).all()
+        floors = await robust_floors_for(db, [r[3] for r in rows])
+        fx = await get_usd_rub()
+
+    counters = {"checked": 0, "drifted": 0, "pushed": 0, "no_stock": 0, "paused": 0,
+                "errors": 0}
+    samples = []
+    for oid, gid, name, pid, old_usd, old_rub, status in rows:
+        counters["checked"] += 1
+        floor = floors.get(int(pid)) if pid is not None else None
+        if floor is None:
+            # Товара нет — значит и цены нет. Оставлять карточку в продаже нельзя: цена в
+            # базе застывает на минимальной планке, и карточка превращается в ловушку
+            # (на MM2 карточка висела за 100 ₽ при реальной цене под 4000 ₽). Правильный ответ —
+            # снять с витрины; вернётся товар — ценник поднимет её обратно.
+            counters["no_stock"] += 1
+            if len(samples) < 50:
+                samples.append({"offer_id": oid, "ggsel_offer_id": gid, "name": name,
+                                "old_rub": float(old_rub or 0), "new_rub": None,
+                                "action": "pause — нет товара на StarPets"})
+            if not dry_run and status == OfferStatus.active:
+                try:
+                    await ggsel_office.pause_offer(gid)
+                except Exception as e:  # noqa: BLE001
+                    counters["errors"] += 1
+                    print(f"[Reprice] пауза {gid} {name!r}: {type(e).__name__}: {e}", flush=True)
+                    continue
+                async with AsyncSessionLocal() as db:
+                    await db.execute(sql_update(Offer).where(Offer.id == oid)
+                                     .values(status=OfferStatus.paused))
+                    await db.commit()
+                counters["paused"] = counters.get("paused", 0) + 1
+            continue
+        new_rub = calc_price_rub(float(floor), settings.markup, fx)
+        if abs(new_rub - float(old_rub or 0)) < _DRIFT_RUB:
+            continue
+        counters["drifted"] += 1
+        if len(samples) < 50:
+            samples.append({"offer_id": oid, "ggsel_offer_id": gid, "name": name,
+                            "old_rub": float(old_rub or 0), "new_rub": new_rub,
+                            "floor_usd": round(float(floor), 3),
+                            "change_pct": round((new_rub / float(old_rub) - 1) * 100, 1)
+                            if old_rub else None})
+        if dry_run:
+            continue
+        try:
+            await ggsel_office.update_price(gid, new_rub)
+        except Exception as e:  # noqa: BLE001 — упавшая карточка не рушит проход
+            counters["errors"] += 1
+            print(f"[Reprice] {gid} {name!r}: {type(e).__name__}: {e}", flush=True)
+            continue
+        async with AsyncSessionLocal() as db:
+            await db.execute(sql_update(Offer).where(Offer.id == oid)
+                             .values(price_usd=float(floor), price_rub=new_rub,
+                                     last_synced_at=datetime.utcnow()))
+            await db.commit()
+        counters["pushed"] += 1
+
+    summary = {"dry_run": dry_run, **counters, "sample": samples[:30]}
+    print(f"[Reprice] {summary if dry_run else counters}", flush=True)
+    return summary
+
+
 async def relive_active(max_products: int = 150, dry_run: bool = False) -> dict:
     """Live items/top pull for the products behind SHOWN (non-hidden) SKU variants. Truthfully
     refreshes store_items (upsert present + delete rows no longer live -> kills phantoms), then

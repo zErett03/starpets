@@ -219,15 +219,22 @@ async def sync_item_updates() -> dict:
             new_rub = calc_price_rub(floor, settings.markup, fx)
             offer.price_usd = floor
             if abs(new_rub - float(offer.price_rub or 0)) >= 0.01:
-                offer.price_rub = new_rub
-                # Push to ggsel only for live cards; paused cards keep the fresh DB price and
-                # get it pushed at activation time.
+                # ВАЖЕН ПОРЯДОК. Раньше цена писалась в базу ДО пуша: если PATCH к ggsel
+                # падал, база уезжала вперёд, витрина оставалась со старой ценой, а на
+                # следующем проходе разницы с базой уже не было — и повтор не происходил
+                # НИКОГДА. Так карточка застревает дешёвой на витрине и собирает убыточные
+                # продажи. Теперь база меняется только после успешного пуша.
                 if offer.status == OfferStatus.active:
                     try:
                         await ggsel_office.update_price(offer.ggsel_offer_id, new_rub)
+                        offer.price_rub = new_rub
                         updated += 1
                     except Exception as e:
                         print(f"[PriceSync] update_price error product={pid}: {e}", flush=True)
+                else:
+                    # Спящая карточка витрины не имеет: цену держим в базе, она уедет в ggsel
+                    # при активации.
+                    offer.price_rub = new_rub
         await db.commit()
 
     print(
