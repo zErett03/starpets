@@ -251,6 +251,14 @@ async def reconcile_stuck_safe():
         print(f"[Scheduler] reconcile_stuck error: {e}", flush=True)
 
 
+async def balance_watch_safe():
+    try:
+        from app.workers.balance_watch import balance_watch
+        await balance_watch()
+    except Exception as e:
+        print(f"[Scheduler] balance_watch error: {e}", flush=True)
+
+
 async def reprice_cards_safe():
     from app.config import settings
     if not settings.reprice_cards:
@@ -357,6 +365,8 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.add_job(reprice_cards_safe, "interval",
                       minutes=settings.reprice_cards_minutes, id="reprice_cards",
                       max_instances=1, coalesce=True)
+    scheduler.add_job(balance_watch_safe, "interval",
+                      minutes=settings.balance_watch_minutes, id="balance_watch")
     scheduler.add_job(floor_relive_safe, "interval",
                       minutes=settings.floor_relive_minutes, id="floor_relive",
                       max_instances=1, coalesce=True)

@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     admin_user: str = "admin"
     admin_password: str = ""
 
+    # Порог предупреждения о балансе закупа. Ниже него выкуп ещё идёт, но запаса мало:
+    # при обычном расходе это меньше недели работы, а пополнение занимает время.
+    low_balance_usd: float = 150.0
+    balance_watch_minutes: int = 15
+
     markup: float = 1.20
     # Profitability guard: refuse to buy an item whose live cost (raw price × FX, no
     # markup) exceeds this fraction of the sale price. 0.9 = never spend >90% of what the

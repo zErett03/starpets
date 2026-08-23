@@ -144,6 +144,21 @@ def _fmt_dt(dt) -> str:
         return str(dt)
 
 
+def _balance_box(bal: float | None) -> str:
+    """Баланс закупа в углу шапки. Оператор видит причину отказов выкупа сразу, не гадая.
+
+    Прочерк вместо нуля, когда API не ответил: показать «$0.00» при недоступном StarPets
+    значит соврать самым тревожным способом из возможных.
+    """
+    if bal is None:
+        return ('<div class="bal stale"><span class="v">—</span>'
+                'баланс недоступен</div>')
+    low = bal < settings.low_balance_usd
+    cls = "bal low" if low else "bal"
+    note = f"ниже порога ${settings.low_balance_usd:.0f}" if low else "баланс закупа"
+    return f'<div class="{cls}"><span class="v">${bal:,.2f}</span>{note}</div>'
+
+
 def classify_create_trade_error(code, body_text: str):
     """Map a create_trade failure to (icon, verdict) for the operator."""
     try:
@@ -163,7 +178,11 @@ html{scrollbar-gutter:stable}
 *{box-sizing:border-box}
 body{margin:0;background:#0d1117;color:#c9d1d9;font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
 a{color:#58a6ff;text-decoration:none}
-header{padding:14px 40px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:5}
+header{padding:14px 40px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:5;position:sticky}
+.bal{position:absolute;right:40px;top:12px;text-align:right;font-size:12px;color:#8b949e}
+.bal .v{display:block;font-size:17px;font-weight:600;color:#3fb950;line-height:1.2}
+.bal.low .v{color:#f85149}
+.bal.stale .v{color:#8b949e}
 h1{margin:0;font-size:16px;font-weight:600}
 .sub{color:#8b949e;font-size:12px;margin-top:3px}
 .flash{margin:12px 40px 0;padding:10px 14px;border-radius:8px;background:#1f6feb22;border:1px solid #1f6feb66;color:#c9d1d9;font-size:13px}
@@ -655,6 +674,10 @@ async def admin_orders(
         f'</div>'
     )
 
+    # Баланс из кэша (обновляется раз в минуту) — страница не должна ждать StarPets.
+    from app.workers.balance_watch import get_balance_usd
+    balance_usd = await get_balance_usd()
+
     rows_html = "".join(_order_row(o, money.get(o.id)) for o in orders) or (
         '<tr><td colspan="13" style="padding:24px;text-align:center;color:#8b949e">Заказов нет</td></tr>'
     )
@@ -670,6 +693,7 @@ async def admin_orders(
     <a class="xlink" href="/admin/import-purchase-log" title="Восстановить историю перевыкупов из логов">⟲ импорт журнала</a>
   </h1>
   <div class="sub">Операторская панель · всего {total_all} · обновлено {datetime.utcnow().strftime("%H:%M:%S")} UTC</div>
+  {_balance_box(balance_usd)}
 </header>
 {flash_html}
 <div class="toolbar">
