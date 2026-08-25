@@ -21,7 +21,7 @@ from sqlalchemy import select
 from app.clients.starpets import starpets
 from app.config import settings
 from app.db import AsyncSessionLocal
-from app.db.models import KVState, Offer, OfferStatus
+from app.db.models import KVState, Offer, OfferStatus, SkuVariant
 from app.fx import get_usd_rub
 
 router = APIRouter()
@@ -105,6 +105,13 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
 
     # Статус карточки: выгрузку смотрят вместе с витриной, и «товар есть, а карточки нет»
     # — самая частая причина вопросов к прайсу.
+    #
+    # Источников привязки ДВА, и это не дублирование. Одиночная карточка хранит товар в
+    # offers.starpets_product_id. SKU-карточка так не может: за ней стоят десятки товаров
+    # (возраст × прокачка × fly/ride), поэтому её собственный product_id пуст, а связь
+    # живёт в sku_variants. Если смотреть только в offers, вся витрина Adopt Me выглядит
+    # мёртвой: 40 «активных» против 13 546 «на паузе» — это старые одиночные карточки,
+    # выключенные при переходе на SKU, а реальные продажи идут мимо этой таблицы.
     async with AsyncSessionLocal() as db:
         cards = {
             int(pid): (gid, st.value if hasattr(st, "value") else str(st))
@@ -113,6 +120,24 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
                 .where(Offer.starpets_product_id.isnot(None))
             )).all() if pid is not None
         }
+        # Статус берём у карточки-владельца варианта; скрытый вариант отмечаем отдельно —
+        # карточка активна, но конкретно этот товар с витрины убран.
+        sku_rows = (await db.execute(
+            select(SkuVariant.starpets_product_id, SkuVariant.ggsel_offer_id,
+                   SkuVariant.hidden, Offer.status)
+            .join(Offer, Offer.ggsel_offer_id == SkuVariant.ggsel_offer_id)
+        )).all()
+        for pid, gid, hidden, st in sku_rows:
+            if pid is None:
+                continue
+            status = st.value if hasattr(st, "value") else str(st)
+            if hidden:
+                status = "вариант скрыт"
+            prev = cards.get(int(pid))
+            # SKU-привязка приоритетнее: одиночная карточка того же товара, если она есть,
+            # почти всегда — выключенный предшественник.
+            if prev is None or prev[1] in ("paused", "draft", "pending_create"):
+                cards[int(pid)] = (gid, status)
 
     rows = []
     for p in products:
