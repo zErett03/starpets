@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.clients.starpets import starpets
 from app.db import AsyncSessionLocal
-from app.db.models import Offer, OfferStatus
+from app.db.models import KVState, Offer, OfferStatus
 from app.fx import get_usd_rub
 
 router = APIRouter()
@@ -37,7 +37,15 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     # говорит — позиция с единственным лотом ведёт себя иначе, чем позиция с сотней.
     best: dict = {}
     lots: dict = {}
+    pages = seen = 0
     async for page in starpets.iter_items():
+        pages += 1
+        seen += len(page)
+        # Прогресс в лог: проход идёт минутами, и без него снаружи не отличить «медленно
+        # листает» от «повис на запросе». Раз в 50 страниц — не засоряя логи.
+        if pages % 50 == 0:
+            print(f"[PriceExport] страниц {pages}, лотов {seen}, товаров с ценой {len(best)}",
+                  flush=True)
         for item in page:
             pid = item.get("productId")
             if not pid:
@@ -100,13 +108,60 @@ _JOB: dict = {"state": "idle", "csv": "", "rows": 0, "fx": None,
               "started": None, "finished": None, "error": None}
 
 
+_CSV_KEY = "price_export:csv"
+_META_KEY = "price_export:meta"
+_DEADLINE_SEC = 1200        # 20 мин; дольше — значит проход повис, а не идёт медленно
+
+
+async def _save_result(csv_text: str, rows: int, fx: float) -> None:
+    """Готовую выгрузку кладём в базу. Память процесса её не переживает: Railway
+    перезапускает контейнер когда захочет, и на 14-й минуте сборки это особенно обидно."""
+    meta = f"{rows}|{fx}|{datetime.now(timezone.utc).isoformat()}"
+    async with AsyncSessionLocal() as db:
+        for key, val in ((_CSV_KEY, csv_text), (_META_KEY, meta)):
+            row = (await db.execute(select(KVState).where(KVState.key == key))).scalar_one_or_none()
+            if row:
+                row.value = val
+            else:
+                db.add(KVState(key=key, value=val))
+        await db.commit()
+
+
+async def _load_result() -> bool:
+    """Поднять последнюю выгрузку из базы в память. True — если что-то нашлось."""
+    async with AsyncSessionLocal() as db:
+        csv_row = (await db.execute(select(KVState).where(KVState.key == _CSV_KEY))).scalar_one_or_none()
+        meta_row = (await db.execute(select(KVState).where(KVState.key == _META_KEY))).scalar_one_or_none()
+    if not (csv_row and csv_row.value):
+        return False
+    rows, fx, finished = 0, None, None
+    if meta_row and meta_row.value:
+        parts = meta_row.value.split("|")
+        try:
+            rows, fx = int(parts[0]), float(parts[1])
+            finished = datetime.fromisoformat(parts[2])
+        except (ValueError, IndexError):
+            pass
+    _JOB.update(state="done", csv=csv_row.value, rows=rows, fx=fx, finished=finished)
+    return True
+
+
 async def _build_job(free_only: bool) -> None:
+    import asyncio
+
     _JOB.update(state="running", started=datetime.now(timezone.utc), error=None)
     try:
-        rows, fx = await collect_prices(free_only=free_only)
-        _JOB.update(state="done", csv=_to_csv(rows), rows=len(rows), fx=fx,
+        rows, fx = await asyncio.wait_for(collect_prices(free_only=free_only),
+                                          timeout=_DEADLINE_SEC)
+        csv_text = _to_csv(rows)
+        _JOB.update(state="done", csv=csv_text, rows=len(rows), fx=fx,
                     finished=datetime.now(timezone.utc))
+        await _save_result(csv_text, len(rows), fx)
         print(f"[PriceExport] готово: {len(rows)} строк, курс {fx}", flush=True)
+    except asyncio.TimeoutError:
+        _JOB.update(state="error", error=f"проход не уложился в {_DEADLINE_SEC // 60} мин",
+                    finished=datetime.now(timezone.utc))
+        print(f"[PriceExport] таймаут {_DEADLINE_SEC}с", flush=True)
     except Exception as e:  # noqa: BLE001
         _JOB.update(state="error", error=f"{type(e).__name__}: {e}",
                     finished=datetime.now(timezone.utc))
@@ -133,6 +188,8 @@ def _age(dt) -> str:
 @router.get("/price-export/status")
 async def price_export_status():
     """Состояние фоновой сборки: idle / running / done / error."""
+    if _JOB["state"] == "idle" and not _JOB["csv"]:
+        await _load_result()
     return {"state": _JOB["state"], "rows": _JOB["rows"], "fx": _JOB["fx"],
             "started": str(_JOB["started"] or ""), "finished": str(_JOB["finished"] or ""),
             "age": _age(_JOB["finished"]), "error": _JOB["error"]}
@@ -146,6 +203,11 @@ async def price_export(fmt: str = "csv", free_only: bool = True, refresh: bool =
     отдаст файл. ?refresh=true — пересобрать заново, ?fmt=json — JSON вместо CSV.
     """
     import asyncio
+
+    # После рестарта контейнера память пуста, но выгрузка могла остаться в базе —
+    # поднимаем её, вместо того чтобы гонять сборку заново.
+    if _JOB["state"] == "idle" and not _JOB["csv"]:
+        await _load_result()
 
     if _JOB["state"] == "running":
         return PlainTextResponse(
