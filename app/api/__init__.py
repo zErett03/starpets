@@ -13,8 +13,10 @@ app.include_router(webhooks_router)
 app.include_router(admin_router)
 
 from app.api.accounting import router as accounting_router  # noqa: E402
+from app.api.price_export import router as price_export_router  # noqa: E402
 
 app.include_router(accounting_router)
+app.include_router(price_export_router)
 
 
 import base64 as _b64
