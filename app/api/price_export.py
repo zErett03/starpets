@@ -29,6 +29,43 @@ router = APIRouter()
 GAME = "Adopt Me"
 
 
+async def card_index() -> dict:
+    """{product_id: (ggsel_offer_id, статус)} — где каждый товар представлен на витрине.
+
+    Источников привязки ДВА, и это не дублирование. Одиночная карточка хранит товар в
+    offers.starpets_product_id. SKU-карточка так не может: за ней стоят десятки товаров
+    (возраст × прокачка × fly/ride), поэтому её собственный product_id пуст, а связь живёт
+    в sku_variants. Если смотреть только в offers, вся витрина Adopt Me выглядит мёртвой:
+    40 «активных» против 13 546 «на паузе» — это старые одиночные карточки, выключенные
+    при переходе на SKU, а реальные продажи идут мимо той таблицы.
+    """
+    async with AsyncSessionLocal() as db:
+        cards = {
+            int(pid): (gid, st.value if hasattr(st, "value") else str(st))
+            for pid, gid, st in (await db.execute(
+                select(Offer.starpets_product_id, Offer.ggsel_offer_id, Offer.status)
+                .where(Offer.starpets_product_id.isnot(None))
+            )).all() if pid is not None
+        }
+        # Статус берём у карточки-владельца варианта; скрытый вариант отмечаем отдельно —
+        # карточка активна, но конкретно этот товар с витрины убран.
+        sku_rows = (await db.execute(
+            select(SkuVariant.starpets_product_id, SkuVariant.ggsel_offer_id,
+                   SkuVariant.hidden, Offer.status)
+            .join(Offer, Offer.ggsel_offer_id == SkuVariant.ggsel_offer_id)
+        )).all()
+    for pid, gid, hidden, st in sku_rows:
+        if pid is None:
+            continue
+        status = "вариант скрыт" if hidden else (st.value if hasattr(st, "value") else str(st))
+        prev = cards.get(int(pid))
+        # SKU-привязка приоритетнее: одиночная карточка того же товара, если она есть,
+        # почти всегда — выключенный предшественник.
+        if prev is None or prev[1] in ("paused", "draft", "pending_create"):
+            cards[int(pid)] = (gid, status)
+    return cards
+
+
 async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     """[{product_id, name, ..., price_usd, price_rub, lots}] + курс. Живые данные.
 
@@ -112,32 +149,7 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     # живёт в sku_variants. Если смотреть только в offers, вся витрина Adopt Me выглядит
     # мёртвой: 40 «активных» против 13 546 «на паузе» — это старые одиночные карточки,
     # выключенные при переходе на SKU, а реальные продажи идут мимо этой таблицы.
-    async with AsyncSessionLocal() as db:
-        cards = {
-            int(pid): (gid, st.value if hasattr(st, "value") else str(st))
-            for pid, gid, st in (await db.execute(
-                select(Offer.starpets_product_id, Offer.ggsel_offer_id, Offer.status)
-                .where(Offer.starpets_product_id.isnot(None))
-            )).all() if pid is not None
-        }
-        # Статус берём у карточки-владельца варианта; скрытый вариант отмечаем отдельно —
-        # карточка активна, но конкретно этот товар с витрины убран.
-        sku_rows = (await db.execute(
-            select(SkuVariant.starpets_product_id, SkuVariant.ggsel_offer_id,
-                   SkuVariant.hidden, Offer.status)
-            .join(Offer, Offer.ggsel_offer_id == SkuVariant.ggsel_offer_id)
-        )).all()
-        for pid, gid, hidden, st in sku_rows:
-            if pid is None:
-                continue
-            status = st.value if hasattr(st, "value") else str(st)
-            if hidden:
-                status = "вариант скрыт"
-            prev = cards.get(int(pid))
-            # SKU-привязка приоритетнее: одиночная карточка того же товара, если она есть,
-            # почти всегда — выключенный предшественник.
-            if prev is None or prev[1] in ("paused", "draft", "pending_create"):
-                cards[int(pid)] = (gid, status)
+    cards = await card_index()
 
     rows = []
     for p in products:
@@ -252,6 +264,79 @@ def _age(dt) -> str:
         return "—"
     sec = int((datetime.now(timezone.utc) - dt).total_seconds())
     return f"{sec // 60} мин {sec % 60} с назад" if sec >= 60 else f"{sec} с назад"
+
+
+@router.get("/showcase-audit")
+async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float = 0.0):
+    """Всё ли, что можно продать, лежит на витрине — и наоборот.
+
+    Считается по последней выгрузке цен (она даёт наличие лотов) и текущим статусам
+    карточек из базы. Пересобирать цены ради аудита не нужно: наличие товара меняется
+    медленнее, чем статусы, а полный проход стоит четверти часа.
+
+    Четыре разряда, по убыванию денежной боли:
+      • upside      — товар есть, карточки нет вообще. Продажи, которых мы не делаем.
+      • sleeping    — карточка есть, но спит (пауза/черновик) при живом товаре.
+      • hidden      — SKU-вариант скрыт, хотя товар вернулся в продажу.
+      • overhang    — карточка активна, а товара нет. Заказ придёт, выкупить будет нечего.
+    """
+    if _JOB["state"] == "idle" and not _JOB["csv"]:
+        await _load_result()
+    if not _JOB["csv"]:
+        return {"error": "нет выгрузки цен — сначала /price-export"}
+
+    reader = csv.DictReader(io.StringIO(_JOB["csv"].lstrip("﻿")), delimiter=";")
+    cards = await card_index()
+    buckets: dict = {"upside": [], "sleeping": [], "hidden": [], "overhang": []}
+
+    for r in reader:
+        try:
+            pid = int(r["product_id"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        price_rub = float(r["price_rub"]) if r.get("price_rub") else 0.0
+        lots = int(r.get("lots_free_max100") or 0)
+        gid, status = cards.get(pid, (None, "нет карточки"))
+        in_stock = lots > 0 and price_rub > 0
+        item = {"product_id": pid, "name": r["name"], "rare": r.get("rare", ""),
+                "age": r.get("age", ""), "pumping": r.get("pumping", ""),
+                "price_rub": round(price_rub, 2), "lots": lots,
+                "ggsel_offer_id": gid, "status": status}
+
+        if in_stock and price_rub >= min_price_rub:
+            if status == "нет карточки" or status == "pending_create":
+                buckets["upside"].append(item)
+            elif status in ("paused", "draft"):
+                buckets["sleeping"].append(item)
+            elif status == "вариант скрыт":
+                buckets["hidden"].append(item)
+        elif not in_stock and status == "active":
+            buckets["overhang"].append(item)
+
+    # Сортируем по цене: сотня дешёвых позиций без карточки стоит меньше, чем одна дорогая.
+    for k in buckets:
+        buckets[k].sort(key=lambda x: -x["price_rub"])
+
+    summary = {k: len(v) for k, v in buckets.items()}
+    summary["upside_rub"] = round(sum(x["price_rub"] for x in buckets["upside"]), 2)
+    summary["sleeping_rub"] = round(sum(x["price_rub"] for x in buckets["sleeping"]), 2)
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf, delimiter=";", lineterminator="\n")
+        w.writerow(["разряд", "product_id", "название", "редкость", "возраст", "прокачка",
+                    "себестоимость_руб", "лотов", "ggsel_offer_id", "статус"])
+        for k, items in buckets.items():
+            for x in items:
+                w.writerow([k, x["product_id"], x["name"], x["rare"], x["age"], x["pumping"],
+                            x["price_rub"], x["lots"], x["ggsel_offer_id"], x["status"]])
+        return PlainTextResponse(
+            "﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="showcase-audit.csv"'})
+
+    return {"game": GAME, "prices_from": str(_JOB["finished"] or ""), "summary": summary,
+            "upside": buckets["upside"][:top], "sleeping": buckets["sleeping"][:top],
+            "hidden": buckets["hidden"][:top], "overhang": buckets["overhang"][:top]}
 
 
 @router.get("/price-export/status")
