@@ -19,6 +19,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
 from app.clients.starpets import starpets
+from app.config import settings
 from app.db import AsyncSessionLocal
 from app.db.models import KVState, Offer, OfferStatus
 from app.fx import get_usd_rub
@@ -29,35 +30,78 @@ GAME = "Adopt Me"
 
 
 async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
-    """[{product_id, name, ..., price_usd, price_rub, lots}] + курс. Живые данные."""
+    """[{product_id, name, ..., price_usd, price_rub, lots}] + курс. Живые данные.
+
+    Порядок простой: берём каталог игры, по каждому товару спрашиваем его лоты, берём
+    минимальную цену среди свободных — она и есть себестоимость на сейчас.
+
+    Цены спрашиваем ПОТОВАРНО (items/top/{product_id}), а не листая общую ленту items/all.
+    Лента отдаёт страницы по 1000 и просит передавать курсором id последнего лота, но
+    курсор на ней не сдвигается: проход 1150 раз получил одну и ту же первую тысячу и
+    завис бы навсегда, если бы его не оборвала 500-я ошибка (счётчик показал «1,15 млн
+    лотов» при реальных двадцати тысячах — это были повторы). Потоварный опрос дороже по
+    числу запросов, зато ограничен нашим каталогом, идёт параллельно и переживает
+    единичные сбои: упавший товар останется без цены, а не обнулит весь проход.
+    """
+    import asyncio
+
+    import httpx
+
     products = await starpets.get_all_products()
     fx = await get_usd_rub()
+    pids = [p.get("id") for p in products if p.get("id") is not None]
 
     # Минимум по свободным лотам + счётчик предложений: одна цена без объёма мало
     # говорит — позиция с единственным лотом ведёт себя иначе, чем позиция с сотней.
+    # Счётчик упирается в потолок ответа API: items/top отдаёт максимум 100 экземпляров,
+    # поэтому «100» в колонке означает «сто и больше». На минимальную цену это не влияет —
+    # список приходит от самых дешёвых.
     best: dict = {}
     lots: dict = {}
-    pages = seen = 0
-    async for page in starpets.iter_items():
-        pages += 1
-        seen += len(page)
-        # Прогресс в лог: проход идёт минутами, и без него снаружи не отличить «медленно
-        # листает» от «повис на запросе». Раз в 50 страниц — не засоряя логи.
-        if pages % 50 == 0:
-            print(f"[PriceExport] страниц {pages}, лотов {seen}, товаров с ценой {len(best)}",
-                  flush=True)
-        for item in page:
-            pid = item.get("productId")
-            if not pid:
-                continue
-            if free_only and int(item.get("reserveLevel") or 0) != 0:
-                continue
-            price = float(item.get("price_usd") or 0)
-            if price <= 0:
-                continue
-            lots[pid] = lots.get(pid, 0) + 1
-            if pid not in best or price < best[pid]:
-                best[pid] = price
+    done = failed = 0
+    sem = asyncio.Semaphore(max(4, settings.sync_concurrency))
+
+    async def _one(http: httpx.AsyncClient, pid) -> None:
+        nonlocal done, failed
+        async with sem:
+            for attempt in (1, 2, 3):
+                try:
+                    params = starpets._base_params()
+                    resp = await http.get(
+                        f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
+                        headers=starpets._headers(starpets._sign(params)), params=params)
+                    if resp.status_code >= 500 and attempt < 3:
+                        await asyncio.sleep(0.5 * attempt)   # временная просадка — подождём
+                        continue
+                    if not resp.is_success:
+                        failed += 1
+                        return
+                    items = resp.json().get("items") or []
+                except Exception:  # noqa: BLE001
+                    if attempt < 3:
+                        await asyncio.sleep(0.5 * attempt)
+                        continue
+                    failed += 1
+                    return
+                for it in items:
+                    if free_only and int(it.get("reserveLevel") or 0) != 0:
+                        continue
+                    price = float(it.get("price_usd") or 0)
+                    if price <= 0:
+                        continue
+                    lots[pid] = lots.get(pid, 0) + 1
+                    if pid not in best or price < best[pid]:
+                        best[pid] = price
+                done += 1
+                return
+
+    print(f"[PriceExport] старт: {len(pids)} товаров каталога", flush=True)
+    limits = httpx.Limits(max_connections=settings.sync_concurrency + 5)
+    async with httpx.AsyncClient(timeout=15, limits=limits) as http:
+        for i in range(0, len(pids), 500):
+            await asyncio.gather(*[_one(http, pid) for pid in pids[i:i + 500]])
+            print(f"[PriceExport] {min(i + 500, len(pids))}/{len(pids)} · "
+                  f"с ценой {len(best)} · без ответа {failed}", flush=True)
 
     # Статус карточки: выгрузку смотрят вместе с витриной, и «товар есть, а карточки нет»
     # — самая частая причина вопросов к прайсу.
@@ -92,7 +136,7 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
             "chroma": bool(p.get("chroma", False)),
             "price_usd": round(price_usd, 4) if price_usd else "",
             "price_rub": round(price_usd * fx, 2) if price_usd else "",
-            "lots_free": lots.get(pid, 0),
+            "lots_free_max100": lots.get(pid, 0),
             "ggsel_offer_id": gid or "",
             "card_status": status,
         })
