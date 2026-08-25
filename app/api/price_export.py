@@ -267,7 +267,8 @@ def _age(dt) -> str:
 
 
 @router.get("/showcase-audit")
-async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float = 0.0):
+async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float = 0.0,
+                         max_sale_rub: float = 10000.0):
     """Всё ли, что можно продать, лежит на витрине — и наоборот.
 
     Считается по последней выгрузке цен (она даёт наличие лотов) и текущим статусам
@@ -279,6 +280,14 @@ async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float 
       • sleeping    — карточка есть, но спит (пауза/черновик) при живом товаре.
       • hidden      — SKU-вариант скрыт, хотя товар вернулся в продажу.
       • overhang    — карточка активна, а товара нет. Заказ придёт, выкупить будет нечего.
+      • premium     — спит или не заведена, но цена продажи выше max_sale_rub.
+
+    Разряд premium существует, чтобы не звать чинить то, что выключено намеренно: дорогие
+    позиции держат вне витрины сознательно (активация шла партиями с потолком цены —
+    см. activate-batch?max_price_rub). Без такого разделения аудит каждый раз показывал бы
+    сотни тысяч рублей «упущенного» и приучал бы себя игнорировать. Порог считается по
+    ЦЕНЕ ПРОДАЖИ (себестоимость × наценка), а не по себестоимости: ограничение возникло
+    из-за того, во сколько карточка встаёт покупателю.
     """
     if _JOB["state"] == "idle" and not _JOB["csv"]:
         await _load_result()
@@ -287,7 +296,7 @@ async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float 
 
     reader = csv.DictReader(io.StringIO(_JOB["csv"].lstrip("﻿")), delimiter=";")
     cards = await card_index()
-    buckets: dict = {"upside": [], "sleeping": [], "hidden": [], "overhang": []}
+    buckets: dict = {"upside": [], "sleeping": [], "hidden": [], "overhang": [], "premium": []}
 
     for r in reader:
         try:
@@ -298,13 +307,17 @@ async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float 
         lots = int(r.get("lots_free_max100") or 0)
         gid, status = cards.get(pid, (None, "нет карточки"))
         in_stock = lots > 0 and price_rub > 0
+        sale_rub = round(price_rub * settings.markup, 2)
         item = {"product_id": pid, "name": r["name"], "rare": r.get("rare", ""),
                 "age": r.get("age", ""), "pumping": r.get("pumping", ""),
-                "price_rub": round(price_rub, 2), "lots": lots,
+                "price_rub": round(price_rub, 2), "sale_rub": sale_rub, "lots": lots,
                 "ggsel_offer_id": gid, "status": status}
 
         if in_stock and price_rub >= min_price_rub:
-            if status == "нет карточки" or status == "pending_create":
+            idle = status in ("нет карточки", "pending_create", "paused", "draft")
+            if idle and max_sale_rub and sale_rub > max_sale_rub:
+                buckets["premium"].append(item)      # выключено намеренно, не чиним
+            elif status in ("нет карточки", "pending_create"):
                 buckets["upside"].append(item)
             elif status in ("paused", "draft"):
                 buckets["sleeping"].append(item)
@@ -320,23 +333,26 @@ async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float 
     summary = {k: len(v) for k, v in buckets.items()}
     summary["upside_rub"] = round(sum(x["price_rub"] for x in buckets["upside"]), 2)
     summary["sleeping_rub"] = round(sum(x["price_rub"] for x in buckets["sleeping"]), 2)
+    summary["max_sale_rub"] = max_sale_rub
 
     if fmt == "csv":
         buf = io.StringIO()
         w = csv.writer(buf, delimiter=";", lineterminator="\n")
         w.writerow(["разряд", "product_id", "название", "редкость", "возраст", "прокачка",
-                    "себестоимость_руб", "лотов", "ggsel_offer_id", "статус"])
+                    "себестоимость_руб", "цена_продажи_руб", "лотов", "ggsel_offer_id", "статус"])
         for k, items in buckets.items():
             for x in items:
                 w.writerow([k, x["product_id"], x["name"], x["rare"], x["age"], x["pumping"],
-                            x["price_rub"], x["lots"], x["ggsel_offer_id"], x["status"]])
+                            x["price_rub"], x["sale_rub"], x["lots"], x["ggsel_offer_id"],
+                            x["status"]])
         return PlainTextResponse(
             "﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="showcase-audit.csv"'})
 
     return {"game": GAME, "prices_from": str(_JOB["finished"] or ""), "summary": summary,
             "upside": buckets["upside"][:top], "sleeping": buckets["sleeping"][:top],
-            "hidden": buckets["hidden"][:top], "overhang": buckets["overhang"][:top]}
+            "hidden": buckets["hidden"][:top], "overhang": buckets["overhang"][:top],
+            "premium": buckets["premium"][:top]}
 
 
 @router.get("/price-export/status")
