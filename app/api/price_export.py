@@ -88,26 +88,90 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     return rows, fx
 
 
-@router.get("/price-export", response_class=PlainTextResponse)
-async def price_export(fmt: str = "csv", free_only: bool = True):
-    """Прайс по всему каталогу: себестоимость в USD и RUB, без наценки.
-    ?fmt=json — тот же набор в JSON. ?free_only=false — считать и резерв (обычно не нужно)."""
-    rows, fx = await collect_prices(free_only=free_only)
-    if fmt == "json":
-        return PlainTextResponse(
-            __import__("json").dumps({"game": GAME, "fx": fx, "rows": rows}, ensure_ascii=False),
-            media_type="application/json")
+# Готовая выгрузка живёт в памяти процесса. Собирается она минуты — весь каталог плюс все
+# страницы лотов, — и держать на это открытым HTTP-соединение бессмысленно: браузер отвалится
+# по таймауту раньше, чем сервер закончит. Поэтому сборка идёт в фоне, а страница сразу
+# говорит, готово или нет. Потеря при рестарте не страшна: пересобрать стоит одну кнопку.
+_JOB: dict = {"state": "idle", "csv": "", "rows": 0, "fx": None,
+              "started": None, "finished": None, "error": None}
 
+
+async def _build_job(free_only: bool) -> None:
+    _JOB.update(state="running", started=datetime.now(timezone.utc), error=None)
+    try:
+        rows, fx = await collect_prices(free_only=free_only)
+        _JOB.update(state="done", csv=_to_csv(rows), rows=len(rows), fx=fx,
+                    finished=datetime.now(timezone.utc))
+        print(f"[PriceExport] готово: {len(rows)} строк, курс {fx}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        _JOB.update(state="error", error=f"{type(e).__name__}: {e}",
+                    finished=datetime.now(timezone.utc))
+        print(f"[PriceExport] ошибка: {e}", flush=True)
+
+
+def _to_csv(rows: list[dict]) -> str:
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()) if rows else ["game"],
                        delimiter=";", lineterminator="\n")
     w.writeheader()
     w.writerows(rows)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     # BOM — иначе Excel открывает кириллицу кракозябрами, а файл идёт людям, не в скрипт.
+    return "﻿" + buf.getvalue()
+
+
+def _age(dt) -> str:
+    if not dt:
+        return "—"
+    sec = int((datetime.now(timezone.utc) - dt).total_seconds())
+    return f"{sec // 60} мин {sec % 60} с назад" if sec >= 60 else f"{sec} с назад"
+
+
+@router.get("/price-export/status")
+async def price_export_status():
+    """Состояние фоновой сборки: idle / running / done / error."""
+    return {"state": _JOB["state"], "rows": _JOB["rows"], "fx": _JOB["fx"],
+            "started": str(_JOB["started"] or ""), "finished": str(_JOB["finished"] or ""),
+            "age": _age(_JOB["finished"]), "error": _JOB["error"]}
+
+
+@router.get("/price-export", response_class=PlainTextResponse)
+async def price_export(fmt: str = "csv", free_only: bool = True, refresh: bool = False):
+    """Прайс по всему каталогу: себестоимость в USD и RUB, без наценки.
+
+    Первый заход запускает сборку и отвечает сразу; когда она закончится, тот же адрес
+    отдаст файл. ?refresh=true — пересобрать заново, ?fmt=json — JSON вместо CSV.
+    """
+    import asyncio
+
+    if _JOB["state"] == "running":
+        return PlainTextResponse(
+            f"Выгрузка собирается, начата {_age(_JOB['started'])}.\n"
+            f"Обнови страницу через минуту — файл скачается сам.",
+            status_code=202, media_type="text/plain; charset=utf-8")
+
+    if refresh or _JOB["state"] in ("idle", "error"):
+        asyncio.create_task(_build_job(free_only))
+        note = "Пересобираю выгрузку." if refresh else "Запустил сборку выгрузки."
+        prev = (f"\nПрошлая версия ({_JOB['rows']} строк, {_age(_JOB['finished'])}) "
+                f"останется доступна, пока не готова новая." if _JOB["csv"] and refresh else "")
+        return PlainTextResponse(
+            f"{note} Каталог большой, это занимает 1–3 минуты.\n"
+            f"Обнови страницу — когда будет готово, начнётся скачивание.{prev}\n"
+            f"Состояние: /price-export/status",
+            status_code=202, media_type="text/plain; charset=utf-8")
+
+    if fmt == "json":
+        return PlainTextResponse(
+            __import__("json").dumps({"game": GAME, "fx": _JOB["fx"], "rows": _JOB["rows"],
+                                      "csv": _JOB["csv"]}, ensure_ascii=False),
+            media_type="application/json")
+
+    stamp = (_JOB["finished"] or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M")
     return PlainTextResponse(
-        "﻿" + buf.getvalue(),
+        _JOB["csv"],
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="prices-am-{stamp}.csv"',
-                 "X-FX-Rate": str(fx)},
+                 "X-FX-Rate": str(_JOB["fx"]), "X-Rows": str(_JOB["rows"])},
     )
+
+
