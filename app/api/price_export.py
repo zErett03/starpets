@@ -75,6 +75,10 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
             "type": p.get("type") or p.get("item_type") or "",
             "subtype": p.get("subtype") or "",
             "age": p.get("age") or "",
+            # Стадия прокачки: default / neon / mega_neon. Без неё прайс врёт на самом
+            # дорогом: у неонового питомца возраст пустой, и в таблице он неотличим от
+            # второго неона той же породы, хотя цены различаются вдвое.
+            "pumping": p.get("pumping") or "default",
             "flyable": bool(p.get("flyable", False)),
             "rideable": bool(p.get("rideable", False)),
             "chroma": bool(p.get("chroma", False)),
