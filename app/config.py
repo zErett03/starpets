@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -155,6 +156,18 @@ class Settings(BaseSettings):
     reprice_cards: bool = False
     reprice_cards_minutes: int = 30
     starpets_category_id: int = 0
+
+    # Пробел на конце адреса в панели Railway не виден глазом, но ломает всё, что из него
+    # собирается. Один такой пробел в PUBLIC_URL на MM2 превратил адрес вебхука в
+    # «https://mm2.bebrshop.pro /hooks/...», ggsel перестал принимать настройки уведомлений
+    # и отдавал 500 — а выглядело это как поломка на его стороне, потому что предчек с тем
+    # же адресом он молча принимал. Чистим при загрузке: доверять глазам здесь нельзя.
+    @field_validator("public_url", "delivery_base_url", "sibling_admin_url",
+                     "starpets_base_url", "ggsel_base_url", "mm2_public_url",
+                     mode="before")
+    @classmethod
+    def _strip_url(cls, v):
+        return v.strip().rstrip("/") if isinstance(v, str) else v
 
     class Config:
         env_file = ".env"
