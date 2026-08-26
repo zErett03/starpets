@@ -103,6 +103,60 @@ async def reprice_cards_ep(dry_run: bool = True, max_offers: int = 20000,
     return {"started": True, "note": "фоново; см. [Reprice] в логах"}
 
 
+@app.get("/probe-order")
+async def probe_order(order_id: int = 0, our_order_id: int = 0):
+    """Что ggsel на самом деле отдаёт по заказу и в какой валюте.
+
+    Нужно, потому что валюте в уведомлении доверять нельзя: заказ, оплаченный в евро,
+    приходил как `amount: 3.64, currency: RUB`, и 3.64 € записывались как 3.64 ₽ —
+    профит-гард видел убыток и блокировал выгодную сделку. Мы стали уточнять сумму через
+    API с заголовком currency=RUB, но проверить, что заголовок вправду действует, до сих
+    пор было нечем. Здесь три запроса: с RUB, с валютой оплаты и без заголовка вовсе.
+    """
+    import httpx as _hx
+    from sqlalchemy import select
+    from app.clients.ggsel import SELLER_OFFICE_V2_URL
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, WebhookEvent
+
+    out: dict = {}
+    if our_order_id and not order_id:
+        async with AsyncSessionLocal() as db:
+            o = (await db.execute(select(Order).where(Order.id == our_order_id))).scalar_one_or_none()
+            if not o:
+                return {"error": f"заказ #{our_order_id} не найден"}
+            order_id = int(o.ggsel_order_id or 0)
+            out["our_order"] = {"id": o.id, "amount_rub": float(o.amount_rub or 0),
+                                "ggsel_order_id": o.ggsel_order_id,
+                                "item_name": o.item_name}
+    if not order_id:
+        return {"error": "нужен order_id (ggsel) или our_order_id (наш)"}
+
+    # Что пришло в вебхуке — исходная точка: с ней сравниваем ответы API.
+    async with AsyncSessionLocal() as db:
+        # У события нет отдельного поля с номером заказа — он зашит в external_id.
+        ev = (await db.execute(
+            select(WebhookEvent).where(WebhookEvent.external_id.contains(str(order_id)))
+            .order_by(WebhookEvent.id.desc()).limit(1)
+        )).scalar_one_or_none()
+        if ev is not None:
+            out["webhook_payload"] = ev.payload
+
+    out["ggsel_order_id"] = order_id
+    out["api"] = {}
+    for label, headers in (("currency=RUB", {"currency": "RUB"}),
+                           ("currency=USD", {"currency": "USD"}),
+                           ("без заголовка", {})):
+        try:
+            async with _hx.AsyncClient(headers={**ggsel_office._headers(), **headers},
+                                       timeout=15) as client:
+                r = await client.get(f"{SELLER_OFFICE_V2_URL}/orders/{order_id}")
+                out["api"][label] = {"status": r.status_code, "body": r.text[:1200]}
+        except Exception as e:  # noqa: BLE001
+            out["api"][label] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
 @app.get("/reconcile-card-status")
 async def reconcile_card_status(dry_run: bool = True, limit: int = 1000):
     """Сверяет статус карточки в базе со статусом на витрине ggsel и чинит расхождения.
