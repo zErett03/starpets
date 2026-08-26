@@ -143,6 +143,14 @@ async def probe_order(order_id: int = 0, our_order_id: int = 0):
             out["webhook_payload"] = ev.payload
 
     out["ggsel_order_id"] = order_id
+    # Второй API ggsel — тот, что обслуживает страницу выдачи. Он живёт по другому пути и
+    # с другим токеном, поэтому может отвечать там, где Seller API v2 даёт 404. Заодно это
+    # единственный известный источник, который называет валюту оплаты честно.
+    try:
+        out["purchase_info"] = await ggsel_office.get_purchase_info(order_id)
+    except Exception as e:  # noqa: BLE001
+        out["purchase_info_error"] = f"{type(e).__name__}: {e}"
+
     out["api"] = {}
     for label, headers in (("currency=RUB", {"currency": "RUB"}),
                            ("currency=USD", {"currency": "USD"}),
