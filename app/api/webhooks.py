@@ -261,6 +261,29 @@ def _dig_amount(data) -> float | None:
     return None
 
 
+async def _amount_details(body: dict) -> tuple[float | None, float | None, str | None]:
+    """(сумма в рублях, исходная сумма, валюта оплаты).
+
+    Отдельная обёртка нужна, чтобы сохранить в заказе не только результат пересчёта, но и
+    то, из чего он получен: без исходной валюты странная сумма в админке необъяснима.
+    """
+    order_id = body.get("id_i")
+    if order_id:
+        try:
+            info = await ggsel_office.get_purchase_info(int(order_id))
+        except Exception:  # noqa: BLE001 — детали залогирует _amount_to_rub
+            info = None
+        if isinstance(info, dict):
+            try:
+                paid = float(info.get("amount") or 0)
+            except (TypeError, ValueError):
+                paid = 0.0
+            code = str(info.get("currency_type") or "").strip().upper() or None
+            if paid > 0:
+                return await _amount_to_rub(body), paid, code
+    return await _amount_to_rub(body), None, None
+
+
 async def _amount_to_rub(body: dict) -> float | None:
     """Сумма заказа В РУБЛЯХ.
 
@@ -281,6 +304,39 @@ async def _amount_to_rub(body: dict) -> float | None:
             fallback = None
 
     order_id = body.get("id_i")
+
+    # ГЛАВНЫЙ ИСТОЧНИК — legacy purchase API. Он единственный называет валюту честно:
+    # по заказу 46424398 вебхук прислал «2.54 RUB», а purchase/info — «amount 2.54,
+    # currency_type USD, payment_method ERIP (USD)». Покупатель заплатил 2,54 доллара
+    # (≈214 ₽) за вариант по 203 ₽, а мы записали 2,54 ₽, и профит-гард отказался
+    # покупать питомца за два рубля. Seller API v2 /orders/{id} здесь бесполезен: на
+    # аккаунте Adopt Me он отдаёт 404 на любой заголовок валюты.
+    if order_id:
+        try:
+            info = await ggsel_office.get_purchase_info(int(order_id))
+        except Exception as e:  # noqa: BLE001
+            info = None
+            print(f"[notification] purchase/info {order_id} недоступен: {e}", flush=True)
+        if isinstance(info, dict):
+            try:
+                paid = float(info.get("amount") or 0)
+            except (TypeError, ValueError):
+                paid = 0.0
+            code = str(info.get("currency_type") or "").strip().upper()
+            if paid > 0:
+                if code and code not in ("RUB", "RUR"):
+                    from app.fx import get_rate_to_rub
+                    try:
+                        rate = await get_rate_to_rub(code)
+                        rub = round(paid * rate, 2)
+                        print(f"[notification] оплата {paid} {code} → {rub} ₽ "
+                              f"(курс {rate}, источник purchase/info)", flush=True)
+                        return rub
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[notification] курс {code} недоступен ({e})", flush=True)
+                else:
+                    return round(paid, 2)
+
     if order_id:
         try:
             data = await ggsel_office.get_order(int(order_id))
@@ -323,7 +379,7 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
     print(f"[notification] offer_id={offer_id} body: {body}", flush=True)
 
     id_i = body.get("id_i")
-    amount = await _amount_to_rub(body)
+    amount, amount_src, amount_cur = await _amount_details(body)
     email = body.get("email")
     ip = body.get("ip")
     date_str = body.get("date")
@@ -489,6 +545,8 @@ async def notification(offer_id: int, request: Request, secret: str = ""):
                 offer_id=offer.id,
                 item_name=offer.name,
                 amount_rub=amount,
+                amount_original=amount_src,
+                amount_currency=amount_cur,
                 roblox_username=roblox_username,
                 buyer_email=email,
                 buyer_ip=ip,

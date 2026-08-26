@@ -101,6 +101,12 @@ class Order(Base):
     item_name = Column(String, nullable=False)
 
     amount_rub = Column(Numeric(10, 2), nullable=True)
+    # Чем и сколько заплатил покупатель ДО пересчёта в рубли. Хранится не ради отчётности,
+    # а ради разбирательств: когда сумма выглядит странно, первый вопрос — «а в какой это
+    # валюте?». Раньше ответа в базе не было, и заказ на 2.54 USD был неотличим от заказа
+    # на 2.54 ₽ — с той разницей, что второй означал бы продажу в стократный убыток.
+    amount_original = Column(Numeric(10, 2), nullable=True)
+    amount_currency = Column(String(8), nullable=True)
     max_price_usd = Column(Numeric(10, 3), nullable=True)
 
     roblox_username = Column(String, nullable=True)

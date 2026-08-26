@@ -103,6 +103,82 @@ async def reprice_cards_ep(dry_run: bool = True, max_offers: int = 20000,
     return {"started": True, "note": "фоново; см. [Reprice] в логах"}
 
 
+@app.get("/fix-order-amounts")
+async def fix_order_amounts(dry_run: bool = True, days: int = 30, limit: int = 200):
+    """Пересчитать суммы заказов, записанные в чужой валюте как рубли.
+
+    Пока сумма бралась из уведомления, оплата в долларах или евро попадала в базу как
+    рубли: 2.54 USD становились 2,54 ₽. Профит-гард сравнивал себестоимость с этой цифрой
+    и отказывал в выкупе — заказ повисал с «price_too_high». Здесь мы спрашиваем настоящую
+    сумму и валюту у purchase/info и переписываем запись; выкуп после этого запускается
+    обычным перевыкупом из админки.
+    """
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+    from app.fx import get_rate_to_rub
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(Order).where(Order.created_at >= since,
+                                Order.ggsel_order_id.isnot(None))
+            .order_by(Order.id.desc()).limit(limit)
+        )).scalars().all()
+        snapshot = [(o.id, int(o.ggsel_order_id), float(o.amount_rub or 0),
+                     o.error_reason, o.item_name) for o in rows]
+
+    async def _run():
+        checked = fixed = 0
+        changes = []
+        for oid, gid, old_rub, reason, name in snapshot:
+            try:
+                info = await ggsel_office.get_purchase_info(gid)
+            except Exception as e:  # noqa: BLE001
+                print(f"[FixAmounts] {gid}: {type(e).__name__}: {e}", flush=True)
+                continue
+            if not isinstance(info, dict):
+                continue
+            try:
+                paid = float(info.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            code = str(info.get("currency_type") or "").strip().upper()
+            if paid <= 0 or not code:
+                continue
+            checked += 1
+            rate = 1.0 if code in ("RUB", "RUR") else await get_rate_to_rub(code)
+            new_rub = round(paid * rate, 2)
+            # Копеечные расхождения курса не трогаем: переписывать заказ ради 30 копеек
+            # значит терять историю там, где ошибки не было.
+            if abs(new_rub - old_rub) < 1.0:
+                continue
+            changes.append({"order_id": oid, "name": name, "was_rub": old_rub,
+                            "now_rub": new_rub, "paid": paid, "currency": code,
+                            "error_reason": reason})
+            if not dry_run:
+                async with AsyncSessionLocal() as db2:
+                    o = (await db2.execute(select(Order).where(Order.id == oid))).scalar_one_or_none()
+                    if o:
+                        o.amount_rub = new_rub
+                        o.amount_original = paid
+                        o.amount_currency = code
+                        await db2.commit()
+                        fixed += 1
+        print(f"[FixAmounts] проверено {checked}, расхождений {len(changes)}, "
+              f"исправлено {fixed}", flush=True)
+        return {"checked": checked, "mismatched": len(changes), "fixed": fixed,
+                "items": changes[:50]}
+
+    if dry_run:
+        return await _run()
+    asyncio.create_task(_run())
+    return {"started": True, "orders": len(snapshot), "note": "фоново; см. [FixAmounts] в логах"}
+
+
 @app.get("/probe-order")
 async def probe_order(order_id: int = 0, our_order_id: int = 0):
     """Что ggsel на самом деле отдаёт по заказу и в какой валюте.

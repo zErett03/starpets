@@ -195,6 +195,7 @@ h1{margin:0;font-size:16px;font-weight:600}
 .search button{background:#1f6feb;border:1px solid #1f6feb;color:#fff;border-radius:6px;
   padding:5px 12px;font-size:12px;cursor:pointer}
 .search .clear{color:#8b949e;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:12px}
+.cur{color:#8b949e;font-size:11px}
 .xlink{margin-left:12px;font-size:12px;font-weight:500;color:#58a6ff;border:1px solid #30363d;
   border-radius:6px;padding:3px 9px;vertical-align:middle}
 .xlink:hover{border-color:#58a6ff;background:#1f6feb22}
@@ -469,7 +470,14 @@ def _order_row(o, money: dict | None = None) -> str:
     else:
         _rebuy_badge = ""
 
-    amount = (f"{o.amount_rub}₽" if o.amount_rub is not None else "—") + _rebuy_badge
+    # Оплату в валюте показываем обеими суммами. Одна рублёвая цифра здесь обманывает:
+    # заказ на 2.54 USD выглядел как «2.54 ₽», и оператор видел не валютную оплату, а
+    # бессмысленную продажу за копейки.
+    _amt = f"{o.amount_rub}₽" if o.amount_rub is not None else "—"
+    if o.amount_original and (o.amount_currency or "").upper() not in ("", "RUB", "RUR"):
+        _sym = {"USD": "$", "EUR": "€"}.get((o.amount_currency or "").upper(), "")
+        _amt += (f'<span class="cur"> · {o.amount_original}{_sym or " " + o.amount_currency}</span>')
+    amount = _amt + _rebuy_badge
     # Номер ggsel — ссылка в кабинет продавца, если задан шаблон (GGSEL_ORDER_URL_TEMPLATE).
     _gid = _esc(str(o.ggsel_order_id))
     _tpl = (settings.ggsel_order_url_template or "").strip()
