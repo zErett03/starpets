@@ -115,20 +115,13 @@ def _reason_options() -> str:
 PROBLEM_KINDS = [
     ("no_friend", "Бот не принимает в друзья"),
     ("no_trade", "Бот не отправляет/не принимает трейд"),
-    ("no_item", "Трейд прошёл, предмет не выдан"),
     ("wrong_item", "Выдан не тот предмет"),
     ("bot_offline", "Бот не в игре / не заходит"),
-    ("trade_expired", "Трейд протух (истёк таймер)"),
     ("item_stuck", "Предмет завис у нас (не выкупается/не отдаётся)"),
-    ("buyer_wrong_nick", "Покупатель указал неверный ник"),
-    ("buyer_unreachable", "Покупатель не выходит на связь"),
     ("other", "Другое (опишите в комментарии)"),
 ]
 _PROBLEM_LABELS = dict(PROBLEM_KINDS)
 _PROBLEM_VALUES = {v for v, _ in PROBLEM_KINDS}
-# Проблемы, где виноват не бот, а покупатель: в рейтинге ботов такие случаи не считаются —
-# иначе бот, которому трижды дали неверный ник, выглядел бы худшим в парке.
-_BUYER_FAULT = {"buyer_wrong_nick", "buyer_unreachable"}
 
 
 def _problem_options() -> str:
@@ -316,7 +309,6 @@ textarea.modal-input{resize:vertical;font-family:inherit;line-height:1.5}
 .prob-card ol b{color:#e3b341}
 .kind-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;
   background:#e2801522;border:1px solid #e2801566;color:#e28015}
-.kind-pill.buyer{background:#8b949e22;border-color:#8b949e66;color:#8b949e}
 td.cmt{white-space:normal;max-width:320px;color:#c9d1d9;font-size:12px;line-height:1.5}
 .snap{color:#8b949e;font-size:11px}
 .modal-err{color:#f85149;font-size:12px;margin-top:10px}
@@ -638,10 +630,12 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
       </div>
       {force_btn}
       <div class="row-pair">
-        <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История доставки</button>
-        <button type="button" class="act-btn b-warn"
-                onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
-                title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠</button>
+        <div class="row-pair" style="flex:1">
+          <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История</button>
+          <button type="button" class="act-btn b-warn"
+                  onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
+                  title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠</button>
+        </div>
         <form class="actform" method="post" action="/admin/cancel-order"
               onsubmit="return confirm('Отменить заказ {o.id}? Трейд будет закрыт, выдача остановлена. Возврат/отказ денег оформите на ggsel вручную.')">
           <input type="hidden" name="order_id" value="{o.id}">
@@ -1018,13 +1012,11 @@ async def admin_problems(
             .group_by(OrderProblem.kind).order_by(func.count().desc())
         )).all()
 
-        # Рейтинг ботов: без случаев, где виноват покупатель — иначе бот, которому трижды
-        # дали неверный ник, возглавит список худших, ничего при этом не сломав.
+        # Рейтинг ботов: кто чаще других попадает в проблемные случаи.
         by_bot = (await db.execute(
             select(OrderProblem.bot_name, func.count())
             .where(OrderProblem.created_at >= since,
-                   OrderProblem.bot_name.isnot(None),
-                   OrderProblem.kind.notin_(list(_BUYER_FAULT)))
+                   OrderProblem.bot_name.isnot(None))
             .group_by(OrderProblem.bot_name).order_by(func.count().desc()).limit(5)
         )).all()
 
@@ -1060,7 +1052,6 @@ async def admin_problems(
 
     body_rows = []
     for p, o in rows:
-        buyer_fault = p.kind in _BUYER_FAULT
         now_buys = buys_now.get(p.order_id, 0)
         retries_now = int(o.trade_retry_count or 0)
         snap_buys = int(p.buys or 0)
@@ -1090,7 +1081,7 @@ async def admin_problems(
   <td>{_esc(o.item_name or "—")}</td>
   <td>{_esc(o.roblox_username or "—")}</td>
   <td>{bot_cell}</td>
-  <td><span class="kind-pill{' buyer' if buyer_fault else ''}">{_esc(_problem_label(p.kind))}</span></td>
+  <td><span class="kind-pill">{_esc(_problem_label(p.kind))}</span></td>
   <td class="cmt">{_esc(p.comment or "—")}</td>
   <td>{retr_cell}</td>
   <td>{buys_cell}</td>
@@ -1134,7 +1125,7 @@ async def admin_problems(
     <div class="k" style="margin-top:4px">две и более проблемы</div></div>
   <div class="prob-card" style="min-width:240px"><div class="k">Худшие боты за период</div>
     <ol>{bots_html}</ol>
-    <div class="k" style="margin-top:4px">без вины покупателя</div></div>
+    <div class="k" style="margin-top:4px">по числу случаев</div></div>
 </div>
 <div class="toolbar">
   <div class="filters">{_tab("Открытые", "open", open_cnt)}{_tab("Закрытые", "closed")}{_tab("Все", "all")}</div>
