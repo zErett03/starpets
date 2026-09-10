@@ -4,7 +4,7 @@ import json as _json
 import time
 import httpx
 
-from app.clients.sp_gate import note as sp_note, sp_gate
+from app.clients.sp_gate import note as sp_note, penalize as sp_penalize, sp_gate
 from app.config import settings
 
 
@@ -132,6 +132,15 @@ class StarPetsClient:
                 params=params,
             )
         if not resp.is_success:
+            # 429/5xx — поставщик отбивается: тормозим ВЕСЬ шлюз, а не только этот вызов.
+            # Прежде мы в такой ситуации продолжали давить прежним темпом.
+            if resp.status_code == 429 or resp.status_code >= 500:
+                _retry_after = resp.headers.get("Retry-After")
+                try:
+                    _pause = float(_retry_after) if _retry_after else 60.0
+                except (TypeError, ValueError):
+                    _pause = 60.0
+                sp_penalize(_pause, f"items/top HTTP {resp.status_code}")
             print(f"[get_top_item] product_id={product_id} HTTP {resp.status_code} body={resp.text[:200]}", flush=True)
             return None
         items = resp.json().get("items") or []

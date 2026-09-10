@@ -1,12 +1,12 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.db import AsyncSessionLocal
-from app.db.models import Offer, OfferStatus, Task, TaskKind
+from app.db.models import Offer, OfferStatus, StoreItem, Task, TaskKind
 
 UPSERT_BATCH = 500
 
@@ -23,24 +23,31 @@ async def starpets_sync() -> dict:
     products = await starpets.get_all_products()
     print(f"[Scheduler] Got {len(products)} products from StarPets")
 
-    # Build price lookup by productId page-by-page to avoid loading all items into memory
-    price_map: dict[str, dict] = {}
-    items_fetched = 0
-    sample_item = None
-    async for page in starpets.iter_items():
-        for item in page:
-            if sample_item is None:
-                sample_item = item
-            items_fetched += 1
-            pid = item.get("productId")
-            if not pid:
-                continue
-            price_usd = float(item.get("price_usd") or 0)
-            if not price_usd:
-                continue
-            if pid not in price_map or price_usd < float(price_map[pid].get("price_usd") or 0):
-                price_map[pid] = item
-    print(f"[Scheduler] Got {items_fetched} items (with prices) from StarPets")
+    # ЦЕНЫ БЕРЁМ ИЗ КЭША, А НЕ ИЗ ЛЕНТЫ ЛОТОВ.
+    #
+    # Здесь стоял проход по `items/all` — и он был главным источником нагрузки на StarPets,
+    # из-за которого поставщик жаловался трижды. Цифры из логов: 8,65 МИЛЛИОНА позиций за
+    # проход, то есть 8 650 запросов подряд, каждые 40 минут, месяцами. Причём проход не
+    # укладывался в свой десятиминутный интервал и фактически шёл непрерывно.
+    #
+    # Дело не в объёме рынка: у `items/all` не сдвигается курсор (то же самое мы нашли в
+    # выгрузке прайса — см. app/api/price_export.py). Проход перемалывал одну и ту же первую
+    # тысячу лотов до тех пор, пока поставщик не отвечал 500-й ошибкой. «Восемь миллионов
+    # позиций» — это повторы, а не товары.
+    #
+    # Цены и так лежат в store_items: их поддерживает событийная лента `/ex-buyers/updates`.
+    # Здесь они нужны для одного — заполнить цену при СОЗДАНИИ строки оффера (существующие
+    # цены этот воркер не трогает, ими владеет лента). Значит хватает одного запроса в базу.
+    price_map: dict[int, dict] = {}
+    async with AsyncSessionLocal() as db:
+        for pid, price in (await db.execute(
+            select(StoreItem.product_id, func.min(StoreItem.price_usd))
+            .where(StoreItem.reserve_level == 0, StoreItem.price_usd > 0)
+            .group_by(StoreItem.product_id)
+        )).all():
+            if pid is not None and price:
+                price_map[int(pid)] = {"price_usd": float(price), "price_rub": 0}
+    print(f"[Scheduler] Got {len(price_map)} priced products from store_items cache")
 
     rows = []
     skipped_no_name = 0
@@ -53,7 +60,7 @@ async def starpets_sync() -> dict:
             skipped_no_name += 1
             continue
         product_id = p.get("id")
-        priced_item = price_map.get(product_id)
+        priced_item = price_map.get(int(product_id)) if product_id is not None else None
         if not priced_item:
             skipped_no_price += 1
             continue
@@ -81,7 +88,7 @@ async def starpets_sync() -> dict:
 
     diag = {
         "products_fetched": len(products),
-        "items_fetched": items_fetched,
+        "priced_products": len(price_map),
         "items_with_price": len(price_map),
         "rows_prepared": len(rows),
         "skipped_no_name": skipped_no_name,
@@ -91,7 +98,6 @@ async def starpets_sync() -> dict:
         "markup": settings.markup,
         "min_price_rub": settings.min_price_rub,
         "sample_product": products[0] if products else None,
-        "sample_item": sample_item,
     }
     print(f"[Scheduler] Prepared {len(rows)} rows for upsert, diag={diag}")
 
@@ -129,7 +135,7 @@ async def starpets_sync() -> dict:
             await db.commit()
         print(
             f"[Scheduler] starpets_sync done: products={len(products)} "
-            f"items_fetched={items_fetched} price_map={len(price_map)} upserted={len(rows)}"
+            f"price_map={len(price_map)} upserted={len(rows)}"
         )
     except Exception as e:
         import traceback
@@ -343,7 +349,10 @@ async def tg_alerts_safe():
 def start_scheduler() -> AsyncIOScheduler:
     from app.config import settings
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(starpets_sync_safe, "interval", minutes=10, id="starpets_sync")
+    # Каталог товаров меняется редко (новые питомцы — событие недели), а проход по нему
+    # стоит 84 запроса. Раз в десять минут это было расточительство без выгоды.
+    scheduler.add_job(starpets_sync_safe, "interval",
+                      minutes=settings.catalog_sync_minutes, id="starpets_sync")
     scheduler.add_job(reconcile, "interval", hours=1, id="reconcile")
     scheduler.add_job(trade_protection, "interval", hours=1, id="trade_protection")
     scheduler.add_job(token_refresh, "interval", minutes=20, id="token_refresh")

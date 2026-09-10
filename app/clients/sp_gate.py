@@ -33,8 +33,36 @@ _lock: asyncio.Lock | None = None
 _last_at: float = 0.0
 
 _total: dict[str, int] = defaultdict(int)     # ручка -> запросов за жизнь процесса
-_recent: deque = deque(maxlen=4000)           # (ts, ручка) для окна последней минуты
+# Счёт по МИНУТНЫМ КОРЗИНАМ: {минута (epoch//60): {ручка: сколько}}.
+#
+# Раньше здесь стоял deque(maxlen=4000), и это была ошибка: при 4 запросах в секунду
+# четыре тысячи записей — это семнадцать минут, а не час. «Часовой бюджет 300» на деле
+# превращался в тысячу с лишним, то есть ломался ровно в том режиме, ради которого
+# создавался. Корзины занимают шестьдесят словарей на любой нагрузке.
+_buckets: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 _started_at: float = time.time()
+_penalty_until: float = 0.0                   # пауза после 429/5xx (см. penalize)
+
+
+def _bucket(ts: float | None = None) -> int:
+    return int((ts if ts is not None else time.time()) // 60)
+
+
+def _prune(now_min: int) -> None:
+    for m in [m for m in _buckets if now_min - m > 60]:
+        _buckets.pop(m, None)
+
+
+def _count_since(endpoint: str, minutes: int) -> int:
+    now_min = _bucket()
+    return sum(b.get(endpoint, 0) for m, b in _buckets.items() if now_min - m < minutes)
+
+
+def _hit(endpoint: str) -> None:
+    now_min = _bucket()
+    _total[endpoint] += 1
+    _buckets[now_min][endpoint] += 1
+    _prune(now_min)
 
 
 class SpBudgetExceeded(RuntimeError):
@@ -62,9 +90,7 @@ def budget_left(endpoint: str = "items/top") -> int:
     limit = int(getattr(settings, "starpets_top_budget_hourly", 0) or 0)
     if limit <= 0:
         return 10 ** 9
-    now = time.time()
-    used = sum(1 for ts, ep in _recent if ep == endpoint and now - ts <= 3600)
-    return max(0, limit - used)
+    return max(0, limit - _count_since(endpoint, 60))
 
 
 @asynccontextmanager
@@ -89,13 +115,16 @@ async def sp_gate(endpoint: str, background: bool = False):
         # Минимальный интервал держим под общим замком: без него десять корутин, ждавших
         # на семафоре, стартуют одновременно и дают залп вместо ровного темпа.
         async with _lock:
+            # Поставщик недавно отбивался — выдерживаем паузу перед следующей попыткой.
+            _pause = _penalty_until - time.monotonic()
+            if _pause > 0:
+                await asyncio.sleep(min(_pause, 60.0))
             min_interval = 1.0 / max(0.1, float(settings.starpets_max_rps))
             wait = min_interval - (time.monotonic() - _last_at)
             if wait > 0:
                 await asyncio.sleep(wait)
             _last_at = time.monotonic()
-        _total[endpoint] += 1
-        _recent.append((time.time(), endpoint))
+        _hit(endpoint)
         yield
 
 
@@ -107,17 +136,35 @@ def note(endpoint: str) -> None:
     и задерживать их ради ровного темпа неправильно. В статистике они видны наравне со
     всеми, чтобы картина запросов была полной.
     """
-    _total[endpoint] += 1
-    _recent.append((time.time(), endpoint))
+    _hit(endpoint)
+
+
+def penalize(seconds: float = 60.0, reason: str = "") -> None:
+    """Притормозить ВЕСЬ шлюз после отказа поставщика (429 или 5xx).
+
+    Без этого мы продолжали давить прежним темпом в сервис, который уже отбивается, —
+    и со стороны это выглядит хуже всего. Пауза общая: отказ по одной ручке означает,
+    что нам не рады вообще, а не только на ней.
+    """
+    global _penalty_until
+    until = time.monotonic() + max(1.0, seconds)
+    if until > _penalty_until:
+        _penalty_until = until
+        print(f"[SpGate] пауза {seconds:.0f}с после отказа поставщика: {reason}", flush=True)
 
 
 def stats() -> dict:
     """Сводка для диагностики: сколько запросов и кем сделано."""
     now = time.time()
     minute: dict[str, int] = defaultdict(int)
-    for ts, ep in _recent:
-        if now - ts <= 60:
-            minute[ep] += 1
+    for ep, n in _buckets.get(_bucket(now), {}).items():
+        minute[ep] += n
+    hour: dict[str, int] = defaultdict(int)
+    now_min = _bucket(now)
+    for m, b in _buckets.items():
+        if now_min - m < 60:
+            for ep, n in b.items():
+                hour[ep] += n
     uptime = max(1.0, now - _started_at)
     total = sum(_total.values())
     return {
@@ -126,6 +173,9 @@ def stats() -> dict:
         "avg_rps": round(total / uptime, 2),
         "last_minute": dict(sorted(minute.items(), key=lambda kv: -kv[1])),
         "last_minute_total": sum(minute.values()),
+        "last_hour": dict(sorted(hour.items(), key=lambda kv: -kv[1])),
+        "last_hour_total": sum(hour.values()),
+        "penalty_sec_left": max(0, round(_penalty_until - time.monotonic(), 1)),
         "by_endpoint": dict(sorted(_total.items(), key=lambda kv: -kv[1])),
         "limits": {"max_rps": settings.starpets_max_rps,
                    "max_concurrency": settings.starpets_max_concurrency,
