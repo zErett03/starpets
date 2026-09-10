@@ -271,11 +271,13 @@ async def seed_store_items(limit: int = 0) -> dict:
         async with sem:
             try:
                 params = starpets._base_params()
-                resp = await http.get(
-                    f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
-                    headers=starpets._headers(starpets._sign(params)),
-                    params=params,
-                )
+                from app.clients.sp_gate import sp_gate
+                async with sp_gate("items/top"):
+                    resp = await http.get(
+                        f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
+                        headers=starpets._headers(starpets._sign(params)),
+                        params=params,
+                    )
                 if not resp.is_success:
                     counters["errors"] += 1
                     return

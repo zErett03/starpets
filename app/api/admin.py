@@ -284,6 +284,12 @@ td{color:#c9d1d9}
 .b-ggsel{background:#238636;border-color:#238636;color:#fff}
 .b-blue{background:#1f6feb;border-color:#1f6feb;color:#fff}
 .b-red{background:#da3633;border-color:#da3633;color:#fff;flex:0 0 25px;width:25px;padding:0}
+/* Пометка проблемы. Квадратная, как ♻️ и 🗑, и встаёт в тот же ряд — отдельная широкая
+   кнопка ломала сетку действий и добавляла лишнюю строку в каждую карточку заказа.
+   Жёлтый с чёрным знаком: это не действие над заказом, а отметка для учёта, и цветом
+   она не должна спорить ни с зелёным «применить», ни с красным «удалить». */
+.b-warn{background:#e3b341;border-color:#d4a017;color:#000;font-size:13px;line-height:1;
+  flex:0 0 25px;width:25px;padding:0}
 .row-pair{display:flex;gap:6px}
 .overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(1,4,9,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px}
 .modal{position:relative;background:#161b22;border:1px solid #30363d;border-radius:14px;max-width:760px;width:100%;max-height:86vh;overflow:auto;padding:22px 24px;box-shadow:0 12px 48px rgba(0,0,0,.6)}
@@ -632,12 +638,10 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
       </div>
       {force_btn}
       <div class="row-pair">
-        <button type="button" class="act-btn b-amber" style="flex:1"
-                onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
-                title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠ Проблема</button>
         <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История доставки</button>
-      </div>
-      <div class="row-pair">
+        <button type="button" class="act-btn b-warn"
+                onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
+                title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠</button>
         <form class="actform" method="post" action="/admin/cancel-order"
               onsubmit="return confirm('Отменить заказ {o.id}? Трейд будет закрыт, выдача остановлена. Возврат/отказ денег оформите на ggsel вручную.')">
           <input type="hidden" name="order_id" value="{o.id}">

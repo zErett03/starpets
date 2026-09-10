@@ -4,6 +4,7 @@ import json as _json
 import time
 import httpx
 
+from app.clients.sp_gate import note as sp_note, sp_gate
 from app.config import settings
 
 
@@ -57,7 +58,8 @@ class StarPetsClient:
     async def get_info(self) -> dict:
         params = self._base_params()
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=10) as client:
-            resp = await client.get(f"{self.base_url}/ex-buyers/info/me", params=params)
+            async with sp_gate("info"):
+                resp = await client.get(f"{self.base_url}/ex-buyers/info/me", params=params)
             resp.raise_for_status()
             return resp.json()
 
@@ -69,11 +71,12 @@ class StarPetsClient:
                 params = {**self._base_params(), "limit": 500}
                 if cursor:
                     params["cursor"] = cursor
-                resp = await client.get(
-                    f"{self.base_url}/products/ex-buyers/all-by-cursor",
-                    headers=self._headers(self._sign(params)),
-                    params=params,
-                )
+                async with sp_gate("products/all-by-cursor"):
+                    resp = await client.get(
+                        f"{self.base_url}/products/ex-buyers/all-by-cursor",
+                        headers=self._headers(self._sign(params)),
+                        params=params,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 items = data.get("products") or []
@@ -96,11 +99,12 @@ class StarPetsClient:
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
                 params = {**self._base_params(), "limit": 1000, "cursor": cursor}
-                resp = await client.get(
-                    f"{self.base_url}/store/ex-buyers/items/all",
-                    headers=self._headers(self._sign(params)),
-                    params=params,
-                )
+                async with sp_gate("items/all"):
+                    resp = await client.get(
+                        f"{self.base_url}/store/ex-buyers/items/all",
+                        headers=self._headers(self._sign(params)),
+                        params=params,
+                    )
                 if not resp.is_success:
                     raise RuntimeError(
                         f"iter_items {resp.status_code}: {resp.text}"
@@ -121,11 +125,12 @@ class StarPetsClient:
 
     async def get_top_item(self, client: httpx.AsyncClient, product_id: str) -> dict | None:
         params = self._base_params()
-        resp = await client.get(
-            f"{self.base_url}/store/ex-buyers/items/top/{product_id}",
-            headers=self._headers(self._sign(params)),
-            params=params,
-        )
+        async with sp_gate("items/top"):
+            resp = await client.get(
+                f"{self.base_url}/store/ex-buyers/items/top/{product_id}",
+                headers=self._headers(self._sign(params)),
+                params=params,
+            )
         if not resp.is_success:
             print(f"[get_top_item] product_id={product_id} HTTP {resp.status_code} body={resp.text[:200]}", flush=True)
             return None
@@ -165,9 +170,9 @@ class StarPetsClient:
             # StarPets' date-based bootstrap returns 500 for the items feed, but cursor
             # pagination works. Bootstrap from the oldest retained event and page forward.
             params["cursor"] = 0
-        print(f"[starpets] get_item_updates params={params}", flush=True)
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=30) as client:
-            resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
+            async with sp_gate("updates"):
+                resp = await client.get(f"{self.base_url}/ex-buyers/updates", params=params)
             if not resp.is_success:
                 try:
                     err_body = resp.json()
@@ -205,6 +210,7 @@ class StarPetsClient:
         """
         base = self._base_params()
         payload = self._normalize({**base, "items": items})
+        sp_note("items/buy")
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
@@ -226,6 +232,7 @@ class StarPetsClient:
         """
         base = self._base_params()
         payload = self._normalize({**base, "products": [{"id": product_id, "maxPrice": max_price_usd}]})
+        sp_note("products/buy")
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
@@ -250,6 +257,7 @@ class StarPetsClient:
             "username": roblox_username,
             "items": purchased_item_ids,
         }
+        sp_note("trades/withdrawal")
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
@@ -280,6 +288,7 @@ class StarPetsClient:
         }
         if reason_type == "other" and reason:
             payload["reason"] = reason
+        sp_note("trades/cancel")
         async with httpx.AsyncClient(
             headers=self._headers(self._sign(payload)), timeout=15
         ) as client:
@@ -300,7 +309,8 @@ class StarPetsClient:
             "custom_id": custom_id,
         }
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=10) as client:
-            resp = await client.get(f"{self.base_url}/trade/status", params=params)
+            async with sp_gate("trade/status"):
+                resp = await client.get(f"{self.base_url}/trade/status", params=params)
             resp.raise_for_status()
             return resp.json()
 
@@ -323,12 +333,9 @@ class StarPetsClient:
             params["date"] = date_ms if date_ms is not None else int(
                 (datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000
             )
-        print(
-            f"[starpets] get_bulk_trade_updates params={params}",
-            flush=True,
-        )
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
-            resp = await client.get(f"{self.base_url}/ex-buyers/trades/updates", params=params)
+            async with sp_gate("trades/updates"):
+                resp = await client.get(f"{self.base_url}/ex-buyers/trades/updates", params=params)
             if not resp.is_success:
                 try:
                     err_body = resp.json()
@@ -352,6 +359,7 @@ class StarPetsClient:
             **self._base_params(),
             "tradeId": trade_id,
         }
+        sp_note("trades/friendship")
         async with httpx.AsyncClient(headers=self._headers(self._sign(params)), timeout=15) as client:
             resp = await client.put(
                 f"{self.base_url}/trades/ex-buyers/friendship", params=params

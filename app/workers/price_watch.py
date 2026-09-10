@@ -122,7 +122,11 @@ async def find_underpriced(min_gap_rub: float, min_ratio: float,
     # к StarPets тратим ровно столько, сколько разрешено параметром.
     if live_top > 0 and no_floor_offers:
         import httpx
+        from app.clients.sp_gate import budget_left
         from app.clients.starpets import starpets
+        # Сторож — фон, и он не должен съедать бюджет поштучных запросов, оставленный
+        # продажам. Берём не больше того, что осталось в часовом окне.
+        live_top = min(live_top, budget_left("items/top"))
         no_floor_offers.sort(key=lambda t: t[3], reverse=True)
         async with httpx.AsyncClient(timeout=10) as http:
             for key, name, gid, price_rub, product_id in no_floor_offers[:live_top]:

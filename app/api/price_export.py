@@ -4,9 +4,9 @@
 за сколько он стоит на витрине. Берётся минимальная цена среди СВОБОДНЫХ лотов — по
 зарезервированным купить нельзя, и включать их в прайс значит обещать цену, которой нет.
 
-Данные тянутся живьём, а не из кэша store_items: кэш наполняется событийной лентой и
-покрывает не весь каталог, а выгрузка обещает полноту. Один проход по каталогу плюс один
-по страницам лотов — это дешевле, чем спрашивать цену по каждому товару отдельно.
+Цены берутся из кэша store_items, который наполняет событийная лента: это ноль обращений
+к StarPets. Поштучный опрос всего каталога (`?live=true`) оставлен как исключение — это 42
+тысячи запросов к `items/top`, и именно на них поставщик пожаловался как на спам.
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ async def card_index() -> dict:
     return cards
 
 
-async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
+async def collect_prices(free_only: bool = True, live: bool = False) -> tuple[list[dict], float]:
     """[{product_id, name, ..., price_usd, price_rub, lots}] + курс. Живые данные.
 
     Порядок простой: берём каталог игры, по каждому товару спрашиваем его лоты, берём
@@ -98,15 +98,43 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     done = failed = 0
     sem = asyncio.Semaphore(max(4, settings.sync_concurrency))
 
+    # ОСНОВНОЙ ИСТОЧНИК — кэш store_items, который наполняет событийная лента. Поштучный
+    # опрос `items/top` по всему каталогу — это 42 тысячи запросов за прогон, и именно на
+    # него пожаловался поставщик. Событийная модель ровно для того и нужна, чтобы цены
+    # лежали у нас заранее, а не спрашивались по одной.
+    #
+    # live=True возвращает прежнее поведение (опросить каждый товар) — на случай, когда
+    # выгрузка нужна максимально точной и есть разрешение на нагрузку.
+    from sqlalchemy import func as _func
+    from app.db.models import StoreItem
+    async with AsyncSessionLocal() as db:
+        cache_rows = (await db.execute(
+            select(StoreItem.product_id, _func.min(StoreItem.price_usd), _func.count())
+            .where(StoreItem.reserve_level == 0, StoreItem.price_usd > 0)
+            .group_by(StoreItem.product_id)
+        )).all()
+    for pid, price, cnt in cache_rows:
+        if pid is None or not price:
+            continue
+        best[int(pid)] = float(price)
+        lots[int(pid)] = int(cnt)
+    print(f"[PriceExport] из кэша store_items: {len(best)} товаров с ценой", flush=True)
+
+    if not live:
+        rows = _rows_from(products, best, lots, fx, await card_index(), cached=True)
+        return rows, fx
+
     async def _one(http: httpx.AsyncClient, pid) -> None:
         nonlocal done, failed
         async with sem:
             for attempt in (1, 2, 3):
                 try:
                     params = starpets._base_params()
-                    resp = await http.get(
-                        f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
-                        headers=starpets._headers(starpets._sign(params)), params=params)
+                    from app.clients.sp_gate import sp_gate
+                    async with sp_gate("items/top"):
+                        resp = await http.get(
+                            f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
+                            headers=starpets._headers(starpets._sign(params)), params=params)
                     if resp.status_code >= 500 and attempt < 3:
                         await asyncio.sleep(0.5 * attempt)   # временная просадка — подождём
                         continue
@@ -150,11 +178,16 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
     # мёртвой: 40 «активных» против 13 546 «на паузе» — это старые одиночные карточки,
     # выключенные при переходе на SKU, а реальные продажи идут мимо этой таблицы.
     cards = await card_index()
+    return _rows_from(products, best, lots, fx, cards, cached=False), fx
 
+
+def _rows_from(products, best: dict, lots: dict, fx: float, cards: dict,
+               cached: bool) -> list[dict]:
+    """Сборка строк прайса. Общая для обоих источников цены — кэша и живого опроса."""
     rows = []
     for p in products:
         pid = p.get("id")
-        price_usd = best.get(pid)
+        price_usd = best.get(int(pid)) if pid is not None else None
         gid, status = cards.get(int(pid), (None, "нет карточки")) if pid is not None else (None, "нет карточки")
         rows.append({
             "game": GAME,
@@ -173,12 +206,15 @@ async def collect_prices(free_only: bool = True) -> tuple[list[dict], float]:
             "chroma": bool(p.get("chroma", False)),
             "price_usd": round(price_usd, 4) if price_usd else "",
             "price_rub": round(price_usd * fx, 2) if price_usd else "",
-            "lots_free_max100": lots.get(pid, 0),
+            # Из кэша число лотов честное (столько строк в store_items), при живом опросе
+            # упирается в сотню — потолок ответа API.
+            "lots_free": lots.get(int(pid), 0) if pid is not None else 0,
+            "source": "кэш" if cached else "живой опрос",
             "ggsel_offer_id": gid or "",
             "card_status": status,
         })
     rows.sort(key=lambda r: (r["price_usd"] == "", -(r["price_usd"] or 0)))
-    return rows, fx
+    return rows
 
 
 # Готовая выгрузка живёт в памяти процесса. Собирается она минуты — весь каталог плюс все
@@ -227,12 +263,12 @@ async def _load_result() -> bool:
     return True
 
 
-async def _build_job(free_only: bool) -> None:
+async def _build_job(free_only: bool, live: bool = False) -> None:
     import asyncio
 
     _JOB.update(state="running", started=datetime.now(timezone.utc), error=None)
     try:
-        rows, fx = await asyncio.wait_for(collect_prices(free_only=free_only),
+        rows, fx = await asyncio.wait_for(collect_prices(free_only=free_only, live=live),
                                           timeout=_DEADLINE_SEC)
         csv_text = _to_csv(rows)
         _JOB.update(state="done", csv=csv_text, rows=len(rows), fx=fx,
@@ -304,7 +340,7 @@ async def showcase_audit(fmt: str = "json", top: int = 20, min_price_rub: float 
         except (ValueError, TypeError, KeyError):
             continue
         price_rub = float(r["price_rub"]) if r.get("price_rub") else 0.0
-        lots = int(r.get("lots_free_max100") or 0)
+        lots = int(r.get("lots_free") or r.get("lots_free_max100") or 0)
         gid, status = cards.get(pid, (None, "нет карточки"))
         in_stock = lots > 0 and price_rub > 0
         sale_rub = round(price_rub * settings.markup, 2)
@@ -366,11 +402,17 @@ async def price_export_status():
 
 
 @router.get("/price-export", response_class=PlainTextResponse)
-async def price_export(fmt: str = "csv", free_only: bool = True, refresh: bool = False):
+async def price_export(fmt: str = "csv", free_only: bool = True, refresh: bool = False,
+                       live: bool = False):
     """Прайс по всему каталогу: себестоимость в USD и RUB, без наценки.
 
     Первый заход запускает сборку и отвечает сразу; когда она закончится, тот же адрес
     отдаст файл. ?refresh=true — пересобрать заново, ?fmt=json — JSON вместо CSV.
+
+    По умолчанию цены берутся из кэша store_items, который наполняет событийная лента:
+    это ноль запросов к StarPets и секунды вместо четверти часа. ?live=true возвращает
+    поштучный опрос всего каталога — 42 тысячи обращений к `items/top`, на которые
+    поставщик уже жаловался. Включать только по согласованию с ним.
     """
     import asyncio
 
@@ -386,7 +428,7 @@ async def price_export(fmt: str = "csv", free_only: bool = True, refresh: bool =
             status_code=202, media_type="text/plain; charset=utf-8")
 
     if refresh or _JOB["state"] in ("idle", "error"):
-        asyncio.create_task(_build_job(free_only))
+        asyncio.create_task(_build_job(free_only, live=live))
         note = "Пересобираю выгрузку." if refresh else "Запустил сборку выгрузки."
         prev = (f"\nПрошлая версия ({_JOB['rows']} строк, {_age(_JOB['finished'])}) "
                 f"останется доступна, пока не готова новая." if _JOB["csv"] and refresh else "")

@@ -221,11 +221,20 @@ async def relive_active(max_products: int = 150, dry_run: bool = False) -> dict:
                 checked += 1
                 try:
                     params = starpets._base_params()
-                    resp = await http.get(
-                        f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
-                        headers=starpets._headers(starpets._sign(params)),
-                        params=params,
-                    )
+                    from app.clients.sp_gate import SpBudgetExceeded, sp_gate
+                    try:
+                        async with sp_gate("items/top", background=True):
+                            resp = await http.get(
+                                f"{starpets.base_url}/store/ex-buyers/items/top/{pid}",
+                                headers=starpets._headers(starpets._sign(params)),
+                                params=params,
+                            )
+                    except SpBudgetExceeded as e:
+                        # Бюджет поштучных запросов кончился: прекращаем проход целиком.
+                        # Продолжать по одному продукту бессмысленно — следующий получит
+                        # тот же отказ, а лог заполнится сотней одинаковых строк.
+                        print(f"[FloorRelive] остановлен: {e}", flush=True)
+                        break
                     if not resp.is_success:
                         errors += 1
                         continue

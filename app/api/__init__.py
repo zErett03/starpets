@@ -179,6 +179,19 @@ async def fix_order_amounts(dry_run: bool = True, days: int = 30, limit: int = 2
     return {"started": True, "orders": len(snapshot), "note": "фоново; см. [FixAmounts] в логах"}
 
 
+@app.get("/starpets-usage")
+async def starpets_usage():
+    """Сколько запросов к StarPets мы делаем и кто именно.
+
+    Появилось после жалобы поставщика на спам: спорить было нечем — счётчика не было
+    вообще. Здесь видно поток за последнюю минуту с разбивкой по ручкам, средний темп за
+    время жизни процесса и действующие потолки. Счётчики живут в памяти, поэтому после
+    рестарта отсчёт начинается заново.
+    """
+    from app.clients.sp_gate import stats
+    return stats()
+
+
 @app.get("/probe-order")
 async def probe_order(order_id: int = 0, our_order_id: int = 0):
     """Что ggsel на самом деле отдаёт по заказу и в какой валюте.
