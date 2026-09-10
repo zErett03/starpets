@@ -115,10 +115,13 @@ async def sp_gate(endpoint: str, background: bool = False):
         # Минимальный интервал держим под общим замком: без него десять корутин, ждавших
         # на семафоре, стартуют одновременно и дают залп вместо ровного темпа.
         async with _lock:
-            # Поставщик недавно отбивался — выдерживаем паузу перед следующей попыткой.
-            _pause = _penalty_until - time.monotonic()
-            if _pause > 0:
-                await asyncio.sleep(min(_pause, 60.0))
+            # Поставщик недавно отбивался — выдерживаем паузу. ТОЛЬКО для фона: precheck
+            # ждёт ответа от нас с секундомером ggsel, и минутная пауза сорвала бы живую
+            # продажу ради вежливости к поставщику. Отступает тот, кто может подождать.
+            if background:
+                _pause = _penalty_until - time.monotonic()
+                if _pause > 0:
+                    await asyncio.sleep(min(_pause, 60.0))
             min_interval = 1.0 / max(0.1, float(settings.starpets_max_rps))
             wait = min_interval - (time.monotonic() - _last_at)
             if wait > 0:
