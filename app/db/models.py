@@ -247,6 +247,38 @@ class PurchaseLog(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
 
 
+class OrderProblem(Base):
+    """Проблемный случай по заказу: что именно пошло не так, со слов оператора.
+
+    Зачем отдельная таблица, а не поле в заказе. Во-первых, случаев по одному заказу может
+    быть несколько: бот не принял в друзья, заказ перевыкупили, новый бот не отдал предмет —
+    это две разные проблемы с разными ботами, и склеивать их в одну запись значит потерять
+    половину истории. Во-вторых, `error_reason` в заказе пишет автоматика, и перезаписывает
+    при каждой попытке; здесь же — то, что видел человек, и оно не затирается.
+
+    Снимки (`bot_name`, `trade_id`, `trade_retries`, `buys`) берутся на момент пометки
+    НАМЕРЕННО. После перевыкупа у заказа меняется и бот, и трейд, и счётчики — а вопрос
+    аналитики звучит «на каком боте и на какой попытке это случилось», и ответ на него
+    существует только в момент, когда оператор нажал кнопку.
+    """
+    __tablename__ = "order_problems"
+
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    kind = Column(String(32), nullable=False, index=True)   # см. PROBLEM_KINDS в app/api/admin.py
+    comment = Column(Text, nullable=True)
+
+    bot_name = Column(String, nullable=True, index=True)    # бот на момент пометки
+    trade_id = Column(String, nullable=True)                # трейд на момент пометки
+    trade_retries = Column(Integer, nullable=True)          # сколько раз пересоздавали трейд
+    buys = Column(Integer, nullable=True)                   # сколько раз выкупали предмет
+
+    status = Column(String(16), nullable=False, default="open", server_default="open", index=True)
+    author = Column(String, nullable=True)                  # логин оператора из Basic Auth
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class StoreItem(Base):
     """Mirror of StarPets store items for OUR products, kept live via the
     /ex-buyers/updates event feed. The floor of a product = the minimum price_usd

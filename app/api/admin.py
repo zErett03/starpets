@@ -4,6 +4,7 @@ Stop-gap while StarPets' wrapper doesn't emit terminal trade events (6/7/8): the
 monitor can't auto-close orders, so the operator closes them here. Basic Auth.
 """
 
+import json as _json
 import math
 import secrets
 from datetime import datetime
@@ -64,6 +65,16 @@ _MANUAL_STATUSES = ("closed", "done", "failed")
 def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status)
 
+
+def _js_str(value: str) -> str:
+    """Строка как безопасный JS-литерал внутри HTML-атрибута onclick.
+
+    json.dumps экранирует кавычки и переводы строк, а замена `<` закрывает единственную
+    оставшуюся дыру: ник вида `</script>` иначе разорвал бы разметку. Ники приходят от
+    покупателей, то есть это чужой ввод в нашем HTML.
+    """
+    return _esc(_json.dumps(value or "", ensure_ascii=False).replace("<", "\\u003c"), quote=True)
+
 _TRADE_STATUS_LABEL = {
     0: "CREATED", 1: "DELAYED_START", 2: "PENDING_FRIEND", 3: "PENDING_START",
     4: "STARTED", 5: "IN_PROGRESS", 6: "FAILED", 7: "CANCELED", 8: "FINISHED",
@@ -96,6 +107,50 @@ _REASON_VALUES = {v for v, _ in REASON_TYPES}
 
 def _reason_options() -> str:
     return "".join(f'<option value="{v}">{_esc(label)}</option>' for v, label in REASON_TYPES)
+
+
+# Типы проблем для ручной пометки заказа. Список закрытый и короткий намеренно: свободный
+# текст не агрегируется, а «прочее» в половине записей делает статистику бесполезной.
+# Комментарий остаётся для деталей, но тип обязателен — по нему и считается аналитика.
+PROBLEM_KINDS = [
+    ("no_friend", "Бот не принимает в друзья"),
+    ("no_trade", "Бот не отправляет/не принимает трейд"),
+    ("no_item", "Трейд прошёл, предмет не выдан"),
+    ("wrong_item", "Выдан не тот предмет"),
+    ("bot_offline", "Бот не в игре / не заходит"),
+    ("trade_expired", "Трейд протух (истёк таймер)"),
+    ("item_stuck", "Предмет завис у нас (не выкупается/не отдаётся)"),
+    ("buyer_wrong_nick", "Покупатель указал неверный ник"),
+    ("buyer_unreachable", "Покупатель не выходит на связь"),
+    ("other", "Другое (опишите в комментарии)"),
+]
+_PROBLEM_LABELS = dict(PROBLEM_KINDS)
+_PROBLEM_VALUES = {v for v, _ in PROBLEM_KINDS}
+# Проблемы, где виноват не бот, а покупатель: в рейтинге ботов такие случаи не считаются —
+# иначе бот, которому трижды дали неверный ник, выглядел бы худшим в парке.
+_BUYER_FAULT = {"buyer_wrong_nick", "buyer_unreachable"}
+
+
+def _problem_options() -> str:
+    return "".join(f'<option value="{v}">{_esc(label)}</option>' for v, label in PROBLEM_KINDS)
+
+
+def _problem_label(kind: str) -> str:
+    return _PROBLEM_LABELS.get(kind, kind)
+
+
+def _prob_badge(prob: dict | None) -> str:
+    """Метка открытой проблемы в строке заказа. Показывает последний тип и число случаев:
+    повторная проблема по одному заказу — сигнал, что заказ кружит, а не просто сбоит."""
+    if not prob:
+        return ""
+    n = int(prob.get("n") or 0)
+    label = _problem_label(prob.get("kind") or "")
+    more = f' ×{n}' if n > 1 else ""
+    return (f'<div style="margin-top:4px"><a href="/admin/problems?state=open" '
+            f'class="kind-pill" style="text-decoration:none" '
+            f'title="Открытая проблема: {_esc(label)}. Всего случаев по заказу: {n}">'
+            f'⚠{more}</a></div>')
 
 
 def _err_short(reason: str) -> str:
@@ -246,6 +301,18 @@ pre.summary{margin:0;white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,Conso
 .fld-label{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:12px 0 4px}
 .nick-view{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-size:14px;font-weight:600;color:#c9d1d9;word-break:break-all}
 .modal-select,.modal-input{width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-size:13px}
+textarea.modal-input{resize:vertical;font-family:inherit;line-height:1.5}
+.prob-cards{display:flex;gap:12px;flex-wrap:wrap;padding:12px 40px 0}
+.prob-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px;min-width:150px}
+.prob-card .k{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.prob-card .v{font-size:20px;font-weight:600;margin-top:2px}
+.prob-card ol{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.7}
+.prob-card ol b{color:#e3b341}
+.kind-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;
+  background:#e2801522;border:1px solid #e2801566;color:#e28015}
+.kind-pill.buyer{background:#8b949e22;border-color:#8b949e66;color:#8b949e}
+td.cmt{white-space:normal;max-width:320px;color:#c9d1d9;font-size:12px;line-height:1.5}
+.snap{color:#8b949e;font-size:11px}
 .modal-err{color:#f85149;font-size:12px;margin-top:10px}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
 .modal-actions .act-btn{width:auto;min-width:96px;height:32px;padding:0 14px}
@@ -408,6 +475,33 @@ async function confirmRebuy(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeRebuy(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='rebuy-overlay') closeRebuy(); });
+function openProblem(orderId, botName, nick){
+  document.getElementById('problem-title').textContent='Проблема — заказ #'+orderId;
+  document.getElementById('problem-order-id').value=orderId;
+  document.getElementById('problem-comment').value='';
+  document.getElementById('problem-err').style.display='none';
+  var sel=document.getElementById('problem-kind'); sel.selectedIndex=0;
+  // Бот и ник показываем в шапке окна: оператор помечает проблему, глядя на переписку,
+  // и должен видеть, ЧЕЙ заказ помечает — строки таблицы под модалкой не видно.
+  var meta=[];
+  if(botName) meta.push('бот <b>'+botName+'</b>');
+  if(nick) meta.push('покупатель <b>'+nick+'</b>');
+  document.getElementById('problem-meta').innerHTML=meta.join(' · ')||'бот ещё не назначен';
+  document.getElementById('problem-overlay').style.display='flex';
+  setTimeout(function(){ document.getElementById('problem-comment').focus(); }, 50);
+}
+function closeProblem(){ document.getElementById('problem-overlay').style.display='none'; }
+function validateProblem(){
+  var e=document.getElementById('problem-err');
+  var k=document.getElementById('problem-kind').value;
+  var c=(document.getElementById('problem-comment').value||'').trim();
+  // Для «Другое» тип ничего не объясняет, поэтому комментарий обязателен — иначе в
+  // аналитике останется строка «прочее» без содержания, то есть мусор.
+  if(k==='other' && !c){ e.textContent='Для «Другое» опишите проблему в комментарии'; e.style.display='block'; return false; }
+  return true;
+}
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeProblem(); });
+document.addEventListener('click',function(e){ if(e.target&&e.target.id==='problem-overlay') closeProblem(); });
 // Strip flash_order from the URL on load: the flash is server-rendered once from the
 // post-action redirect; removing the param means a plain refresh won't re-show it,
 // while a new action re-adds the param and shows a fresh flash.
@@ -423,7 +517,7 @@ document.addEventListener('click',function(e){ if(e.target&&e.target.id==='rebuy
 """
 
 
-def _order_row(o, money: dict | None = None) -> str:
+def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
     cur = o.delivery_status.value if o.delivery_status else ""
     # Текущий статус показываем всегда, даже если он не из ручного списка (иначе селект
     # молча «переставил» бы заказ на первый пункт при случайном сохранении).
@@ -518,7 +612,7 @@ def _order_row(o, money: dict | None = None) -> str:
   <td>{_esc(o.starpets_custom_id or "—")}</td>
   <td>{_esc(o.starpets_purchase_id or "—")}</td>
   <td class="col-bot" title="{_esc(o.bot_name or '')}">{bot_cell}</td>
-  <td class="col-err">{_err_badge(o.error_reason or "")}</td>
+  <td class="col-err">{_err_badge(o.error_reason or "")}{_prob_badge(prob)}</td>
   <td>
     <div class="actions">
       <form class="actform row1" method="post" action="/admin/set-status">
@@ -538,7 +632,12 @@ def _order_row(o, money: dict | None = None) -> str:
       </div>
       {force_btn}
       <div class="row-pair">
+        <button type="button" class="act-btn b-amber" style="flex:1"
+                onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
+                title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠ Проблема</button>
         <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История доставки</button>
+      </div>
+      <div class="row-pair">
         <form class="actform" method="post" action="/admin/cancel-order"
               onsubmit="return confirm('Отменить заказ {o.id}? Трейд будет закрыт, выдача остановлена. Возврат/отказ денег оформите на ggsel вручную.')">
           <input type="hidden" name="order_id" value="{o.id}">
@@ -638,6 +737,23 @@ async def admin_orders(
             for m in money.values():
                 m["back"] = round(sum(m.pop("_back").values()), 3)
 
+        # Открытые проблемы по заказам страницы: метка в строке, чтобы помеченный заказ
+        # было видно в общем списке, а не только на отдельной вкладке.
+        from app.db.models import OrderProblem
+        problems = {}
+        if orders:
+            for pr in (await db.execute(
+                select(OrderProblem)
+                .where(OrderProblem.order_id.in_([o.id for o in orders]),
+                       OrderProblem.status == "open")
+                .order_by(OrderProblem.created_at.desc())
+            )).scalars().all():
+                slot = problems.setdefault(pr.order_id, {"n": 0, "kind": pr.kind})
+                slot["n"] += 1
+        open_problems = (await db.execute(
+            select(func.count()).select_from(OrderProblem).where(OrderProblem.status == "open")
+        )).scalar() or 0
+
         if flash_order is not None:
             fo = (await db.execute(select(Order).where(Order.id == flash_order))).scalar_one_or_none()
             if fo and fo.last_redeliver_result:
@@ -686,7 +802,7 @@ async def admin_orders(
     from app.workers.balance_watch import get_balance_usd
     balance_usd = await get_balance_usd()
 
-    rows_html = "".join(_order_row(o, money.get(o.id)) for o in orders) or (
+    rows_html = "".join(_order_row(o, money.get(o.id), problems.get(o.id)) for o in orders) or (
         '<tr><td colspan="13" style="padding:24px;text-align:center;color:#8b949e">Заказов нет</td></tr>'
     )
 
@@ -697,6 +813,8 @@ async def admin_orders(
 <body>
 <header>
   <h1>Заказы StarPets — Adopt Me
+    <a class="xlink" href="/admin/problems" title="Проблемные заказы: учёт и аналитика"
+       style="{'border-color:#e28015;color:#e28015' if open_problems else ''}">⚠ Проблемные{f' ({open_problems})' if open_problems else ''}</a>
     <a class="xlink" href="{settings.sibling_admin_url}" title="Открыть админку MM2">↗ MM2</a>
     <a class="xlink" href="/admin/import-purchase-log" title="Восстановить историю перевыкупов из логов">⟲ импорт журнала</a>
   </h1>
@@ -792,7 +910,248 @@ async def admin_orders(
   </div>
 </div>
 
+<div id="problem-overlay" class="overlay">
+  <div class="modal" style="max-width:520px">
+    <button class="modal-close" onclick="closeProblem()" title="Закрыть">✕</button>
+    <h2 id="problem-title">Проблема</h2>
+    <p class="sub" id="problem-meta" style="margin-bottom:10px"></p>
+    <form method="post" action="/admin/mark-problem" onsubmit="return validateProblem()">
+      <input type="hidden" name="order_id" id="problem-order-id">
+      <span class="fld-label">Что случилось</span>
+      <select name="kind" id="problem-kind" class="modal-select">{_problem_options()}</select>
+      <span class="fld-label">Комментарий</span>
+      <textarea name="comment" id="problem-comment" class="modal-input" rows="3" maxlength="500"
+                placeholder="Детали: что видел покупатель, что показывал бот, что уже пробовали"></textarea>
+      <div id="problem-err" class="modal-err" style="display:none"></div>
+      <div class="modal-actions">
+        <button type="button" class="act-btn" onclick="closeProblem()">Отмена</button>
+        <button type="submit" class="act-btn b-amber">⚠ Пометить</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>{_JS}</script>
+</body></html>""")
+
+
+@router.get("/admin/problems", response_class=HTMLResponse)
+async def admin_problems(
+    _user: str = Depends(require_admin),
+    state: str = Query("open"),          # open | closed | all
+    kind: str = Query(None),
+    bot: str = Query(None),
+    days: int = Query(30),
+    page: int = Query(1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE),
+):
+    """Журнал проблемных случаев и сводка по ним.
+
+    Сводка важнее списка: отдельный случай оператор и так помнит, а вопрос, ради которого
+    заводился учёт, звучит «какой бот ломается чаще других» и «какая проблема самая частая».
+    Поэтому сверху цифры за период, а список — ниже, для разбора конкретики.
+    """
+    from datetime import timedelta
+    from sqlalchemy import select, func, or_
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, OrderProblem, PurchaseLog
+
+    if page_size not in PAGE_SIZES:
+        page_size = DEFAULT_PAGE_SIZE
+    page = max(1, page)
+    days = max(1, min(days, 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as db:
+        where = []
+        if state == "open":
+            where.append(OrderProblem.status == "open")
+        elif state == "closed":
+            where.append(OrderProblem.status == "closed")
+        if kind and kind in _PROBLEM_VALUES:
+            where.append(OrderProblem.kind == kind)
+        if bot:
+            where.append(OrderProblem.bot_name == bot)
+
+        cnt_q = select(func.count()).select_from(OrderProblem)
+        for w in where:
+            cnt_q = cnt_q.where(w)
+        total = (await db.execute(cnt_q)).scalar() or 0
+        pages = max(1, math.ceil(total / page_size))
+        page = min(page, pages)
+
+        q = (select(OrderProblem, Order)
+             .join(Order, Order.id == OrderProblem.order_id)
+             .order_by(OrderProblem.created_at.desc())
+             .limit(page_size).offset((page - 1) * page_size))
+        for w in where:
+            q = q.where(w)
+        rows = (await db.execute(q)).all()
+
+        # Сколько выкупов у заказа СЕЙЧАС — рядом со снимком на момент пометки видно, что
+        # случилось после: если снимок 1, а сейчас 3, значит заказ перевыкупали дважды уже
+        # после того, как проблему завели.
+        buys_now = {}
+        if rows:
+            ids = [p.order_id for p, _ in rows]
+            for oid, n in (await db.execute(
+                select(PurchaseLog.order_id, func.count())
+                .where(PurchaseLog.order_id.in_(ids), PurchaseLog.kind == "buy")
+                .group_by(PurchaseLog.order_id)
+            )).all():
+                buys_now[oid] = int(n)
+
+        open_cnt = (await db.execute(
+            select(func.count()).select_from(OrderProblem).where(OrderProblem.status == "open")
+        )).scalar() or 0
+        period_cnt = (await db.execute(
+            select(func.count()).select_from(OrderProblem).where(OrderProblem.created_at >= since)
+        )).scalar() or 0
+
+        by_kind = (await db.execute(
+            select(OrderProblem.kind, func.count())
+            .where(OrderProblem.created_at >= since)
+            .group_by(OrderProblem.kind).order_by(func.count().desc())
+        )).all()
+
+        # Рейтинг ботов: без случаев, где виноват покупатель — иначе бот, которому трижды
+        # дали неверный ник, возглавит список худших, ничего при этом не сломав.
+        by_bot = (await db.execute(
+            select(OrderProblem.bot_name, func.count())
+            .where(OrderProblem.created_at >= since,
+                   OrderProblem.bot_name.isnot(None),
+                   OrderProblem.kind.notin_(list(_BUYER_FAULT)))
+            .group_by(OrderProblem.bot_name).order_by(func.count().desc()).limit(5)
+        )).all()
+
+        # Повторные проблемы по одному заказу — самый дорогой класс: покупатель ждёт, а
+        # мы кружим. Считаем заказы, где случаев больше одного.
+        repeat_cnt = (await db.execute(
+            select(func.count()).select_from(
+                select(OrderProblem.order_id)
+                .where(OrderProblem.created_at >= since)
+                .group_by(OrderProblem.order_id)
+                .having(func.count() > 1).subquery()
+            )
+        )).scalar() or 0
+
+    def _tab(label, value, n=None):
+        active = " active" if value == state else ""
+        cnt = f' <span class="count">{n}</span>' if n is not None else ""
+        return (f'<a class="filter{active}" '
+                f'href="/admin/problems?state={value}&days={days}&page_size={page_size}">'
+                f'{label}{cnt}</a>')
+
+    kinds_html = "".join(
+        f'<a class="filter{" active" if kind == k else ""}" '
+        f'href="/admin/problems?state={state}&kind={k}&days={days}">{_esc(_problem_label(k))} '
+        f'<span class="count">{n}</span></a>'
+        for k, n in by_kind
+    ) or '<span style="color:#8b949e;font-size:12px">за период пусто</span>'
+
+    bots_html = "".join(
+        f'<li><a href="/admin/problems?state=all&bot={_url_quote(b)}&days={days}" '
+        f'style="color:#c9d1d9"><b>{n}</b> · {_esc(b)}</a></li>' for b, n in by_bot
+    ) or '<li style="color:#8b949e">нет данных</li>'
+
+    body_rows = []
+    for p, o in rows:
+        buyer_fault = p.kind in _BUYER_FAULT
+        now_buys = buys_now.get(p.order_id, 0)
+        retries_now = int(o.trade_retry_count or 0)
+        snap_buys = int(p.buys or 0)
+        snap_retries = int(p.trade_retries or 0)
+        # «сейчас» показываем только если оно отличается от снимка — иначе строка
+        # засоряется одинаковыми числами.
+        buys_cell = f"{snap_buys}" + (f' <span class="snap">→ {now_buys}</span>'
+                                      if now_buys != snap_buys else "")
+        retr_cell = f"{snap_retries}" + (f' <span class="snap">→ {retries_now}</span>'
+                                         if retries_now != snap_retries else "")
+        if p.bot_name:
+            from app.clients.roblox import username_redirect_url
+            bot_cell = (f'<a href="{username_redirect_url(p.bot_name)}" target="_blank" rel="noopener" '
+                        f'style="color:#58a6ff;text-decoration:none">{_esc(p.bot_name)} ↗</a>')
+        else:
+            bot_cell = "—"
+        resolve = "" if p.status == "closed" else (
+            f'<form class="actform" method="post" action="/admin/resolve-problem">'
+            f'<input type="hidden" name="problem_id" value="{p.id}">'
+            f'<button type="submit" class="act-btn b-green" title="Закрыть случай (запись останется в аналитике)">✓ Решено</button>'
+            f'</form>')
+        closed_mark = (f'<span class="snap">закрыт {_fmt_dt(p.resolved_at)}</span>'
+                       if p.status == "closed" else "")
+        body_rows.append(f"""<tr>
+  <td>{_fmt_dt(p.created_at)}</td>
+  <td><a href="/admin?q={p.order_id}" style="color:#58a6ff;text-decoration:none">#{p.order_id}</a></td>
+  <td>{_esc(o.item_name or "—")}</td>
+  <td>{_esc(o.roblox_username or "—")}</td>
+  <td>{bot_cell}</td>
+  <td><span class="kind-pill{' buyer' if buyer_fault else ''}">{_esc(_problem_label(p.kind))}</span></td>
+  <td class="cmt">{_esc(p.comment or "—")}</td>
+  <td>{retr_cell}</td>
+  <td>{buys_cell}</td>
+  <td>{_badge(o.delivery_status.value if o.delivery_status else "")}</td>
+  <td class="snap">{_esc(p.author or "—")}</td>
+  <td>{resolve}{closed_mark}</td>
+</tr>""")
+
+    rows_html = "".join(body_rows) or (
+        '<tr><td colspan="12" style="padding:24px;text-align:center;color:#8b949e">'
+        'Помеченных заказов нет</td></tr>')
+
+    def _plink(p, label, disabled):
+        qs = (f"page={p}&page_size={page_size}&state={state}&days={days}"
+              + (f"&kind={kind}" if kind else "") + (f"&bot={_url_quote(bot)}" if bot else ""))
+        return f'<a class="{"disabled" if disabled else ""}" href="/admin/problems?{qs}">{label}</a>'
+
+    filter_note = ""
+    if kind or bot:
+        filter_note = (f' · фильтр: {_esc(_problem_label(kind)) if kind else ""}'
+                       f'{" · бот " + _esc(bot) if bot else ""} '
+                       f'<a href="/admin/problems?state={state}&days={days}" '
+                       f'style="color:#58a6ff">сбросить</a>')
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StarPets — проблемные заказы</title><style>{_CSS}</style></head>
+<body>
+<header>
+  <h1>Проблемные заказы — Adopt Me
+    <a class="xlink" href="/admin">← к заказам</a>
+    <a class="xlink" href="{settings.sibling_admin_url}/problems" title="Проблемные заказы MM2">↗ MM2</a>
+  </h1>
+  <div class="sub">Учёт проблемных случаев · период {days} дн{filter_note}</div>
+</header>
+<div class="prob-cards">
+  <div class="prob-card"><div class="k">Открытых</div><div class="v" style="color:#e28015">{open_cnt}</div></div>
+  <div class="prob-card"><div class="k">За {days} дн</div><div class="v">{period_cnt}</div></div>
+  <div class="prob-card"><div class="k">Заказов с повтором</div><div class="v" style="color:#f85149">{repeat_cnt}</div>
+    <div class="k" style="margin-top:4px">две и более проблемы</div></div>
+  <div class="prob-card" style="min-width:240px"><div class="k">Худшие боты за период</div>
+    <ol>{bots_html}</ol>
+    <div class="k" style="margin-top:4px">без вины покупателя</div></div>
+</div>
+<div class="toolbar">
+  <div class="filters">{_tab("Открытые", "open", open_cnt)}{_tab("Закрытые", "closed")}{_tab("Все", "all")}</div>
+  <div class="filters">{kinds_html}</div>
+  <div class="pager"><span>показано {len(rows)} из {total}</span><span>стр {page}/{pages}</span>
+    {_plink(page-1, "← Назад", page <= 1)}{_plink(page+1, "Вперёд →", page >= pages)}</div>
+</div>
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>Помечено</th><th>Заказ</th><th>Товар</th><th>Покупатель</th><th>Бот</th>
+    <th>Проблема</th><th>Комментарий</th><th>Трейдов</th><th>Выкупов</th>
+    <th>Статус</th><th>Оператор</th><th></th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</div>
+<p class="sub" style="padding:10px 40px 30px">
+  Числа в колонках «Трейдов» и «Выкупов» — снимок на момент пометки;
+  <span class="snap">серым →</span> показано текущее значение, если оно изменилось после.
+</p>
 </body></html>""")
 
 
@@ -806,6 +1165,86 @@ def _flash_redirect(request: Request, order_id: int) -> RedirectResponse:
 
 def _back(request: Request) -> RedirectResponse:
     return RedirectResponse(request.headers.get("referer") or "/admin", status_code=303)
+
+
+async def _count_buys(db, order_id: int) -> int:
+    """Сколько раз по заказу выкупали предмет. Считается по журналу покупок: в самом заказе
+    цена и id покупки перезаписываются при каждом перевыкупе, и число попыток там не найти."""
+    from sqlalchemy import func, select
+    from app.db.models import PurchaseLog
+    return int((await db.execute(
+        select(func.count()).select_from(PurchaseLog)
+        .where(PurchaseLog.order_id == order_id, PurchaseLog.kind == "buy")
+    )).scalar() or 0)
+
+
+@router.post("/admin/mark-problem")
+async def admin_mark_problem(
+    request: Request,
+    _user: str = Depends(require_admin),
+    order_id: int = Form(...),
+    kind: str = Form(...),
+    comment: str = Form(""),
+):
+    """Пометить заказ проблемным. Снимок бота, трейда и счётчиков делается ЗДЕСЬ.
+
+    После перевыкупа у заказа меняется и бот, и трейд, и число попыток — а вопрос аналитики
+    звучит «на каком боте и на какой попытке это случилось». Ответ существует только в
+    момент пометки, поэтому он копируется в запись, а не вычисляется потом по заказу.
+    """
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, OrderProblem
+
+    if kind not in _PROBLEM_VALUES:
+        raise HTTPException(400, f"unknown problem kind {kind}")
+    text = (comment or "").strip()[:500]
+    if kind == "other" and not text:
+        raise HTTPException(400, "для «Другое» нужен комментарий")
+
+    async with AsyncSessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if not order:
+            raise HTTPException(404, f"order {order_id} not found")
+        db.add(OrderProblem(
+            order_id=order.id,
+            kind=kind,
+            comment=text or None,
+            bot_name=order.bot_name,
+            trade_id=order.starpets_custom_id,
+            trade_retries=int(order.trade_retry_count or 0),
+            buys=await _count_buys(db, order.id),
+            status="open",
+            author=_user,
+        ))
+        await db.commit()
+    print(f"[admin] problem order_id={order_id} kind={kind} bot={order.bot_name!r} by={_user}",
+          flush=True)
+    return _back(request)
+
+
+@router.post("/admin/resolve-problem")
+async def admin_resolve_problem(
+    request: Request,
+    _user: str = Depends(require_admin),
+    problem_id: int = Form(...),
+):
+    """Закрыть проблемный случай. Запись остаётся — она и есть материал для аналитики,
+    удалять её нельзя; меняется только статус и время закрытия."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import OrderProblem
+
+    async with AsyncSessionLocal() as db:
+        p = (await db.execute(
+            select(OrderProblem).where(OrderProblem.id == problem_id)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"problem {problem_id} not found")
+        p.status = "closed"
+        p.resolved_at = datetime.utcnow()
+        await db.commit()
+    return _back(request)
 
 
 @router.post("/admin/set-status")
