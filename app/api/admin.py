@@ -284,6 +284,11 @@ td{color:#c9d1d9}
 .b-warn{background:#e3b341;border-color:#d4a017;color:#000;font-size:13px;line-height:1;
   flex:0 0 25px;width:25px;padding:0}
 .row-pair{display:flex;gap:6px}
+/* Кнопка «Решено» в журнале проблем: b-green здесь не годится — он фиксирует
+   ширину 25px под квадратную галочку в строке заказа, и подпись вылезала наружу. */
+.resolve-btn{background:#238636;border-color:#238636;color:#fff;
+  width:auto;padding:0 12px;margin-left:auto}
+form.resolve-form{margin:0;display:flex;justify-content:flex-end}
 .overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(1,4,9,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px}
 .modal{position:relative;background:#161b22;border:1px solid #30363d;border-radius:14px;max-width:760px;width:100%;max-height:86vh;overflow:auto;padding:22px 24px;box-shadow:0 12px 48px rgba(0,0,0,.6)}
 .modal h2{margin:0 30px 14px 0;font-size:16px}
@@ -1069,9 +1074,9 @@ async def admin_problems(
         else:
             bot_cell = "—"
         resolve = "" if p.status == "closed" else (
-            f'<form class="actform" method="post" action="/admin/resolve-problem">'
+            f'<form class="resolve-form" method="post" action="/admin/resolve-problem">'
             f'<input type="hidden" name="problem_id" value="{p.id}">'
-            f'<button type="submit" class="act-btn b-green" title="Закрыть случай (запись останется в аналитике)">✓ Решено</button>'
+            f'<button type="submit" class="act-btn resolve-btn" title="Закрыть случай (запись останется в аналитике)">✓ Решено</button>'
             f'</form>')
         closed_mark = (f'<span class="snap">закрыт {_fmt_dt(p.resolved_at)}</span>'
                        if p.status == "closed" else "")
@@ -1086,12 +1091,11 @@ async def admin_problems(
   <td>{retr_cell}</td>
   <td>{buys_cell}</td>
   <td>{_badge(o.delivery_status.value if o.delivery_status else "")}</td>
-  <td class="snap">{_esc(p.author or "—")}</td>
   <td>{resolve}{closed_mark}</td>
 </tr>""")
 
     rows_html = "".join(body_rows) or (
-        '<tr><td colspan="12" style="padding:24px;text-align:center;color:#8b949e">'
+        '<tr><td colspan="11" style="padding:24px;text-align:center;color:#8b949e">'
         'Помеченных заказов нет</td></tr>')
 
     def _plink(p, label, disabled):
@@ -1138,7 +1142,7 @@ async def admin_problems(
   <thead><tr>
     <th>Помечено</th><th>Заказ</th><th>Товар</th><th>Покупатель</th><th>Бот</th>
     <th>Проблема</th><th>Комментарий</th><th>Трейдов</th><th>Выкупов</th>
-    <th>Статус</th><th>Оператор</th><th></th>
+    <th>Статус</th><th></th>
   </tr></thead>
   <tbody>{rows_html}</tbody>
 </table>
