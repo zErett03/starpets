@@ -16,6 +16,7 @@ from app.db import AsyncSessionLocal
 from app.db.models import SkuVariant, SkuProduct, Offer, StoreItem
 from app.clients.ggsel import ggsel_office
 from app.workers.sku_builder import _variant_sort_key
+from app.workers.sku_variant_map import align_created
 
 _HIDE_AFTER = 2                 # consecutive out-of-stock checks before hiding (hysteresis)
 _oos_streak: dict = {}          # (gid, product_id) -> consecutive OOS count (in-memory)
@@ -65,6 +66,9 @@ async def _rebuild_shown_locked(gid, opt_hint, shown, default_pid):
         })
         meta.append((v["pid"], live))
     created = await ggsel_office.add_variants_bulk(gid, new_opt, payload)
+    # Порядок ответа ggsel не гарантирован, а здесь он заведомо не равен порядку запроса:
+    # дефолт уходит первым, `position` при этом остаётся исходным. Сопоставляем по заголовку.
+    created = await align_created(gid, new_opt, payload, created)
     async with AsyncSessionLocal() as db:
         for (pid, live), cv in zip(meta, created):
             await db.execute(sql_update(SkuVariant)

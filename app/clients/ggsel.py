@@ -435,6 +435,14 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_option_variants(self, offer_id: int, option_id: int) -> list:
+        """Живой список вариантов одной опции: [{id, title_ru, title_en, position, ...}].
+        Нужен как источник правды при перезаписи маппинга variant_id -> starpets_product_id."""
+        for o in await self._options_list(offer_id):
+            if o.get("id") == option_id:
+                return o.get("variants") or []
+        return []
+
     async def get_options(self, offer_id: int) -> dict:
         async with httpx.AsyncClient(headers=self._headers(), timeout=15) as client:
             resp = await self._request_retry(

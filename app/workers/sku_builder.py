@@ -21,6 +21,7 @@ from app.clients.ggsel import ggsel_office
 from app.config import settings
 from app.images.cover import make_cover
 from app.workers.offer_creator import _resolve_category, _INSTRUCTIONS_RU, _INSTRUCTIONS_EN
+from app.workers.sku_variant_map import align_created
 
 # pumping value -> label used in the title tag "Name | Rarity, Pumping".
 _PUMPING_TITLE = {"default": "Default", "neon": "Neon", "mega_neon": "Mega Neon"}
@@ -240,8 +241,11 @@ async def build_sku_card(name: str, pumping: str, force: bool = False) -> dict:
             })
             meta.append((p, price, label, is_def, pos, delta))
         created = await ggsel_office.add_variants_bulk(gid, option_id, payload)
-        if len(created) != len(meta):
-            return {"error": f"bulk variant count mismatch: sent {len(meta)} got {len(created)}"}
+        if not isinstance(created, list) or len(created) != len(meta):
+            return {"error": f"bulk variant count mismatch: sent {len(meta)} got "
+                             f"{len(created) if isinstance(created, list) else created!r}"}
+        # По заголовку, а не по индексу: дефолт отправлен первым, порядок ответа не гарантирован.
+        created = await align_created(gid, option_id, payload, created)
         variants = []
         async with AsyncSessionLocal() as db:
             for (p, price, label, is_def, pos, delta), cv in zip(meta, created):

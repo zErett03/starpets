@@ -18,24 +18,36 @@ def check_secret(secret: str):
         raise HTTPException(status_code=403, detail="Invalid secret")
 
 
-async def _resolve_sku_product_id(db, ggsel_offer_id: int, options: list) -> int | None:
-    """SKU-master: if this card is a SKU base card, resolve the selected radio variant
-    (its value == our ggsel_variant_id) to the target StarPets product_id."""
+async def _resolve_sku_selection(db, ggsel_offer_id: int, options: list):
+    """Выбор покупателя: (product_id, ggsel_variant_id, label) или (None, None, None).
+
+    Возвращаем и сам variant_id с меткой, а не только product_id: маппинг вариантов
+    переписывается при каждой пересборке опции, и без записи «что именно было выбрано в
+    момент оплаты» разобрать спорный заказ задним числом нечем — по заказу #965 пришлось
+    восстанавливать картину по логам."""
     rows = (await db.execute(
-        select(SkuVariant.ggsel_variant_id, SkuVariant.starpets_product_id)
+        select(SkuVariant.ggsel_variant_id, SkuVariant.starpets_product_id, SkuVariant.label)
         .where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
     )).all()
     if not rows:
-        return None
-    mapping = {int(vid): pid for vid, pid in rows}
+        return None, None, None
+    mapping = {int(vid): (pid, label) for vid, pid, label in rows}
     for opt in options or []:
         try:
             v = int(opt.get("value"))
         except (TypeError, ValueError):
             continue
         if v in mapping:
-            return mapping[v]
-    return None
+            pid, label = mapping[v]
+            return pid, v, label
+    return None, None, None
+
+
+async def _resolve_sku_product_id(db, ggsel_offer_id: int, options: list) -> int | None:
+    """SKU-master: if this card is a SKU base card, resolve the selected radio variant
+    (its value == our ggsel_variant_id) to the target StarPets product_id."""
+    pid, _vid, _label = await _resolve_sku_selection(db, ggsel_offer_id, options)
+    return pid
 
 
 _bal_cache = {"val": None, "at": 0.0}
@@ -101,10 +113,12 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         if not roblox_username:
             return {"error": "Укажите Roblox Username"}
 
-        sku_product_id = await _resolve_sku_product_id(db, ggsel_offer_id, options)
+        sku_product_id, _sku_variant_id, _sku_label = await _resolve_sku_selection(
+            db, ggsel_offer_id, options)
         _sku_price_rub = None
         if sku_product_id is not None:
-            print(f"[precheck] SKU variant → product_id={sku_product_id}", flush=True)
+            print(f"[precheck] SKU variant {_sku_variant_id} {_sku_label!r} → "
+                  f"product_id={sku_product_id}", flush=True)
             _sv = (await db.execute(
                 select(SkuVariant.price_rub).where(
                     SkuVariant.ggsel_offer_id == ggsel_offer_id,
@@ -150,7 +164,8 @@ async def precheck(ggsel_offer_id: int, request: Request, secret: str = ""):
         )
         existing_event = result.scalar_one_or_none()
 
-        _pc_payload = {"roblox_username": roblox_username, "sku_product_id": sku_product_id}
+        _pc_payload = {"roblox_username": roblox_username, "sku_product_id": sku_product_id,
+                       "sku_variant_id": _sku_variant_id, "sku_label": _sku_label}
         if existing_event:
             existing_event.payload = _pc_payload
             existing_event.processed_at = datetime.utcnow()

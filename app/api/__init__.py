@@ -4950,3 +4950,241 @@ async def rebuy_fresh(order_id: int, confirm: bool = False, force: bool = False)
         await db.commit()
         return {"ok": True, "order_id": order.id, "abandoned_item": old_pid, "force": bool(force),
                 "requeued": True, "note": "Свежий выкуп поставлен в очередь — следи за логами [Deliver]."}
+
+
+# ---------------------------------------------------------------------------
+# Сверка маппинга вариантов: витрина ggsel  <->  sku_variants
+#
+# `_resolve_sku_product_id` переводит выбор покупателя (variant_id из вебхука) в
+# starpets_product_id ТОЛЬКО по таблице sku_variants. Если после пересборки опции
+# маппинг сдвинулся, карточка молча продаёт не тот вариант — заказ #965. Эта ручка
+# сравнивает наши метки с живыми заголовками вариантов на ggsel и, по запросу,
+# перезаписывает id по совпадению меток.
+# ---------------------------------------------------------------------------
+def _live_label(v: dict) -> str:
+    """Метка варианта из живого заголовка: title_en = чистая метка, title_ru = 'метка — 123₽'."""
+    en = (v.get("title_en") or "").strip()
+    if en:
+        return en
+    ru = (v.get("title_ru") or "").strip()
+    return ru.split(" — ")[0].strip()
+
+
+async def _verify_one_card(gid: int, fix: bool = False) -> dict:
+    from sqlalchemy import select, update as sql_update
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+    from app.clients.ggsel import ggsel_office
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(SkuVariant).where(SkuVariant.ggsel_offer_id == gid)
+        )).scalars().all()
+    if not rows:
+        return {"ggsel_offer_id": gid, "status": "no_db_variants"}
+
+    try:
+        opts = await ggsel_office.get_options(gid)
+    except Exception as e:  # noqa: BLE001
+        return {"ggsel_offer_id": gid, "status": "ggsel_error", "error": f"{type(e).__name__}: {e}"}
+    odata = opts.get("data") if isinstance(opts, dict) else opts
+    radios = [o for o in (odata or [])
+              if o.get("type") == "radio_button" and (o.get("title_ru") or "").strip() == "Вариант"]
+    if not radios:
+        return {"ggsel_offer_id": gid, "status": "no_radio_option", "db_variants": len(rows)}
+    if len(radios) > 1:
+        return {"ggsel_offer_id": gid, "status": "duplicate_radio_options",
+                "option_ids": [o.get("id") for o in radios], "db_variants": len(rows)}
+
+    opt = radios[0]
+    live = opt.get("variants") or []
+    live_by_id = {int(v["id"]): v for v in live if v.get("id") is not None}
+    live_by_label: dict[str, list] = {}
+    for v in live:
+        live_by_label.setdefault(_live_label(v), []).append(v)
+
+    problems, fixed = [], 0
+    for r in rows:
+        lv = live_by_id.get(int(r.ggsel_variant_id or 0))
+        db_label = (r.label or "").strip()
+        if lv is None:
+            kind = "orphan"          # наш id вообще не существует на карточке
+        elif _live_label(lv) != db_label:
+            kind = "mismatch"        # id существует, но это ДРУГОЙ вариант — продаём не то
+        else:
+            continue
+        item = {"product_id": r.starpets_product_id, "db_label": db_label,
+                "db_variant_id": r.ggsel_variant_id, "kind": kind,
+                "live_label_at_that_id": _live_label(lv) if lv else None}
+        cand = live_by_label.get(db_label) or []
+        item["correct_variant_id"] = cand[0].get("id") if len(cand) == 1 else None
+        item["fixable"] = item["correct_variant_id"] is not None
+        problems.append(item)
+
+    unmapped = [
+        {"variant_id": v.get("id"), "label": _live_label(v)}
+        for v in live
+        if int(v.get("id") or 0) not in {int(r.ggsel_variant_id or 0) for r in rows}
+    ]
+
+    if fix and problems:
+        async with AsyncSessionLocal() as db:
+            for p in problems:
+                if not p["fixable"]:
+                    continue
+                await db.execute(sql_update(SkuVariant)
+                                 .where(SkuVariant.ggsel_offer_id == gid,
+                                        SkuVariant.starpets_product_id == p["product_id"])
+                                 .values(ggsel_variant_id=int(p["correct_variant_id"]),
+                                         ggsel_option_id=opt.get("id")))
+                fixed += 1
+            await db.commit()
+        print(f"[VerifySkuMapping] gid={gid}: починено {fixed} из {len(problems)}", flush=True)
+
+    return {
+        "ggsel_offer_id": gid, "option_id": opt.get("id"),
+        "status": "ok" if not problems else "broken",
+        "db_variants": len(rows), "live_variants": len(live),
+        "problems": len(problems), "detail": problems,
+        "unmapped_live": unmapped, "fixed": fixed,
+    }
+
+
+@app.get("/verify-sku-mapping")
+async def verify_sku_mapping(ggsel_offer_id: int = 0, limit: int = 0, fix: bool = False,
+                             only_broken: bool = True):
+    """Сверить variant_id -> product_id с витриной ggsel. Без параметров — по всем SKU-карточкам.
+    `fix=true` перезаписывает id по совпадению метки (там, где совпадение однозначное)."""
+    import asyncio as _asyncio
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import SkuVariant
+
+    if ggsel_offer_id:
+        return await _verify_one_card(ggsel_offer_id, fix=fix)
+
+    async with AsyncSessionLocal() as db:
+        gids = [int(g) for (g,) in (await db.execute(
+            select(SkuVariant.ggsel_offer_id).distinct().order_by(SkuVariant.ggsel_offer_id)
+        )).all()]
+    if limit:
+        gids = gids[:limit]
+
+    cards, broken = [], 0
+    for i, gid in enumerate(gids, 1):
+        res = await _verify_one_card(gid, fix=fix)
+        if res.get("status") != "ok":
+            broken += 1
+            cards.append(res)
+        elif not only_broken:
+            cards.append(res)
+        if i % 25 == 0:
+            print(f"[VerifySkuMapping] {i}/{len(gids)} проверено, проблемных {broken}", flush=True)
+        await _asyncio.sleep(0.25)          # щадящий темп для ggsel
+    print(f"[VerifySkuMapping] ГОТОВО — карточек {len(gids)}, проблемных {broken}", flush=True)
+    return {"cards_checked": len(gids), "broken_cards": broken,
+            "fixed_total": sum(c.get("fixed", 0) for c in cards), "cards": cards}
+
+
+# ---------------------------------------------------------------------------
+# Масштаб утечки: что покупатель выбрал  <->  что мы ему выкупили.
+#
+# Источник правды о выборе покупателя — legacy purchase/info: там лежат сами опции
+# заказа с ЗАГОЛОВКОМ выбранного варианта, то есть данные, не зависящие от нашего
+# (возможно, сдвинутого) маппинга. Сравниваем этот заголовок с меткой варианта,
+# который реально был доставлен.
+# ---------------------------------------------------------------------------
+def _collect_strings(node, out: list, depth: int = 0):
+    """Собрать все строковые значения из произвольного JSON (покупка приходит разной формы)."""
+    if depth > 6:
+        return
+    if isinstance(node, str):
+        s = node.strip()
+        if s:
+            out.append(s)
+    elif isinstance(node, dict):
+        for v in node.values():
+            _collect_strings(v, out, depth + 1)
+    elif isinstance(node, list):
+        for v in node:
+            _collect_strings(v, out, depth + 1)
+
+
+@app.get("/audit-sku-orders")
+async def audit_sku_orders(days: int = 30, limit: int = 200, order_id: int = 0):
+    """Сверить по каждому SKU-заказу: выбранный вариант (из purchase/info) против выкупленного.
+
+    `mismatch` — покупатель выбрал одно, доставлено другое. `unknown` — purchase/info не отдал
+    опции (сверить нечем). Денег не тратит, ggsel только читает."""
+    import asyncio as _asyncio
+    from datetime import datetime, timedelta
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order, Offer, SkuVariant
+    from app.clients.ggsel import ggsel_office
+
+    async with AsyncSessionLocal() as db:
+        q = (select(Order, Offer.ggsel_offer_id)
+             .join(Offer, Offer.id == Order.offer_id)
+             .where(Order.sku_product_id.isnot(None)))
+        if order_id:
+            q = q.where(Order.id == order_id)
+        else:
+            q = q.where(Order.created_at >= datetime.utcnow() - timedelta(days=days))
+        q = q.order_by(Order.id.desc()).limit(limit)
+        rows = (await db.execute(q)).all()
+
+        gids = {int(g) for _, g in rows if g}
+        vmap: dict[int, dict[int, str]] = {}
+        labels_by_card: dict[int, set] = {}
+        if gids:
+            for v in (await db.execute(
+                select(SkuVariant).where(SkuVariant.ggsel_offer_id.in_(gids))
+            )).scalars().all():
+                gid = int(v.ggsel_offer_id)
+                vmap.setdefault(gid, {})[int(v.starpets_product_id)] = (v.label or "").strip()
+                labels_by_card.setdefault(gid, set()).add((v.label or "").strip())
+
+    out, mismatched, unknown = [], 0, 0
+    for o, gid in rows:
+        delivered_label = (vmap.get(int(gid or 0), {}) or {}).get(int(o.sku_product_id or 0), "")
+        info = None
+        try:
+            info = await ggsel_office.get_purchase_info(int(o.ggsel_order_id))
+        except Exception as e:  # noqa: BLE001
+            print(f"[AuditSku] order={o.id} purchase/info error: {e}", flush=True)
+        chosen = None
+        if isinstance(info, dict):
+            strings: list = []
+            _collect_strings(info.get("options") or info.get("user_data") or info, strings)
+            known = labels_by_card.get(int(gid or 0), set())
+            for s in strings:
+                head = s.split(" — ")[0].strip()
+                if head and head in known:
+                    chosen = head
+                    break
+        if chosen is None:
+            verdict, unknown = "unknown", unknown + 1
+        elif delivered_label and chosen != delivered_label:
+            verdict, mismatched = "mismatch", mismatched + 1
+        else:
+            verdict = "ok"
+        rec = {"order_id": o.id, "ggsel_order_id": o.ggsel_order_id, "card": gid,
+               "item": o.item_name, "buyer": o.roblox_username,
+               "paid_rub": float(o.amount_rub or 0),
+               "chosen_label": chosen, "delivered_label": delivered_label,
+               "delivered_product_id": o.sku_product_id,
+               "status": o.delivery_status.value if o.delivery_status else None,
+               "verdict": verdict}
+        if verdict != "ok":
+            print(f"[AuditSku] {verdict}: order={o.id} ggsel={o.ggsel_order_id} "
+                  f"выбрано={chosen!r} доставлено={delivered_label!r}", flush=True)
+        out.append(rec)
+        await _asyncio.sleep(0.2)
+
+    print(f"[AuditSku] ГОТОВО — заказов {len(out)}, расхождений {mismatched}, "
+          f"без данных {unknown}", flush=True)
+    return {"orders_checked": len(out), "mismatched": mismatched, "unknown": unknown,
+            "detail": [r for r in out if r["verdict"] != "ok"] or out[:20],
+            "note": "mismatch — доставлен не тот вариант, который выбрал покупатель. "
+                    "unknown — purchase/info не отдал опции; сверить нечем."}

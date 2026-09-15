@@ -16,6 +16,7 @@ from app.db import AsyncSessionLocal
 from app.db.models import SkuVariant, SkuProduct, Offer
 from app.clients.ggsel import ggsel_office
 from app.workers.sku_builder import _variant_sort_key
+from app.workers.sku_variant_map import align_created
 
 _STALE_FACTOR = 1.15   # default price may sit up to 15% above the live min before we rebuild
 
@@ -108,6 +109,9 @@ async def _rebuild_option_locked(gid, ordered, base, default_pid):
         })
         meta.append((v, live))
     created = await ggsel_office.add_variants_bulk(gid, new_opt, payload)
+    # Сопоставляем по заголовку, а не по порядку ответа: порядок ggsel не гарантирован, а
+    # дефолтный вариант мы намеренно шлём первым — см. app/workers/sku_variant_map.py.
+    created = await align_created(gid, new_opt, payload, created)
     async with AsyncSessionLocal() as db:
         for (v, live), cv in zip(meta, created):
             await db.execute(sql_update(SkuVariant)
