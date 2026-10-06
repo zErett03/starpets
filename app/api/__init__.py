@@ -767,15 +767,40 @@ async def test_webhook(body: dict):
 # Not shared across instances, but send_friendship is idempotent so duplicates are harmless.
 _friendship_resend_at: dict = {}
 
+_delivery_fallback_alert = {"at": 0.0}
+
+
+async def _alert_delivery_fallback():
+    """Раз в полчаса сообщаем, что страница выдачи работает на запасном пути.
+
+    Сам запасной путь теперь безопасен (привязка по нику), но он означает, что purchase API
+    ggsel не отвечает, а на том же API держится и пересчёт валюты оплаты. Молча жить в этом
+    режиме нельзя: без сигнала мы заметили бы это только по жалобам покупателей."""
+    import time as _t
+    if _t.time() - _delivery_fallback_alert["at"] < 1800:
+        return
+    _delivery_fallback_alert["at"] = _t.time()
+    try:
+        from app.alerts import warn
+        await warn("Страница выдачи: ggsel не подтвердил uniquecode покупателя, привязка идёт "
+                   "по нику. Скорее всего не работает purchase API (apilogin): проверь "
+                   "GGSEL_SELLER_ID и GGSEL_PURCHASE_API_KEY, диагностика - /probe-order.")
+    except Exception:  # noqa: BLE001 — алерт не должен ронять страницу покупателя
+        pass
+
 
 @app.get("/delivery", response_class=HTMLResponse)
-async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None):
+async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None,
+                        nick: str = None):
     from datetime import datetime, timedelta
     from sqlalchemy import select
     from app.db import AsyncSessionLocal
     from app.db.models import Order, DeliveryStatus
 
     order = None
+    need_nick = False     # запасной путь: просим покупателя назвать свой ник
+    nick_miss = False     # ник введён, но заказа с ним не нашли
+    code_owner = None     # номер заказа ggsel, которому принадлежит uniquecode (если ggsel ответил)
     if id_i is not None or id is not None or uniquecode is not None:
         async with AsyncSessionLocal() as db:
             if id_i is not None:
@@ -799,6 +824,7 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                     # реальный ответ ggsel — плоский Digiseller-формат: id заказа = inv
                     # (id_goods = карточка, amount = сумма). content_id — на случай иной схемы.
                     _gg_id = (_content or {}).get("inv") or (_content or {}).get("content_id")
+                    code_owner = _gg_id
                     if _gg_id is not None:
                         order = (await db.execute(
                             select(Order).where(Order.ggsel_order_id == int(_gg_id))
@@ -811,49 +837,58 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                 except Exception as _e:
                     print(f"[delivery] resolve_unique_code failed: {_e}", flush=True)
 
-            if order is None and uniquecode is not None:
-                # Первый визит: привязываем uniquecode к свежему order без него (notification
-                # webhook срабатывает до редиректа, order уже в БД). Окно считаем по САМОМУ
-                # позднему из created_at / dispatched_at — чтобы восстановленный заказ
-                # (retry-delivery, пересоздание трейда спустя время) снова стал привязываемым,
-                # а не завис на "обрабатывается". Берём и needs_attention (recovered orders).
-                from sqlalchemy import func as _func
-                # Buyers often open the order link long AFTER purchase (an hour+). A short window
-                # left them stuck on the spinner forever, so it is generous now. But ggsel passes
-                # only the uniquecode (not our order id), so if MULTIPLE unbound orders are in range
-                # (same buyer bought several at once) we can't tell them apart — binding "the newest"
-                # would show the WRONG bot. So bind only when there is exactly ONE candidate; the
-                # ambiguous multi-order case needs the order id in the URL (see &id_i handling).
-                # Bind to the MOST RECENT unbound order in range: the buyer who just paid and got
-                # redirected is the freshest order. Window 24h so a late opener (an hour+ later) still
-                # binds. Older still-unbound orders (dead/abandoned) are simply older, so newest-first
-                # skips past them. ggsel passes only the uniquecode (not our order id), so newest-first
-                # is the best signal available — don't refuse on multiple candidates (that stalls
-                # EVERY new order while any old unbound order lingers).
-                cutoff = datetime.utcnow() - timedelta(hours=24)
-                _recent = _func.coalesce(Order.dispatched_at, Order.created_at)
-                order = (await db.execute(
-                    select(Order)
-                    .where(
-                        Order.uniquecode.is_(None),
-                        Order.delivery_status.in_([
-                            DeliveryStatus.pending, DeliveryStatus.dispatched,
-                            DeliveryStatus.needs_attention,
-                        ]),
-                        # ONLY paid orders. precheck creates an Order for EVERY purchase attempt
-                        # (incl. balance/maintenance-blocked ones) with amount_rub NULL — those flood
-                        # the pool and steal the binding from the real paid order -> buyer gets the
-                        # "processing" spinner. amount_rub is set only by the notification (payment).
-                        Order.amount_rub.isnot(None),
-                        _recent >= cutoff,
-                    )
-                    .order_by(_recent.desc())
-                    .limit(1)
-                )).scalar_one_or_none()
-                if order is not None:
-                    order.uniquecode = uniquecode
-                    await db.commit()
-                    print(f"[delivery] linked uniquecode={uniquecode!r} → order id={order.id}", flush=True)
+            # Если ggsel назвал владельца кода, но заказа у нас ещё нет, значит уведомление об
+            # оплате не долетело. Тут нужен спиннер с автообновлением, а не вопрос про ник:
+            # через несколько секунд заказ появится и привяжется точно.
+            if order is None and uniquecode is not None and code_owner is None:
+                # Запасной путь: ggsel не подтвердил, чей это uniquecode (purchase API молчит).
+                #
+                # Раньше здесь привязывался «самый свежий непривязанный оплаченный заказ» по ВСЕМ
+                # карточкам и ВСЕМ покупателям. Два покупателя, открывшие страницы почти
+                # одновременно, получали ботов друг друга крест-накрест: первый забирал чужой,
+                # более свежий заказ, второму доставался оставшийся, то есть заказ первого
+                # (ggsel 52148551 и 52148685). Трейд же создан на ник настоящего владельца, так что
+                # оба шли не к своему боту, и выдача срывалась у обоих.
+                #
+                # Угадывать нельзя. Единственное, что покупатель точно знает и что точно есть в
+                # заказе, это его Roblox-ник. Просим ввести и привязываем только по совпадению.
+                # Лишний шаг появляется, только когда API не отвечает; в штатном режиме его нет.
+                await _alert_delivery_fallback()
+                _nick = (nick or "").strip().lstrip("@").lower()
+                if not _nick:
+                    need_nick = True
+                else:
+                    from sqlalchemy import func as _func
+                    cutoff = datetime.utcnow() - timedelta(hours=24)
+                    _recent = _func.coalesce(Order.dispatched_at, Order.created_at)
+                    order = (await db.execute(
+                        select(Order)
+                        .where(
+                            Order.uniquecode.is_(None),
+                            Order.delivery_status.in_([
+                                DeliveryStatus.pending, DeliveryStatus.dispatched,
+                                DeliveryStatus.needs_attention,
+                            ]),
+                            # Только оплаченные: precheck заводит Order на каждую попытку покупки,
+                            # а сумму ставит лишь notification, то есть факт оплаты.
+                            Order.amount_rub.isnot(None),
+                            _recent >= cutoff,
+                            _func.lower(_func.ltrim(_func.trim(Order.roblox_username), "@")) == _nick,
+                        )
+                        # Два неоплаченных заказа одного ника: оба его, и следующая ссылка
+                        # привяжет второй. Порядок тут уже ни на что не влияет.
+                        .order_by(_recent.desc())
+                        .limit(1)
+                    )).scalar_one_or_none()
+                    if order is not None:
+                        order.uniquecode = uniquecode
+                        await db.commit()
+                        print(f"[delivery] linked uniquecode={uniquecode!r} → order id={order.id} "
+                              f"по нику {_nick!r}", flush=True)
+                    else:
+                        need_nick, nick_miss = True, True
+                        print(f"[delivery] uniquecode={uniquecode!r}: ник {_nick!r} не совпал "
+                              f"ни с одним непривязанным оплаченным заказом", flush=True)
 
     bot_name = (order.bot_name or "").strip() if order else ""
     status = order.delivery_status if order else None
@@ -894,7 +929,27 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
                     flush=True,
                 )
 
-    if status == DeliveryStatus.done or status == DeliveryStatus.finalized:
+    if need_nick:
+        import html as _html
+        _miss = ('<p class="warn nick-miss">Заказ с таким ником не найден. Проверьте написание: '
+                 'ник должен совпадать с тем, что вы указали при покупке. Если оплатили только '
+                 'что, подождите минуту и попробуйте ещё раз.</p>') if nick_miss else ""
+        body_html = f"""
+        <div class="card">
+            <div class="icon">🔎</div>
+            <h1>Укажите ваш Roblox-ник</h1>
+            <p class="sub">Тот же, что вы вводили при покупке. По нему мы найдём ваш заказ и покажем бота для трейда.</p>
+            {_miss}
+            <form method="get" action="/delivery" class="nick-form">
+                <input type="hidden" name="uniquecode" value="{_html.escape(uniquecode or '')}">
+                <input type="text" name="nick" value="{_html.escape(nick or '')}" placeholder="Roblox-ник"
+                       autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                <button type="submit">Показать бота</button>
+            </form>
+        </div>"""
+        extra_js = ""
+
+    elif status == DeliveryStatus.done or status == DeliveryStatus.finalized:
         body_html = """
         <div class="card">
             <div class="icon">✅</div>
@@ -1007,6 +1062,10 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
   });
 })();
 </script>"""
+    if need_nick:
+        # Автообновление и перезагрузка при возврате на вкладку стёрли бы введённый ник:
+        # покупатель как раз уходит в Roblox подсмотреть, как он пишется.
+        refresh_meta = ""
 
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="ru">
@@ -1064,6 +1123,17 @@ async def delivery_page(uniquecode: str = None, id_i: int = None, id: int = None
   .warn-top {{ margin-bottom: 20px; }}
   .support {{ font-size: 0.85rem; color: rgba(255,255,255,0.6); line-height: 1.5; margin-top: 2px; }}
   .support-bottom {{ margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); }}
+  .nick-form {{ display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }}
+  .nick-form input[type=text] {{
+    padding: 14px 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(0,0,0,0.3); color: #fff; font-size: 1.05rem; text-align: center;
+  }}
+  .nick-form input[type=text]:focus {{ outline: none; border-color: #a78bfa; }}
+  .nick-form button {{
+    padding: 14px 16px; border: 0; border-radius: 12px; cursor: pointer;
+    background: linear-gradient(90deg, #7c3aed, #2563eb); color: #fff; font-size: 1rem; font-weight: 700;
+  }}
+  .nick-miss {{ margin-top: 16px; }}
   .timer-box {{
     background: rgba(0,0,0,0.3);
     border-radius: 12px;
@@ -5015,6 +5085,10 @@ async def _verify_one_card(gid: int, fix: bool = False) -> dict:
             continue
         item = {"product_id": r.starpets_product_id, "db_label": db_label,
                 "db_variant_id": r.ggsel_variant_id, "kind": kind,
+                # hidden=true + orphan — это норма: вариант убран с витрины как «нет в стоке»,
+                # id умер вместе со старой опцией. hidden=false + orphan — вариант должен
+                # продаваться, но его на карточке нет: потерянная выручка.
+                "hidden": bool(r.hidden),
                 "live_label_at_that_id": _live_label(lv) if lv else None}
         cand = live_by_label.get(db_label) or []
         item["correct_variant_id"] = cand[0].get("id") if len(cand) == 1 else None
@@ -5045,7 +5119,10 @@ async def _verify_one_card(gid: int, fix: bool = False) -> dict:
         "ggsel_offer_id": gid, "option_id": opt.get("id"),
         "status": "ok" if not problems else "broken",
         "db_variants": len(rows), "live_variants": len(live),
-        "problems": len(problems), "detail": problems,
+        "problems": len(problems),
+        "mismatch": sum(1 for p in problems if p["kind"] == "mismatch"),
+        "lost_visible": sum(1 for p in problems if p["kind"] == "orphan" and not p["hidden"]),
+        "detail": problems,
         "unmapped_live": unmapped, "fixed": fixed,
     }
 
@@ -5188,3 +5265,97 @@ async def audit_sku_orders(days: int = 30, limit: int = 200, order_id: int = 0):
             "detail": [r for r in out if r["verdict"] != "ok"] or out[:20],
             "note": "mismatch — доставлен не тот вариант, который выбрал покупатель. "
                     "unknown — purchase/info не отдал опции; сверить нечем."}
+
+
+# ---------------------------------------------------------------------------
+# Привязка страницы выдачи (uniquecode -> заказ): проверка и ручная отвязка.
+#
+# Покупатель попадает на /delivery с uniquecode, по которому мы находим его заказ и
+# показываем бота. Ошибочная привязка означает, что человек видит чужого бота и идёт
+# не туда, а трейд создан на его ник у другого бота. Обе ручки только для оператора.
+# ---------------------------------------------------------------------------
+@app.get("/unbind-uniquecode")
+async def unbind_uniquecode(ggsel_order_id: int, confirm: bool = False):
+    """Снять привязку страницы выдачи с заказа. Без confirm только показывает, что снимется.
+
+    После отвязки следующее открытие ссылки покупателем привяжет заказ заново: через ggsel,
+    а если API молчит, по нику."""
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+    async with AsyncSessionLocal() as db:
+        o = (await db.execute(
+            select(Order).where(Order.ggsel_order_id == ggsel_order_id)
+        )).scalar_one_or_none()
+        if o is None:
+            return {"error": f"заказ ggsel {ggsel_order_id} не найден"}
+        info = {"order_id": o.id, "ggsel_order_id": o.ggsel_order_id,
+                "roblox_username": o.roblox_username, "bot_name": o.bot_name,
+                "uniquecode": o.uniquecode}
+        if not confirm:
+            return {**info, "preview": True,
+                    "note": "Повтори с &confirm=true, чтобы снять привязку."}
+        old = o.uniquecode
+        o.uniquecode = None
+        await db.commit()
+    print(f"[UnbindUniquecode] ggsel={ggsel_order_id} order={info['order_id']} "
+          f"снят uniquecode={old!r}", flush=True)
+    return {**info, "unbound": True, "uniquecode": None, "was": old}
+
+
+@app.get("/check-uniquecode-bindings")
+async def check_uniquecode_bindings(days: int = 3, limit: int = 300):
+    """Сверить каждую привязку uniquecode -> заказ с ggsel.
+
+    ggsel знает, какому заказу принадлежит код. Если он называет другой заказ, покупателю
+    показывали чужого бота. unknown означает, что ggsel не ответил: при массовом unknown
+    не работает сам purchase API, и тогда страница выдачи живёт на привязке по нику."""
+    import asyncio as _asyncio
+    from datetime import datetime, timedelta
+    from sqlalchemy import select
+    from app.db import AsyncSessionLocal
+    from app.db.models import Order
+    from app.clients.ggsel import ggsel_office
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(Order)
+            .where(Order.uniquecode.isnot(None),
+                   Order.created_at >= datetime.utcnow() - timedelta(days=days))
+            .order_by(Order.id.desc()).limit(limit)
+        )).scalars().all()
+        by_ggsel = {o.ggsel_order_id: o for o in rows}
+
+    mismatched, unknown, out = 0, 0, []
+    for o in rows:
+        content = None
+        try:
+            content = await ggsel_office.resolve_unique_code(o.uniquecode)
+        except Exception as e:  # noqa: BLE001
+            print(f"[CheckUniquecode] order={o.id} ошибка: {e}", flush=True)
+        owner = (content or {}).get("inv") or (content or {}).get("content_id")
+        if owner is None:
+            unknown += 1
+            verdict = "unknown"
+        elif int(owner) != int(o.ggsel_order_id):
+            mismatched += 1
+            verdict = "mismatch"
+        else:
+            verdict = "ok"
+        if verdict != "ok":
+            real = by_ggsel.get(int(owner)) if owner is not None else None
+            out.append({
+                "order_id": o.id, "ggsel_order_id": o.ggsel_order_id,
+                "buyer": o.roblox_username, "bot_shown": o.bot_name,
+                "uniquecode": o.uniquecode, "verdict": verdict,
+                "code_belongs_to_ggsel": owner,
+                "code_owner_buyer": real.roblox_username if real else None,
+                "code_owner_bot": real.bot_name if real else None,
+            })
+        await _asyncio.sleep(0.2)
+    print(f"[CheckUniquecode] проверено {len(rows)}, перепутано {mismatched}, "
+          f"без ответа ggsel {unknown}", flush=True)
+    return {"checked": len(rows), "mismatched": mismatched, "unknown": unknown,
+            "detail": out,
+            "note": "mismatch: код принадлежит другому заказу, покупателю показан чужой бот. "
+                    "Чинится /unbind-uniquecode?ggsel_order_id=...&confirm=true на обоих заказах."}

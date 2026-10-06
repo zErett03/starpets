@@ -12,6 +12,116 @@ from app.fx import get_usd_rub, item_cost_ok
 _BUY_MAX_RETRIES = 3
 
 
+async def _payment_matches_variant(db, ggsel_offer_id: int, product_id: int, sale_rub: float):
+    """Проверка «оплата против варианта» ПЕРЕД тратой денег.
+
+    Маппинг variant_id -> product_id переписывается при каждой пересборке радио-опции, и если он
+    поехал, мы выкупаем соседний вариант — покупатель платит за летающего и ездового, а получает
+    обычного (заказ #965). Снаружи это никак не видно: выкуп проходит штатно.
+
+    Косвенный, но надёжный признак: сумма оплаты всегда равна цене ВЫБРАННОГО варианта. Если
+    оплата заметно расходится с ценой того варианта, который мы собрались покупать, и при этом
+    в точности ложится на цену другого варианта этой же карточки — это сдвиг маппинга, а не
+    дрейф цены. Дрейф двигает все варианты разом и такой «идеальной» второй кандидатуры не даёт.
+
+    Возвращает None если всё в порядке, иначе текст расхождения."""
+    from app.db.models import SkuVariant
+    rows = (await db.execute(
+        select(SkuVariant.starpets_product_id, SkuVariant.label, SkuVariant.price_rub)
+        .where(SkuVariant.ggsel_offer_id == ggsel_offer_id)
+    )).all()
+    prices = {int(pid): (float(price or 0), label or "") for pid, label, price in rows}
+    mine = prices.get(int(product_id))
+    if not mine or mine[0] <= 0 or sale_rub <= 0:
+        return None
+    my_gap = abs(sale_rub - mine[0]) / mine[0]
+    if my_gap <= 0.10:                      # обычный дрейф цены — не трогаем
+        return None
+    best = None
+    for pid, (price, label) in prices.items():
+        if pid == int(product_id) or price <= 0:
+            continue
+        gap = abs(sale_rub - price) / price
+        if best is None or gap < best[0]:
+            best = (gap, pid, label, price)
+    if best is None or best[0] > 0.03 or best[0] * 3 > my_gap:
+        return None                          # другой вариант не объясняет оплату лучше
+    return (f"оплата {sale_rub:.2f} ₽ не сходится с вариантом {mine[1]!r} ({mine[0]:.2f} ₽, "
+            f"product_id={product_id}), но совпадает с {best[2]!r} ({best[3]:.2f} ₽, "
+            f"product_id={best[1]}) — похоже на сдвиг маппинга вариантов")
+
+
+async def _confirm_payment_currency(db, order) -> None:
+    """Перед выкупом ещё раз выяснить валюту оплаты, если при уведомлении это не удалось.
+
+    Вебхук ggsel о валюте врёт: оплату 5.36 USD через ЕРИП присылает как «5.36 RUB». Правду
+    знает только legacy purchase/info, но в момент уведомления он иногда не отвечает, и тогда в
+    заказ ложатся голые 5.36 «рубля». Профит-гард сравнивает себестоимость с этой суммой и
+    отказывает с price_too_high, хотя сделка выгодная (заказ #1287, Munchkin Cat).
+
+    Признак неподтверждённой валюты — пустой amount_currency: notification заполняет его только
+    по ответу purchase/info, в том числе для рублей. Повторный запрос стоит одного обращения к
+    ggsel и делается только для таких заказов."""
+    if order.amount_currency:
+        return
+    from app.clients.ggsel import ggsel_office
+    try:
+        info = await ggsel_office.get_purchase_info(int(order.ggsel_order_id))
+    except Exception as e:  # noqa: BLE001
+        print(f"[Deliver] order_id={order.id} purchase/info недоступен: {e}", flush=True)
+        return
+    if not isinstance(info, dict):
+        print(f"[Deliver] order_id={order.id} purchase/info не ответил — валюта не подтверждена",
+              flush=True)
+        return
+    try:
+        paid = float(info.get("amount") or 0)
+    except (TypeError, ValueError):
+        return
+    code = str(info.get("currency_type") or "").strip().upper()
+    if paid <= 0 or not code:
+        return
+    if code in ("RUB", "RUR"):
+        rub = round(paid, 2)
+    else:
+        from app.fx import get_rate_to_rub
+        try:
+            rub = round(paid * await get_rate_to_rub(code), 2)
+        except Exception as e:  # noqa: BLE001
+            print(f"[Deliver] order_id={order.id} курс {code} недоступен: {e}", flush=True)
+            return
+    old = order.amount_rub
+    order.amount_rub, order.amount_original, order.amount_currency = rub, paid, code
+    await db.commit()
+    print(f"[Deliver] order_id={order.id} валюта подтверждена: {paid} {code} → {rub} ₽ "
+          f"(было {old})", flush=True)
+
+
+async def _unconfirmed_amount_suspicious(db, order, offer, sale_rub: float):
+    """Валюта так и не подтверждена, а сумма в разы меньше цены товара.
+
+    Это почти наверняка оплата в долларах или евро, записанная как рубли. Выкупать по ней гард
+    всё равно не даст, но оператор увидит невнятное price_too_high и не поймёт, что делать.
+    Останавливаем заказ с понятной причиной и подсказкой. Порог в четверть цены: настоящая
+    рублёвая оплата так сильно от цены карточки не отстаёт, а валютная отстаёт в десятки раз."""
+    if order.amount_currency or sale_rub <= 0:
+        return None
+    expected = float(offer.price_rub or 0)
+    if order.sku_product_id and offer.ggsel_offer_id:
+        from app.db.models import SkuVariant
+        v = (await db.execute(select(SkuVariant.price_rub).where(
+            SkuVariant.ggsel_offer_id == offer.ggsel_offer_id,
+            SkuVariant.starpets_product_id == order.sku_product_id,
+        ))).scalars().first()
+        if v:
+            expected = float(v)
+    if expected <= 0 or sale_rub >= expected * 0.25:
+        return None
+    return (f"валюта оплаты не подтверждена: в заказе {sale_rub:.2f}, а товар стоит "
+            f"{expected:.2f} ₽ — похоже на оплату в USD/EUR (ЕРИП и т.п.). Проверь "
+            f"/probe-order?order_id={order.ggsel_order_id}, потом /fix-order-amounts или Force-выкуп")
+
+
 class TransientDeliveryError(Exception):
     """A recoverable delivery failure (no stock / price spike). Raised so the task runner
     retries with backoff; StarPets stock and prices flicker, so a paid order should not be
@@ -161,6 +271,8 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
         roblox_username = order.roblox_username or ""
         offer_price_rub = float(offer.price_rub or 0)
         # what we actually receive for this order (buyer's payment; fallback to listed price)
+        # Валюта не подтверждена при уведомлении — переспрашиваем ggsel до гарда.
+        await _confirm_payment_currency(db, order)
         sale_rub = float(order.amount_rub or offer.price_rub or 0)
         print(
             f"[Deliver] start order_id={order_id} offer_id={offer.id} "
@@ -172,6 +284,36 @@ async def deliver_order(order_id: int, attempt: int = 1, max_attempts: int = 1) 
         if order.delivery_status in (DeliveryStatus.dispatched, DeliveryStatus.done, DeliveryStatus.finalized):
             print(f"[Deliver] order_id={order_id} already {order.delivery_status.value} — skip", flush=True)
             return
+
+        if not order.force_deliver and not order.starpets_purchase_id:
+            _cur_issue = await _unconfirmed_amount_suspicious(db, order, offer, sale_rub)
+            if _cur_issue:
+                order.delivery_status = DeliveryStatus.needs_attention
+                order.error_reason = _cur_issue
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(f"[Deliver] order_id={order_id} ОСТАНОВЛЕН — {_cur_issue}", flush=True)
+                return
+
+        # Страховка от сдвига маппинга вариантов: лучше остановить заказ до траты денег, чем
+        # выдать не тот товар. Ручной force снимает проверку — оператор видит расхождение сам.
+        if (order.sku_product_id and offer.ggsel_offer_id and not order.force_deliver
+                and not order.starpets_purchase_id):
+            _mismatch = await _payment_matches_variant(
+                db, offer.ggsel_offer_id, order.sku_product_id, sale_rub)
+            if _mismatch:
+                order.delivery_status = DeliveryStatus.needs_attention
+                order.error_reason = f"вариант не совпал с оплатой: {_mismatch}"
+                order.updated_at = datetime.utcnow()
+                await db.commit()
+                print(f"[Deliver] order_id={order_id} ОСТАНОВЛЕН — {_mismatch}", flush=True)
+                try:
+                    from app.alerts import critical
+                    await critical(f"Заказ #{order_id} остановлен до выкупа.\n{_mismatch}\n"
+                                   f"Проверь /verify-sku-mapping?ggsel_offer_id={offer.ggsel_offer_id}")
+                except Exception:  # noqa: BLE001 — алерт не должен ронять доставку
+                    pass
+                return
 
         # 1-hour item lifetime: if we already bought the item and >1h has passed, StarPets has
         # refunded it — the purchase is dead. Don't keep retrying; flag for manual handling.
