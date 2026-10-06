@@ -7,7 +7,7 @@ monitor can't auto-close orders, so the operator closes them here. Basic Auth.
 import json as _json
 import math
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape as _esc
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, quote as _url_quote
 
@@ -64,6 +64,23 @@ _MANUAL_STATUSES = ("closed", "done", "failed")
 
 def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status)
+
+
+def _short_status(status: str) -> str:
+    """Подпись статуса для телефона: не длиннее шести символов (DISPATCHED -> DISPA…).
+    Подставляется скриптом только в закрытый селект; в раскрытом списке видны полные."""
+    s = _status_label(status).upper()
+    return s if len(s) <= 6 else s[:5] + "…"
+
+
+# Стрелка кнопки «подробнее» в строке заказа (видна только на телефоне).
+_CHEVRON = ('<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">'
+            '<path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.7" '
+            'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+# Иконка кнопки фильтров: три полоски от короткой к длинной.
+_FILTER_ICON = ('<svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">'
+                '<path d="M7 5h6M4.5 10h11M2 15h16" stroke="currentColor" stroke-width="2" '
+                'stroke-linecap="round"/></svg>')
 
 
 def _js_str(value: str) -> str:
@@ -231,7 +248,7 @@ header{padding:14px 40px;background:#161b22;border-bottom:1px solid #30363d;posi
 .bal .v{display:block;font-size:17px;font-weight:600;color:#3fb950;line-height:1.2}
 .bal.low .v{color:#f85149}
 .bal.stale .v{color:#8b949e}
-h1{margin:0;font-size:16px;font-weight:600}
+h1{margin:0;font-size:16px;font-weight:600;display:flex;align-items:center;flex-wrap:wrap;row-gap:6px}
 .sub{color:#8b949e;font-size:12px;margin-top:3px}
 .flash{margin:12px 40px 0;padding:10px 14px;border-radius:8px;background:#1f6feb22;border:1px solid #1f6feb66;color:#c9d1d9;font-size:13px}
 .flash .x{float:right;color:#8b949e;cursor:pointer}
@@ -319,6 +336,98 @@ td.cmt{white-space:normal;max-width:320px;color:#c9d1d9;font-size:12px;line-heig
 .modal-err{color:#f85149;font-size:12px;margin-top:10px}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
 .modal-actions .act-btn{width:auto;min-width:96px;height:32px;padding:0 14px}
+
+/* ---------- Телефон ----------
+   Компактная строка заказа: id, ggsel, товар, сумма, дата, ник, статус, ошибка и блок
+   управления. Остальное (SP статус, Trade ID, Purchase ID, бот, правка ника) уходит в
+   подробности под кнопкой со стрелкой слева от id. Строка раскладывается сеткой: слева две
+   узкие колонки данных в четыре строки, справа блок управления целиком, поэтому ничего не
+   уезжает за край и горизонтальной прокрутки нет. На десктопе всё это скрыто, там те же
+   данные стоят в своих колонках. Правила привязаны к .otable: журнал проблем и модалки не
+   затрагиваются. */
+.xbtn,.fbtn,.nick-ro{display:none}
+tr.xrow{display:none}
+.fulltip{display:none;position:absolute;z-index:40;max-width:300px;background:#161b22;
+  border:1px solid #30363d;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.4;
+  color:#c9d1d9;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+@media (max-width:820px){
+  header{padding:10px 12px}
+  h1{font-size:15px}
+  .xlink{margin-left:6px;padding:2px 7px;font-size:11px;white-space:nowrap}
+  .xlink:first-of-type{margin-left:10px}
+  .bal{position:static;text-align:left;margin-top:4px}
+  .bal .v{display:inline;font-size:14px;margin-right:6px}
+  .flash{margin:10px 12px 0}
+  .toolbar{padding:8px 12px;gap:8px}
+  .search{flex:1;min-width:0}
+  .search input[type=text]{min-width:0;flex:1;width:100%}
+  .fbtn{display:flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:30px;
+    padding:0;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#c9d1d9;cursor:pointer}
+  .fbtn.active{border-color:#1f6feb;color:#58a6ff}
+  .filters{display:none;width:100%}
+  .filters.show{display:flex}
+  .pager{margin-left:0;width:100%;gap:8px}
+  .pager .pg-info{display:none}
+
+  .wrap{padding:4px 10px 14px;overflow-x:visible}
+  table.otable{min-width:0}
+  .otable thead{display:none}
+  .otable tbody{display:block}
+  .otable tr.orow{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) 146px;
+    grid-template-areas:"id gg act" "item amt act" "dt nick act" "st err act" ". . act";
+    /* пятая резиновая строка забирает лишнюю высоту, когда блок управления выше данных
+       (есть кнопка Force) — иначе сетка растягивает четыре строки слева вразбивку */
+    grid-template-rows:auto auto auto auto 1fr;
+    column-gap:8px;row-gap:5px;align-items:center;padding:10px 0;border-bottom:1px solid #21262d;
+    font-size:12px}
+  .otable tr.orow.open{border-bottom:0;padding-bottom:6px}
+  .otable tr.orow:hover td{background:transparent}
+  .otable tr.orow td{display:block;padding:0;border:0;min-width:0;text-align:left;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .otable tr.orow td.c-id{grid-area:id;display:flex;align-items:center;gap:6px;font-weight:600}
+  .otable .c-gg{grid-area:gg}
+  .otable .c-item{grid-area:item}
+  .otable .c-amt{grid-area:amt}
+  .otable .c-dt{grid-area:dt;color:#8b949e}
+  .otable .c-nick{grid-area:nick}
+  .otable .c-st{grid-area:st}
+  .otable .c-err{grid-area:err}
+  .otable tr.orow td.c-act{grid-area:act;align-self:start;overflow:visible}
+  .otable tr.orow td.c-sp,.otable tr.orow td.c-trade,
+  .otable tr.orow td.c-pur,.otable tr.orow td.c-bot{display:none}
+  .otable .item-name{display:block;overflow:hidden;text-overflow:ellipsis;cursor:pointer;
+    text-decoration:underline dotted #484f58;text-underline-offset:3px}
+  .otable .c-amt .rebuy{display:none}
+  /* у формы ника display задан инлайном, поэтому без !important её не спрятать */
+  .otable .c-nick .actform,.otable .c-nick .reissue-btn,.otable .c-nick .nick-err{display:none !important}
+  .otable .c-nick .nick-ro{display:inline}
+  .otable .c-err > div{display:inline-block;margin:0 0 0 4px !important}
+  .xbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;
+    height:22px;padding:0;border:1px solid #30363d;border-radius:5px;background:#21262d;
+    color:#c9d1d9;cursor:pointer}
+  .xbtn svg{transition:transform .15s}
+  tr.orow.open .xbtn{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  tr.orow.open .xbtn svg{transform:rotate(180deg)}
+  .otable .actions{width:146px;margin-left:0;gap:5px}
+  .otable .actions .row1 select{font-size:11px;padding:0 4px}
+  .otable .act-btn{font-size:11px}
+
+  .otable tr.xrow.open{display:block;padding:0 0 10px;border-bottom:1px solid #21262d}
+  .otable tr.xrow td{display:block;padding:0;border:0;white-space:normal;text-align:left}
+  .xlist{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 12px;margin:0;
+    background:#161b22;border:1px solid #30363d;border-radius:8px;padding:9px 11px;
+    font-size:12px;line-height:1.4}
+  .xlist dt{color:#8b949e}
+  .xlist dd{margin:0;min-width:0;word-break:break-word}
+
+  .overlay{padding:10px}
+  .modal{padding:16px 14px;max-height:92vh}
+  .modal h2{font-size:15px}
+  /* История: четыре колонки не влезают в 360px без переносов, поэтому разрешаем перенос
+     и ужимаем шрифт; год из времени убирает скрипт. */
+  table.hist th,table.hist td{white-space:normal;font-size:11px;padding:5px 6px;vertical-align:top}
+  pre.summary{font-size:11px}
+}
 """
 
 _JS = """
@@ -333,11 +442,13 @@ async function openHistory(orderId){
     var res=await fetch('/admin/history?order_id='+orderId,{credentials:'same-origin'});
     if(!res.ok){ alert('Ошибка загрузки истории: '+res.status); return; }
     var d=await res.json();
-    document.getElementById('hist-title').textContent='История доставки — заказ #'+d.order_id;
+    document.getElementById('hist-title').textContent='History — заказ #'+d.order_id;
     var rows='';
     for(var i=0;i<d.timeline.length;i++){
       var ev=d.timeline[i];
-      rows+='<tr><td>'+ev.time+'</td><td>'+ev.trade_id+'</td><td>'+ev.status_label+'</td><td>'+ev.event_type+'</td></tr>';
+      // на телефоне год во времени лишний: без него строка истории не разваливается на три
+      var tm=(typeof MOBILE!=='undefined'&&MOBILE.matches)?String(ev.time).slice(5):ev.time;
+      rows+='<tr><td>'+tm+'</td><td>'+ev.trade_id+'</td><td>'+ev.status_label+'</td><td>'+ev.event_type+'</td></tr>';
     }
     document.getElementById('hist-timeline').innerHTML=rows||'<tr><td colspan="4" style="color:#8b949e">событий ещё нет</td></tr>';
     document.getElementById('hist-summary').textContent=d.summary;
@@ -354,10 +465,13 @@ function copyHistory(){
 }
 document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeHistory(); });
 document.addEventListener('click',function(e){ if(e.target&&e.target.id==='hist-overlay') closeHistory(); });
-function openReissue(orderId){
-  var inp=document.getElementById('nick-'+orderId);
+function openReissue(orderId, fromDetails){
+  // На телефоне ник правят в раскрытых подробностях заказа. У тех полей свои id
+  // (nickm-/nickmerr-): колонка с ником там скрыта, и читать надо из видимого поля.
+  var p=fromDetails?'nickm':'nick';
+  var inp=document.getElementById(p+'-'+orderId);
   var nick=(inp&&inp.value||'').trim();
-  var err=document.getElementById('nickerr-'+orderId);
+  var err=document.getElementById(p+'err-'+orderId);
   if(!nick){
     if(err){ err.textContent='Укажите новый логин в поле ника выше'; err.style.display='block';
              setTimeout(function(){err.style.display='none';},4000); }
@@ -368,7 +482,7 @@ function openReissue(orderId){
   document.getElementById('reissue-order-id').value=orderId;
   document.getElementById('reissue-username').value=nick;
   document.getElementById('reissue-nick-view').textContent=nick;
-  document.getElementById('reissue-title').textContent='Новый логин — заказ #'+orderId;
+  document.getElementById('reissue-title').textContent='New login — заказ #'+orderId;
   var sel=document.getElementById('reissue-reason'); sel.selectedIndex=0;
   document.getElementById('reissue-custom').value='';
   document.getElementById('reissue-err').style.display='none';
@@ -395,7 +509,7 @@ document.addEventListener('click',function(e){ if(e.target&&e.target.id==='reiss
 var forceOrderId=null;
 async function openForce(orderId){
   forceOrderId=orderId;
-  document.getElementById('force-title').textContent='Force-выкуп — заказ #'+orderId;
+  document.getElementById('force-title').textContent='Force — заказ #'+orderId;
   document.getElementById('force-body').innerHTML='Загрузка live-стоимости…';
   var cb=document.getElementById('force-confirm'); cb.disabled=true; cb.textContent='💥 Выкупить';
   document.getElementById('force-overlay').style.display='flex';
@@ -517,6 +631,57 @@ document.addEventListener('click',function(e){ if(e.target&&e.target.id==='probl
     }
   } catch(e){}
 })();
+// ---------- Телефон ----------
+var MOBILE=window.matchMedia('(max-width:820px)');
+function toggleRow(id){
+  var r=document.getElementById('r-'+id), x=document.getElementById('x-'+id);
+  if(!x) return;
+  var open=!x.classList.contains('open');
+  x.classList.toggle('open',open);
+  if(r) r.classList.toggle('open',open);
+}
+function toggleFilters(){
+  var f=document.querySelector('.toolbar .filters');
+  if(f) f.classList.toggle('show');
+}
+// Полное название товара по нажатию: в узкой строке оно обрезано многоточием.
+function showFull(el){
+  if(!MOBILE.matches) return;
+  var t=document.getElementById('fulltip');
+  if(!t){ t=document.createElement('div'); t.id='fulltip'; t.className='fulltip'; document.body.appendChild(t); }
+  if(t.style.display==='block' && t._src===el){ t.style.display='none'; return; }
+  t.textContent=el.getAttribute('data-full')||el.textContent;
+  t._src=el; t.style.display='block';
+  var r=el.getBoundingClientRect();
+  var left=Math.max(8, Math.min(r.left, window.innerWidth-t.offsetWidth-8));
+  t.style.left=(left+window.scrollX)+'px';
+  t.style.top=(r.bottom+window.scrollY+6)+'px';
+}
+document.addEventListener('click',function(e){
+  var t=document.getElementById('fulltip');
+  if(t && t.style.display==='block' && !(e.target.closest && e.target.closest('.item-name'))) t.style.display='none';
+});
+// Статусы в селекте на телефоне сокращаем до шести символов (DISPA…), иначе блок управления
+// не влезает в строку. В раскрытом списке возвращаем полные названия: выбирать надо по ним.
+(function(){
+  function isStatus(el){ return el && el.tagName==='SELECT' && el.name==='status'; }
+  function shortAll(){
+    var o=document.querySelectorAll('select[name=status] option');
+    for(var i=0;i<o.length;i++){
+      if(!o[i].dataset.full) o[i].dataset.full=o[i].textContent;
+      o[i].textContent=MOBILE.matches?(o[i].dataset.short||o[i].dataset.full):o[i].dataset.full;
+    }
+  }
+  function fullOne(sel){
+    for(var i=0;i<sel.options.length;i++){ var o=sel.options[i]; if(o.dataset.full) o.textContent=o.dataset.full; }
+  }
+  document.addEventListener('focusin',function(e){ if(MOBILE.matches && isStatus(e.target)) fullOne(e.target); });
+  document.addEventListener('mousedown',function(e){ if(MOBILE.matches && isStatus(e.target)) fullOne(e.target); });
+  document.addEventListener('focusout',function(e){ if(isStatus(e.target)) shortAll(); });
+  document.addEventListener('change',function(e){ if(isStatus(e.target)) shortAll(); });
+  if(MOBILE.addEventListener) MOBILE.addEventListener('change',shortAll);
+  shortAll();
+})();
 """
 
 
@@ -528,7 +693,8 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
     if cur and cur not in statuses:
         statuses = [cur] + statuses
     opts = "".join(
-        f'<option value="{s}"{" selected" if s == cur else ""}>{_status_label(s).upper()}</option>'
+        f'<option value="{s}"{" selected" if s == cur else ""} '
+        f'data-short="{_short_status(s)}">{_status_label(s).upper()}</option>'
         for s in statuses
     )
     uname = _esc(o.roblox_username or "")
@@ -538,7 +704,7 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
     # хранить верный ник для истории), но подсказка честно говорит, что произойдёт.
     _has_trade = bool((o.starpets_custom_id or "").strip())
     _nick_hint = ("Сохранить ник в базе. Трейд уже создан — он уйдёт на СТАРЫЙ ник, "
-                  "для смены получателя нажми «Новый логин»") if _has_trade else \
+                  "для смены получателя нажми «New login»") if _has_trade else \
                  "Сохранить ник (трейда ещё нет — выдача пойдёт на него)"
     nick_cell = (
         f'<form class="actform" method="post" action="/admin/edit-username" style="display:flex;gap:5px">'
@@ -559,7 +725,7 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
     if _buys > 1 or _back > 0:
         _net = _spent - _back
         _rebuy_badge = (
-            f'<div style="font-size:11px;margin-top:3px;color:#8b949e" '
+            f'<div class="rebuy" style="font-size:11px;margin-top:3px;color:#8b949e" '
             f'title="Куплено раз: {_buys}; потрачено ${_spent:.2f}; вернётся ${_back:.2f}">'
             f'<span style="color:#e3b341">♻ {_buys}×</span> '
             f'${_spent:.2f} − ${_back:.2f} = <b style="color:#c9d1d9">${_net:.2f}</b></div>'
@@ -596,27 +762,60 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
     force_btn = (
         f'<button type="button" class="act-btn" style="background:#da3633;border-color:#da3633;color:#fff" '
         f'onclick="openForce({o.id})" title="Выкупить предмет даже в убыток (обход гарда прибыльности)">'
-        f'💥 Force-выкуп</button>'
+        f'💥 Force</button>'
     ) if (cur not in ("dispatched", "done", "finalized") and _show_force(o.error_reason or "")) else ""
 
-    return f"""<tr>
-  <td>{o.id}</td>
-  <td>{ggsel_cell}</td>
-  <td>{_esc(o.item_name or "—")}</td>
-  <td>{amount}</td>
-  <td>{_fmt_dt(o.created_at)}</td>
-  <td>
+    # Подробности для телефона: всё, что не влезло в компактную строку. На десктопе эта
+    # строка таблицы скрыта всегда, там те же данные стоят в своих колонках. У полей ника
+    # здесь свои id (nickm-/nickmerr-), чтобы не совпасть с полями в колонке ника.
+    # Поле, галочка и New login — одним рядом: type="button" внутри формы её не отправляет.
+    nick_cell_m = (
+        f'<form class="actform" method="post" action="/admin/edit-username" '
+        f'style="display:flex;gap:5px;align-items:center">'
+        f'<input type="hidden" name="order_id" value="{o.id}">'
+        f'<input type="text" name="username" id="nickm-{o.id}" value="{uname}" placeholder="ник" '
+        f'style="flex:1;min-width:0;height:25px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;'
+        f'border-radius:6px;padding:0 6px;font-size:12px">'
+        f'<button type="submit" class="act-btn" style="flex:0 0 28px;width:28px" title="{_nick_hint}">✓</button>'
+        f'<button type="button" class="act-btn b-amber" style="flex:0 0 auto;width:auto;padding:0 10px" '
+        f'onclick="openReissue({o.id}, 1)" '
+        f'title="Отменить текущий трейд и пересоздать на новый логин">New login</button></form>'
+        f'<div id="nickmerr-{o.id}" class="nick-err"></div>'
+    )
+    _details = [
+        ("Товар", _esc(o.item_name or "—")),
+        ("Создан", _fmt_dt(o.created_at)),
+        ("SP статус", _esc(o.starpets_status or "—")),
+        ("Trade ID", _esc(o.starpets_custom_id or "—")),
+        ("Purchase ID", _esc(o.starpets_purchase_id or "—")),
+        ("Бот", bot_cell),
+    ]
+    if _rebuy_badge:
+        _details.append(("Перевыкупы", _rebuy_badge))
+    if o.error_reason:
+        _details.append(("Ошибка", _esc(o.error_reason)))
+    _details.append(("Roblox ник", nick_cell_m))
+    details_html = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in _details)
+
+    return f"""<tr class="orow" id="r-{o.id}">
+  <td class="c-id"><button type="button" class="xbtn" onclick="toggleRow({o.id})" title="Подробнее" aria-label="Подробнее">{_CHEVRON}</button><span>{o.id}</span></td>
+  <td class="c-gg">{ggsel_cell}</td>
+  <td class="c-item"><span class="item-name" data-full="{_esc(o.item_name or "—")}" onclick="showFull(this)">{_esc(o.item_name or "—")}</span></td>
+  <td class="c-amt">{amount}</td>
+  <td class="c-dt">{_fmt_dt(o.created_at)}</td>
+  <td class="c-nick">
+    <span class="nick-ro">{uname or "—"}</span>
     {nick_cell}
-    <button type="button" class="act-btn b-amber reissue-btn" onclick="openReissue({o.id})" title="Отменить текущий трейд и пересоздать на новый логин">Новый логин</button>
+    <button type="button" class="act-btn b-amber reissue-btn" onclick="openReissue({o.id})" title="Отменить текущий трейд и пересоздать на новый логин">New login</button>
     <div id="nickerr-{o.id}" class="nick-err"></div>
   </td>
-  <td>{_badge(cur)}</td>
-  <td>{_esc(o.starpets_status or "—")}</td>
-  <td>{_esc(o.starpets_custom_id or "—")}</td>
-  <td>{_esc(o.starpets_purchase_id or "—")}</td>
-  <td class="col-bot" title="{_esc(o.bot_name or '')}">{bot_cell}</td>
-  <td class="col-err">{_err_badge(o.error_reason or "")}{_prob_badge(prob)}</td>
-  <td>
+  <td class="c-st">{_badge(cur)}</td>
+  <td class="c-sp">{_esc(o.starpets_status or "—")}</td>
+  <td class="c-trade">{_esc(o.starpets_custom_id or "—")}</td>
+  <td class="c-pur">{_esc(o.starpets_purchase_id or "—")}</td>
+  <td class="col-bot c-bot" title="{_esc(o.bot_name or '')}">{bot_cell}</td>
+  <td class="col-err c-err">{_err_badge(o.error_reason or "")}{_prob_badge(prob)}</td>
+  <td class="c-act">
     <div class="actions">
       <form class="actform row1" method="post" action="/admin/set-status">
         <input type="hidden" name="order_id" value="{o.id}">
@@ -627,7 +826,7 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
         <form class="actform" method="post" action="/admin/redeliver" style="flex:1"
               onsubmit="return confirm('Создать новый трейд по заказу {o.id}? Если предмет ещё у нас — запустится новая выдача; если ушёл — покажет ошибку.')">
           <input type="hidden" name="order_id" value="{o.id}">
-          <button type="submit" class="act-btn b-amber">Новый трейд</button>
+          <button type="submit" class="act-btn b-amber">New trade</button>
         </form>
         <button type="button" class="act-btn" style="background:#8957e5;border-color:#8957e5;color:#fff;flex:0 0 25px;width:25px;padding:0"
                 onclick="openRebuy({o.id})"
@@ -636,7 +835,7 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
       {force_btn}
       <div class="row-pair">
         <div class="row-pair" style="flex:1">
-          <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">История</button>
+          <button type="button" class="act-btn b-blue" style="flex:1" onclick="openHistory({o.id})">History</button>
           <button type="button" class="act-btn b-warn"
                   onclick="openProblem({o.id}, {_js_str(o.bot_name or '')}, {_js_str(o.roblox_username or '')})"
                   title="Пометить проблему по заказу: тип + комментарий. Копится для аналитики по ботам и предметам">⚠</button>
@@ -649,7 +848,8 @@ def _order_row(o, money: dict | None = None, prob: dict | None = None) -> str:
       </div>
     </div>
   </td>
-</tr>"""
+</tr>
+<tr class="xrow" id="x-{o.id}"><td colspan="13"><dl class="xlist">{details_html}</dl></td></tr>"""
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -792,11 +992,11 @@ async def admin_orders(
     )
     pager_html = (
         f'<div class="pager">'
-        f'<span>показано {len(orders)} из {total}</span>'
+        f'<span class="pg-info">показано {len(orders)} из {total}</span>'
         f'<span>стр {page}/{pages}</span>'
         f'{_page_link(page-1, "← Назад", page <= 1)}'
         f'{_page_link(page+1, "Вперёд →", page >= pages)}'
-        f'<span>на странице:</span>'
+        f'<span class="pg-info">на странице:</span>'
         f'<select onchange="changePageSize(this)">{size_opts}</select>'
         f'</div>'
     )
@@ -812,16 +1012,16 @@ async def admin_orders(
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>StarPets — заказы</title><style>{_CSS}</style></head>
+<title>Dashboard - AM</title><style>{_CSS}</style></head>
 <body>
 <header>
-  <h1>Заказы StarPets — Adopt Me
+  <h1>Dashboard - AM
     <a class="xlink" href="/admin/problems" title="Проблемные заказы: учёт и аналитика"
-       style="{'border-color:#e28015;color:#e28015' if open_problems else ''}">⚠ Проблемные{f' ({open_problems})' if open_problems else ''}</a>
+       style="{'border-color:#e28015;color:#e28015' if open_problems else ''}">⚠ issues{f' ({open_problems})' if open_problems else ''}</a>
     <a class="xlink" href="{settings.sibling_admin_url}" title="Открыть админку MM2">↗ MM2</a>
-    <a class="xlink" href="/admin/import-purchase-log" title="Восстановить историю перевыкупов из логов">⟲ импорт журнала</a>
+    <a class="xlink" href="/admin/import-purchase-log" title="Восстановить историю перевыкупов из логов">⟲ import</a>
   </h1>
-  <div class="sub">Операторская панель · всего {total_all} · обновлено {datetime.utcnow().strftime("%H:%M:%S")} UTC</div>
+  <div class="sub">orders {total_all} · updated {(datetime.utcnow() + timedelta(hours=3)).strftime("%H:%M:%S")} MSK</div>
   {_balance_box(balance_usd)}
 </header>
 {flash_html}
@@ -833,11 +1033,13 @@ async def admin_orders(
     <button type="submit">Найти</button>
     {f'<a class="clear" href="/admin?page_size={page_size}" title="Сбросить поиск">✕</a>' if needle else ''}
   </form>
+  <button type="button" class="fbtn{' active' if status else ''}" onclick="toggleFilters()"
+          title="Фильтры по статусу" aria-label="Фильтры">{_FILTER_ICON}</button>
   <div class="filters">{filters_html}</div>
   {pager_html}
 </div>
 <div class="wrap">
-<table>
+<table class="otable">
   <thead><tr>
     <th>ID</th><th>ggsel</th><th>Товар</th><th>Сумма</th><th>Создан</th>
     <th>Roblox ник</th><th>Статус</th><th>SP статус</th><th>Trade ID</th>
@@ -850,7 +1052,7 @@ async def admin_orders(
 <div id="hist-overlay" class="overlay">
   <div class="modal">
     <button class="modal-close" onclick="closeHistory()" title="Закрыть">✕</button>
-    <h2 id="hist-title">История доставки</h2>
+    <h2 id="hist-title">History</h2>
     <table class="hist">
       <thead><tr><th>Время (UTC)</th><th>Trade ID</th><th>Статус</th><th>Тип</th></tr></thead>
       <tbody id="hist-timeline"></tbody>
@@ -865,7 +1067,7 @@ async def admin_orders(
 <div id="reissue-overlay" class="overlay">
   <div class="modal" style="max-width:460px">
     <button class="modal-close" onclick="closeReissue()" title="Закрыть">✕</button>
-    <h2 id="reissue-title">Новый логин</h2>
+    <h2 id="reissue-title">New login</h2>
     <p class="sub" style="margin-bottom:6px">Текущий трейд будет <b>отменён</b>, предмет пересоздан на указанный логин. Убедитесь, что предмет ещё <b>НЕ доставлен</b>.</p>
     <form id="reissue-form" method="post" action="/admin/reissue-new-login" onsubmit="return validateReissue()">
       <input type="hidden" name="order_id" id="reissue-order-id">
@@ -890,7 +1092,7 @@ async def admin_orders(
 <div id="force-overlay" class="overlay">
   <div class="modal" style="max-width:460px">
     <button class="modal-close" onclick="closeForce()" title="Закрыть">✕</button>
-    <h2 id="force-title">Force-выкуп</h2>
+    <h2 id="force-title">Force</h2>
     <p class="sub" style="margin-bottom:10px">Выкуп в обход гарда прибыльности. Сначала показываю <b>live-стоимость</b> и убыток — подтвердите, чтобы выкупить предмет заново.</p>
     <div id="force-body" style="font-size:13px;line-height:1.7">Загрузка…</div>
     <div class="modal-actions">
@@ -1730,7 +1932,7 @@ async def admin_history(
         f"Достиг IN_PROGRESS(5): {in_prog}\n"
         f"Куплен предмет: {order.starpets_purchase_id or '—'} за {exec_price} · оплачен {paid}\n"
         f"Текущий статус заказа: {order.delivery_status.value if order.delivery_status else '—'}\n"
-        f"Последняя проверка «Новый трейд»: {order.last_redeliver_result or '—'}"
+        f"Последняя проверка «New trade»: {order.last_redeliver_result or '—'}"
     )
 
     return JSONResponse({
