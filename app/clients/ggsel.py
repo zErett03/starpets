@@ -123,6 +123,33 @@ class GgselSellerOfficeClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def update_showcase(self, offer_id: int, *, title: str, description_ru: str,
+                              description_en: str, instructions_ru: str, instructions_en: str,
+                              price: float, precheck_url: str, notification_url: str) -> dict:
+        """Витрина Roblox: название, тексты, цена и вебхуки ОДНИМ PATCH. По отдельности это
+        пять запросов на карточку, а темп GGSel режется по 429 на адрес."""
+        body = {
+            "title_ru": title, "title_en": title,
+            "description_ru": description_ru, "description_en": description_en,
+            "instructions_ru": instructions_ru, "instructions_en": instructions_en,
+            "price": price,
+            "pre_payment_settings": {"is_enabled": True, "url": precheck_url,
+                                     "allow_payment": False},   # см. patch_offer: fail-closed
+            "notification_settings": {"type": "url", "url": notification_url,
+                                      "http_method": "POST", "is_disabled": False,
+                                      "is_default": False},
+        }
+        async with httpx.AsyncClient(headers=self._headers(), timeout=30) as client:
+            resp = await self._request_retry(
+                client, "PATCH", f"{SELLER_OFFICE_V2_URL}/offers/{offer_id}", json=body,
+                retries=5, retry_500=True,
+            )
+            if not resp.is_success:
+                print(f"[update_showcase] offer_id={offer_id} status={resp.status_code} "
+                      f"body={resp.text[:300]}", flush=True)
+            resp.raise_for_status()
+            return resp.json()
+
     async def update_content(self, offer_id: int, description_ru: str, description_en: str,
                              instructions_ru: str, instructions_en: str) -> dict:
         body = {

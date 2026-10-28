@@ -41,6 +41,7 @@ from app.showcase import describe, showcase_card, with_block
 from app.workers.offer_creator import _INSTRUCTIONS_EN, _INSTRUCTIONS_RU, _resolve_category
 
 _running = False
+ACTIVATE_BATCH = 50
 
 
 def _hooks(gid: int) -> tuple[str, str]:
@@ -75,15 +76,15 @@ async def _cover(prod: SkuProduct) -> str:
 
 
 async def _reuse(gid: int, title: str, desc_ru: str, desc_en: str, price: float) -> None:
-    """Старая поштучная карточка → карточка витрины. Бросает при любой ошибке."""
-    await ggsel_office.update_title(gid, title, title)
-    await ggsel_office.update_content(gid, desc_ru, desc_en, _INSTRUCTIONS_RU, _INSTRUCTIONS_EN)
+    """Старая поштучная карточка → карточка витрины, без включения (оно пачкой).
+    Два запроса: всё содержимое одним PATCH + проверка галочки согласия."""
+    pre, notif = _hooks(gid)
+    await ggsel_office.update_showcase(
+        gid, title=title, description_ru=desc_ru, description_en=desc_en,
+        instructions_ru=_INSTRUCTIONS_RU, instructions_en=_INSTRUCTIONS_EN,
+        price=price, precheck_url=pre, notification_url=notif)
     if not await ggsel_office.has_consent_option(gid):
         await ggsel_office.create_consent_option(gid)
-    pre, notif = _hooks(gid)
-    await ggsel_office.patch_offer(offer_id=gid, precheck_url=pre, notification_url=notif)
-    await ggsel_office.update_price(gid, price)
-    await ggsel_office.batch_activate([gid])
 
 
 async def _create(offer: Offer, prod: SkuProduct, title: str, desc_ru: str, desc_en: str,
@@ -106,7 +107,6 @@ async def _create(offer: Offer, prod: SkuProduct, title: str, desc_ru: str, desc
         await ggsel_office.create_consent_option(gid)    # согласие
         pre, notif = _hooks(gid)
         await ggsel_office.patch_offer(offer_id=gid, precheck_url=pre, notification_url=notif)
-        await ggsel_office.batch_activate([gid])
     except Exception:
         # Полусобранную карточку не оставляем в продаже; id всё равно запишем —
         # повторный прогон дособерёт её через _reuse.
@@ -197,6 +197,34 @@ async def _build(max_cards: int, dry_run: bool, retire_sku: bool) -> dict:
 
     done = Counter()
     budget = max_cards
+    # Готовые карточки включаются пачкой (batch_activate), а в базу пишутся только после
+    # включения: строка `active` = карточка правда горит.
+    pending: list[tuple[int, int, dict]] = []   # (offer.id, gid, значения строки)
+
+    async def flush() -> None:
+        if not pending:
+            return
+        chunk = list(pending)
+        pending.clear()
+        try:
+            await ggsel_office.batch_activate([g for _o, g, _v in chunk])
+        except Exception as e:  # noqa: BLE001 — не включились: повтор следующим прогоном
+            done["activate_failed"] += len(chunk)
+            print(f"[Showcase] включение пачки {len(chunk)}: {type(e).__name__}: {e}", flush=True)
+            async with AsyncSessionLocal() as db:
+                for oid, _g, vals in chunk:
+                    # Оформление уже на площадке; строку помечаем витринной, но на паузе —
+                    # следующий прогон включит её веткой «вернуть в продажу».
+                    await db.execute(sql_update(Offer).where(Offer.id == oid).values(
+                        {**vals, "status": OfferStatus.paused}))
+                await db.commit()
+            return
+        async with AsyncSessionLocal() as db:
+            for oid, _g, vals in chunk:
+                await db.execute(sql_update(Offer).where(Offer.id == oid).values(vals))
+            await db.commit()
+        done["activated"] += len(chunk)
+
     for offer, floor in todo_relive:
         if budget <= 0:
             break
@@ -204,16 +232,15 @@ async def _build(max_cards: int, dry_run: bool, retire_sku: bool) -> dict:
         price = calc_price_rub(floor, settings.markup, fx)
         try:
             await ggsel_office.update_price(offer.ggsel_offer_id, price)
-            await ggsel_office.batch_activate([offer.ggsel_offer_id])
         except Exception as e:  # noqa: BLE001 — одна карточка не роняет прогон
             done["relive_failed"] += 1
-            print(f"[Showcase] включение {offer.ggsel_offer_id}: {type(e).__name__}: {e}", flush=True)
+            print(f"[Showcase] цена {offer.ggsel_offer_id}: {type(e).__name__}: {e}", flush=True)
             continue
-        async with AsyncSessionLocal() as db:
-            await db.execute(sql_update(Offer).where(Offer.id == offer.id).values(
-                status=OfferStatus.active, price_usd=floor, price_rub=price))
-            await db.commit()
+        pending.append((offer.id, int(offer.ggsel_offer_id), dict(
+            status=OfferStatus.active, price_usd=floor, price_rub=price)))
         done["relived"] += 1
+        if len(pending) >= ACTIVATE_BATCH:
+            await flush()
         await asyncio.sleep(pause)
 
     for offer, prod, sc, floor in todo_reuse + todo_new:
@@ -243,13 +270,14 @@ async def _build(max_cards: int, dry_run: bool, retire_sku: bool) -> dict:
                   f"{traceback.format_exc()[-600:]}", flush=True)
             await asyncio.sleep(pause)
             continue
-        async with AsyncSessionLocal() as db:
-            await db.execute(sql_update(Offer).where(Offer.id == offer.id).values(
-                ggsel_offer_id=int(gid), status=OfferStatus.active, roblox_showcase=True,
-                price_usd=floor, price_rub=price, last_error=None))
-            await db.commit()
+        pending.append((offer.id, int(gid), dict(
+            ggsel_offer_id=int(gid), status=OfferStatus.active, roblox_showcase=True,
+            price_usd=floor, price_rub=price, last_error=None)))
         done[mode] += 1
+        if len(pending) >= ACTIVATE_BATCH:
+            await flush()
         await asyncio.sleep(pause)
+    await flush()
 
     out["done"] = dict(done)
     if retire_sku:
