@@ -243,10 +243,21 @@ async def _build(max_cards: int, dry_run: bool, retire_sku: bool) -> dict:
             await flush()
         await asyncio.sleep(pause)
 
-    for offer, prod, sc, floor in todo_reuse + todo_new:
-        if budget <= 0:
-            break
-        budget -= 1
+    work = (todo_reuse + todo_new)[:max(0, budget)]
+    gate = asyncio.Semaphore(max(1, settings.showcase_width))
+    flush_lock = asyncio.Lock()
+
+    async def flush_locked() -> None:
+        async with flush_lock:
+            await flush()
+
+    async def one(offer, prod, sc, floor) -> None:
+        async with gate:
+            await _one(offer, prod, sc, floor)
+        if len(pending) >= ACTIVATE_BATCH:
+            await flush_locked()
+
+    async def _one(offer, prod, sc, floor) -> None:
         price = calc_price_rub(floor, settings.markup, fx)
         desc_ru, desc_en = _texts(offer, prod, sc.block)
         gid = offer.ggsel_offer_id
@@ -269,15 +280,17 @@ async def _build(max_cards: int, dry_run: bool, retire_sku: bool) -> dict:
             print(f"[Showcase] {offer.id} {sc.title!r}: {type(e).__name__}: {e}\n"
                   f"{traceback.format_exc()[-600:]}", flush=True)
             await asyncio.sleep(pause)
-            continue
+            return
         pending.append((offer.id, int(gid), dict(
             ggsel_offer_id=int(gid), status=OfferStatus.active, roblox_showcase=True,
             price_usd=floor, price_rub=price, last_error=None)))
         done[mode] += 1
-        if len(pending) >= ACTIVATE_BATCH:
-            await flush()
         await asyncio.sleep(pause)
-    await flush()
+
+    # Несколько карточек сразу (SHOWCASE_WIDTH): ответ GGSel — около секунды, и по одной
+    # адрес простаивает; 429 клиент повторяет сам.
+    await asyncio.gather(*(one(*c) for c in work))
+    await flush_locked()
 
     out["done"] = dict(done)
     if retire_sku:

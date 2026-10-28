@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     showcase_build_minutes: int = 5
     showcase_build_max_cards: int = 300
     showcase_pause_sec: float = 0.1
+    showcase_width: int = 3   # карточек одновременно
     # Ключ `delivery` блока. Карточки заводятся с выдачей manual (create_offer), а
     # инструкция витрины требует, чтобы блок совпадал с плашкой выдачи на карточке.
     showcase_delivery: str = "manual"
