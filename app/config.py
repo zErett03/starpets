@@ -126,6 +126,17 @@ class Settings(BaseSettings):
     event_price_sync: bool = False
     sku_price_sync: bool = False   # Phase 3: periodic SKU variant price refresh (SKU_PRICE_SYNC=true)
     sku_stock_sync: bool = False   # hide out-of-stock SKU variants (SKU_STOCK_SYNC=true)
+    # Витрина Roblox (app/workers/showcase_builder.py): карточка на вариант вместо карточки
+    # с меню. SHOWCASE_BUILD=true включает заведение по расписанию; до этого — только
+    # ручной /showcase-build. max_cards — записей за прогон: GGSel режет темп по 429.
+    showcase_build: bool = False
+    showcase_build_minutes: int = 5
+    showcase_build_max_cards: int = 60
+    showcase_pause_sec: float = 0.5
+    # Ключ `delivery` блока. Карточки заводятся с выдачей manual (create_offer), а
+    # инструкция витрины требует, чтобы блок совпадал с плашкой выдачи на карточке.
+    showcase_delivery: str = "manual"
+    showcase_retire_sku: bool = True
     # Периодичность и охват SKU-синка. Дрейф копится, когда за прогон обрабатывается меньше
     # карточек, чем успевает уехать. max_cards — бюджет ЗАПИСЕЙ за прогон (проверяются все),
     # max_rebuilds — пересборок дефолта (каждая ~26 вызовов ggsel, это узкое место).

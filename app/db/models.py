@@ -89,6 +89,11 @@ class Offer(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Витрина Roblox (миграция 0022): поштучная карточка оформлена под витрину;
+    # у SKU-карточки — погашена ради витрины, синки SKU её не трогают.
+    roblox_showcase = Column(Boolean, default=False, server_default="false", nullable=False)
+    showcase_retired = Column(Boolean, default=False, server_default="false", nullable=False)
+
     orders = relationship("Order", back_populates="offer")
 
 

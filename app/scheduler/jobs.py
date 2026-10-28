@@ -232,6 +232,18 @@ async def sku_stock_sync_safe():
         print(f"[Scheduler] sku_stock_sync error: {e}", flush=True)
 
 
+async def showcase_build_safe():
+    from app.config import settings
+    if not settings.showcase_build:
+        return  # витрина Roblox: заведение по расписанию выключено (SHOWCASE_BUILD=true)
+    try:
+        from app.workers.showcase_builder import showcase_build
+        await showcase_build(max_cards=settings.showcase_build_max_cards, dry_run=False,
+                             retire_sku=settings.showcase_retire_sku)
+    except Exception as e:
+        print(f"[Scheduler] showcase_build error: {e}", flush=True)
+
+
 async def price_watch_safe():
     """Сторож цен: ищет карточки дешевле себестоимости и зовёт оператора в Telegram.
 
@@ -366,6 +378,9 @@ def start_scheduler() -> AsyncIOScheduler:
                       max_instances=1, coalesce=True)
     scheduler.add_job(sku_stock_sync_safe, "interval",
                       minutes=settings.sku_stock_sync_minutes, id="sku_stock_sync",
+                      max_instances=1, coalesce=True)
+    scheduler.add_job(showcase_build_safe, "interval",
+                      minutes=settings.showcase_build_minutes, id="showcase_build",
                       max_instances=1, coalesce=True)
     scheduler.add_job(reconcile_stuck_safe, "interval", minutes=30, id="reconcile_stuck")
     scheduler.add_job(price_watch_safe, "interval",

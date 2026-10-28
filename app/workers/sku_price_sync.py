@@ -17,6 +17,7 @@ from app.db.models import SkuVariant, SkuProduct, Offer
 from app.clients.ggsel import ggsel_office
 from app.workers.sku_builder import _variant_sort_key
 from app.workers.sku_variant_map import align_created
+from app.workers.sku_stock_sync import _retired_sku_gids
 
 _STALE_FACTOR = 1.15   # default price may sit up to 15% above the live min before we rebuild
 
@@ -136,7 +137,8 @@ async def sku_price_sync(threshold_rub: float = 5.0, threshold_pct: float = 0.05
             .join(Offer, Offer.starpets_product_id == SkuVariant.starpets_product_id)
             .join(SkuProduct, SkuProduct.product_id == SkuVariant.starpets_product_id)
             .where(Offer.price_rub.isnot(None), Offer.price_rub > 0,
-                   SkuVariant.hidden.is_(False))   # skip stock-hidden variants (archived on ggsel)
+                   SkuVariant.hidden.is_(False),   # skip stock-hidden variants (archived on ggsel)
+                   SkuVariant.ggsel_offer_id.notin_(_retired_sku_gids()))  # погашены ради витрины
         )).all()
 
     cards: dict = {}

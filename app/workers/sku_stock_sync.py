@@ -23,6 +23,12 @@ _oos_streak: dict = {}          # (gid, product_id) -> consecutive OOS count (in
 _running = False                # guard: no concurrent writing runs (racing rebuilds -> 422)
 
 
+def _retired_sku_gids():
+    """SKU-карточки, погашенные ради витрины Roblox (`showcase_builder`)."""
+    return (select(Offer.ggsel_offer_id)
+            .where(Offer.showcase_retired.is_(True), Offer.ggsel_offer_id.isnot(None)))
+
+
 class _P:
     __slots__ = ("age", "flyable", "rideable")
 
@@ -110,7 +116,9 @@ async def _sku_stock_sync_impl(max_cards: int, dry_run: bool) -> dict:
             )
             .join(Offer, Offer.starpets_product_id == SkuVariant.starpets_product_id)
             .join(SkuProduct, SkuProduct.product_id == SkuVariant.starpets_product_id)
-            .where(Offer.price_rub.isnot(None), Offer.price_rub > 0)
+            .where(Offer.price_rub.isnot(None), Offer.price_rub > 0,
+                   # погашенные ради витрины не включаем и не пересобираем
+                   SkuVariant.ggsel_offer_id.notin_(_retired_sku_gids()))
         )).all()
 
     cards: dict = {}

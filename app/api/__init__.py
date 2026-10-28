@@ -4474,6 +4474,18 @@ async def sku_stock_sync_ep(dry_run: bool = True, max_cards: int = 40):
     return {"started": True, "max_cards": max_cards, "note": "background; see [SkuStockSync] in logs"}
 
 
+@app.get("/showcase-build")
+async def showcase_build_ep(dry_run: bool = True, max_cards: int = 20, retire_sku: bool = True):
+    """Витрина Roblox: карточка на каждый вариант в наличии, SKU-карточки с меню гаснут,
+    когда разложены. ?dry_run=true (по умолчанию) — только план и пример блока."""
+    from app.workers.showcase_builder import showcase_build
+    if dry_run:
+        return await showcase_build(max_cards=max_cards, dry_run=True, retire_sku=retire_sku)
+    import asyncio
+    asyncio.create_task(showcase_build(max_cards=max_cards, dry_run=False, retire_sku=retire_sku))
+    return {"started": True, "max_cards": max_cards, "note": "background; see [Showcase] in logs"}
+
+
 @app.get("/force-deliver")
 async def force_deliver(order_id: int, confirm: bool = False):
     """Operator override: deliver an order EVEN AT A LOSS. Two-step: without confirm it shows the
