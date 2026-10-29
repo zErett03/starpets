@@ -364,3 +364,208 @@ async def accounting_orders(days: int = 30, only_problems: bool = False, limit: 
             "error": (o.error_reason or "")[:120] or None,
         })
     return {"count": len(out), "orders": out}
+
+
+@router.get("/accounting/starpets-reconcile")
+async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: float = 0.0,
+                                        limit: int = 100):
+    """
+    Сверка закупа с цифрами StarPets за всё время, в долларах: «стоимость успешных выдач»
+    и «стоимость отменённых покупок». sp_delivered / sp_canceled — их цифры; если переданы,
+    в ответе будет разница.
+
+    Считаем ПОКУПКИ, а не заказы: StarPets видит каждый купленный предмет, а наш заказ мог
+    купить два-три (перевыкупы). Покупки собираются из журнала (purchase_log) и из текущей
+    покупки заказа (orders.starpets_purchase_id) по id покупки StarPets — так одна и та же
+    покупка не считается дважды.
+
+    Куда относится покупка:
+      выдана   — текущая покупка заказа «Доставлен» (done/finalized);
+      отменена — по журналу брошена или возвращена; вытеснена перевыкупом без записи о
+                 возврате; текущая покупка сорванного или закрытого заказа; невыданная,
+                 у которой истёк час жизни (такие StarPets возвращает сам);
+      открыта  — исход ещё неизвестен.
+
+    Доказательство выдачи — только событие трейда FINISHED(8) в trade_events. Заказы, где
+    наш статус и это событие расходятся, перечислены в suspects: в них и надо искать
+    разницу с цифрами StarPets.
+    """
+    from collections import Counter
+
+    from app.config import settings
+    from app.db.models import PurchaseLog, TradeEvent
+    from app.deadline import item_expired
+
+    async with AsyncSessionLocal() as db:
+        orders = (await db.execute(select(Order))).scalars().all()
+        logs = (await db.execute(select(PurchaseLog).order_by(PurchaseLog.id))).scalars().all()
+        with_events = set((await db.execute(
+            select(TradeEvent.order_id).where(TradeEvent.order_id.isnot(None)).distinct()
+        )).scalars().all())
+        finished = set((await db.execute(
+            select(TradeEvent.order_id).where(TradeEvent.status == 8).distinct()
+        )).scalars().all())
+
+    def _key(pid, order_id) -> str:
+        # Покупка без id бывает только в старых записях — считаем её одной на заказ.
+        return str(pid) if pid else f"order{order_id}:noid"
+
+    def _f(v):
+        return float(v) if v is not None else None
+
+    purchases: dict[str, dict] = {}
+
+    def _slot(key: str, order_id: int) -> dict:
+        return purchases.setdefault(key, {"order_id": order_id, "buy": None, "exec": None,
+                                          "back": None, "returned": False})
+
+    for r in logs:
+        p = _slot(_key(r.starpets_purchase_id, r.order_id), r.order_id)
+        if r.kind == "buy":
+            p["buy"] = _f(r.price_usd)
+        elif r.kind in ("abandon", "refund"):
+            # abandon и refund по одному предмету — один и тот же возврат, не два.
+            p["returned"] = True
+            if r.price_usd is not None:
+                p["back"] = max(p["back"] or 0.0, float(r.price_usd))
+
+    current: dict[str, Order] = {}
+    for o in orders:
+        if not (o.starpets_purchase_id or o.exec_price_usd):
+            continue
+        key = _key(o.starpets_purchase_id, o.id)
+        current[key] = o
+        _slot(key, o.id)["exec"] = _f(o.exec_price_usd)
+
+    def _bucket() -> dict:
+        return {"purchases": 0, "usd": 0.0}
+
+    def _add(b: dict, usd: float) -> None:
+        b["purchases"] += 1
+        b["usd"] += usd
+
+    delivered = {"finished_8": _bucket(), "events_without_8": _bucket(), "no_events": _bucket()}
+    canceled = {"returned_logged": _bucket(), "superseded_unlogged": _bucket(),
+                "order_failed_or_closed": _bucket(), "expired_unlogged": _bucket()}
+    open_: dict[str, dict] = {}
+    not_in_accounting = _bucket()
+    no_price = 0
+    unconfirmed, delivered_but_returned = [], []
+    now = datetime.utcnow()
+
+    def _row(o: Order, usd: float) -> dict:
+        return {
+            "id": o.id,
+            "ggsel_order_id": o.ggsel_order_id,
+            "item": o.item_name,
+            "status": o.delivery_status.value if o.delivery_status else None,
+            "cost_usd": round(usd, 3),
+            "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+            "delivered_at": o.delivered_at.isoformat() if o.delivered_at else None,
+            "starpets_purchase_id": o.starpets_purchase_id,
+            "trade_id": o.starpets_custom_id,
+            "last_trade_status": o.starpets_status,
+            "has_trade_events": o.id in with_events,
+        }
+
+    for key, p in purchases.items():
+        price = next((v for v in (p["buy"], p["exec"], p["back"]) if v is not None), None)
+        if price is None:
+            no_price += 1
+            price = 0.0
+        cur = current.get(key)
+        if cur is not None and cur.delivery_status in _DELIVERED:
+            if cur.id in finished:
+                _add(delivered["finished_8"], price)
+            else:
+                _add(delivered["events_without_8" if cur.id in with_events else "no_events"],
+                     price)
+                unconfirmed.append(_row(cur, price))
+            if cur.paid_at is None or float(cur.amount_rub or 0) <= 0:
+                _add(not_in_accounting, price)
+            if p["returned"]:
+                # Мы считаем предмет выданным, а журнал говорит, что StarPets его вернул.
+                delivered_but_returned.append(_row(cur, price))
+        elif p["returned"]:
+            _add(canceled["returned_logged"], price)
+        elif cur is None:
+            _add(canceled["superseded_unlogged"], price)
+        elif cur.delivery_status in _REFUNDED:
+            _add(canceled["order_failed_or_closed"], price)
+        elif item_expired(cur, now):
+            _add(canceled["expired_unlogged"], price)
+        else:
+            st = cur.delivery_status.value if cur.delivery_status else "unknown"
+            _add(open_.setdefault(st, _bucket()), price)
+
+    # Обратный случай: трейд дошёл до FINISHED(8), а заказ у нас не «Доставлен». StarPets
+    # такую покупку, скорее всего, считает выдачей — а если покупателю ещё и вернули
+    # деньги, это прямой убыток на всю стоимость предмета.
+    finished_not_delivered = [
+        _row(o, float(o.exec_price_usd or 0)) for o in orders
+        if o.id in finished and o.delivery_status not in _DELIVERED
+    ]
+
+    def _total(buckets: dict) -> dict:
+        return {"purchases": sum(b["purchases"] for b in buckets.values()),
+                "usd": round(sum(b["usd"] for b in buckets.values()), 2)}
+
+    def _rounded(buckets: dict) -> dict:
+        return {k: {"purchases": b["purchases"], "usd": round(b["usd"], 2)}
+                for k, b in buckets.items()}
+
+    delivered_total, canceled_total = _total(delivered), _total(canceled)
+
+    # Покрытие журнала: он ведётся с 04.08.2026. Покупки до этого есть в нём, только если
+    # делали импорт из логов Railway (/admin/import-purchase-log), иначе перевыкупы того
+    # времени не видны вовсе, и отменённых у нас выйдет меньше, чем у StarPets.
+    journal_start = min((r.created_at for r in logs if r.source == "worker"), default=None)
+    logged_orders = {r.order_id for r in logs}
+    before = [o for o in orders
+              if journal_start and o.created_at and o.created_at < journal_start
+              and (o.starpets_purchase_id or o.exec_price_usd)]
+
+    unconfirmed.sort(key=lambda r: r["delivered_at"] or "", reverse=True)
+    return {
+        "service": settings.public_url,
+        "delivered": {
+            **delivered_total,
+            "diff_vs_starpets": (round(delivered_total["usd"] - sp_delivered, 2)
+                                 if sp_delivered else None),
+            "by_evidence": _rounded(delivered),
+            "not_in_accounting_report": {"purchases": not_in_accounting["purchases"],
+                                         "usd": round(not_in_accounting["usd"], 2)},
+        },
+        "canceled": {
+            **canceled_total,
+            "diff_vs_starpets": (round(canceled_total["usd"] - sp_canceled, 2)
+                                 if sp_canceled else None),
+            "by_reason": _rounded(canceled),
+        },
+        "open": {**_total(open_), "by_status": _rounded(open_)},
+        "journal": {
+            "rows": len(logs),
+            "by_source": dict(Counter(r.source or "unknown" for r in logs)),
+            "by_kind": dict(Counter(r.kind for r in logs)),
+            "worker_since": journal_start.isoformat() if journal_start else None,
+            "orders_before_journal": len(before),
+            "of_them_with_log_rows": sum(1 for o in before if o.id in logged_orders),
+        },
+        "purchases_without_price": no_price,
+        "suspects": {
+            "delivered_without_finish_8": {"count": len(unconfirmed),
+                                           "orders": unconfirmed[:limit]},
+            "finish_8_but_not_delivered": {"count": len(finished_not_delivered),
+                                           "orders": finished_not_delivered[:limit]},
+            "delivered_but_returned_in_log": {"count": len(delivered_but_returned),
+                                              "orders": delivered_but_returned[:limit]},
+        },
+        "notes": [
+            "by_evidence.no_events — заказы без единого события трейда: до 01.07.2026 "
+            "события не записывались, позже так выглядят заказы, закрытые вручную",
+            "not_in_accounting_report — выдачи, которых нет в /accounting: там пропускаются "
+            "заказы без даты оплаты или суммы",
+            "superseded_unlogged — покупка заказа, вытесненная следующей, без записи о "
+            "возврате. Почти наверняка StarPets её отменил, но по журналу это не видно",
+        ],
+    }
