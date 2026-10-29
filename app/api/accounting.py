@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter
@@ -394,7 +394,7 @@ async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: 
 
     from app.config import settings
     from app.db.models import PurchaseLog, TradeEvent
-    from app.deadline import item_expired
+    from app.deadline import ITEM_LIFETIME, item_expired
 
     async with AsyncSessionLocal() as db:
         orders = (await db.execute(select(Order))).scalars().all()
@@ -405,6 +405,11 @@ async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: 
         finished = set((await db.execute(
             select(TradeEvent.order_id).where(TradeEvent.status == 8).distinct()
         )).scalars().all())
+        trade_rows = (await db.execute(
+            select(TradeEvent.order_id, TradeEvent.trade_id, TradeEvent.occurred_at,
+                   TradeEvent.recorded_at)
+            .where(TradeEvent.order_id.isnot(None), TradeEvent.trade_id.isnot(None))
+        )).all()
 
     def _key(pid, order_id) -> str:
         # Покупка без id бывает только в старых записях — считаем её одной на заказ.
@@ -525,6 +530,73 @@ async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: 
               if journal_start and o.created_at and o.created_at < journal_start
               and (o.starpets_purchase_id or o.exec_price_usd)]
 
+    # Перевыкупы до журнала. Цены их покупок потеряны, но трейды остались: trade_events
+    # пишутся с 01.07 и хранят все трейды заказа, включая повторные. Один предмет живёт
+    # час, и повторный трейд в этот час идёт тем же предметом, поэтому покупки оцениваем
+    # окнами: трейд позже часа от начала текущего окна — уже новая покупка. Оценка
+    # проверяется на заказах после старта журнала, где настоящее число покупок известно.
+    def _naive(t):
+        return t.astimezone(timezone.utc).replace(tzinfo=None) if t and t.tzinfo else t
+
+    trade_start: dict[int, dict[str, datetime]] = {}
+    for oid, tid, occurred, recorded in trade_rows:
+        t = _naive(occurred or recorded)
+        if t is None:
+            continue
+        d = trade_start.setdefault(oid, {})
+        if tid not in d or t < d[tid]:
+            d[tid] = t
+
+    def _windows(starts) -> int:
+        n, anchor = 0, None
+        for t in sorted(starts):
+            if anchor is None or t - anchor > ITEM_LIFETIME:
+                n, anchor = n + 1, t
+        return n
+
+    by_id = {o.id: o for o in orders}
+    known = Counter(p["order_id"] for p in purchases.values())
+    buys = Counter(r.order_id for r in logs if r.kind == "buy")
+    cal = {"orders": 0, "actual_extra": 0, "predicted_extra": 0, "exact": 0}
+    est = {"orders": 0, "extra_purchases": 0, "usd": 0.0}
+    est_rows = []
+    for oid, trades in trade_start.items():
+        o = by_id.get(oid)
+        if o is None or o.created_at is None:
+            continue
+        predicted = _windows(trades.values())
+        if journal_start and _naive(o.created_at) >= _naive(journal_start):
+            if buys[oid]:
+                cal["orders"] += 1
+                cal["actual_extra"] += buys[oid] - 1
+                cal["predicted_extra"] += predicted - 1
+                cal["exact"] += predicted == buys[oid]
+            continue
+        extra = predicted - known[oid]
+        if extra <= 0:
+            continue
+        usd = extra * float(o.exec_price_usd or 0)
+        est["orders"] += 1
+        est["extra_purchases"] += extra
+        est["usd"] += usd
+        est_rows.append({"id": o.id, "ggsel_order_id": o.ggsel_order_id, "item": o.item_name,
+                         "status": o.delivery_status.value if o.delivery_status else None,
+                         "trades": len(trades), "est_purchases": predicted,
+                         "known_purchases": known[oid], "extra_usd": round(usd, 3)})
+    est_rows.sort(key=lambda r: r["extra_usd"], reverse=True)
+    ratio = (cal["actual_extra"] / cal["predicted_extra"]) if cal["predicted_extra"] else None
+    est_usd_cal = round(est["usd"] * ratio, 2) if ratio is not None else None
+    # Без калибровки (у журнала нет перевыкупов) берём сырую оценку — и помечаем это.
+    est_usd_used = est_usd_cal if est_usd_cal is not None else round(est["usd"], 2)
+
+    # Покрытие: у скольких заказов до журнала (но после начала записи трейдов) трейды
+    # вообще есть. Заказ без трейдов в оценку не попадает, так что при плохом покрытии
+    # она — нижняя граница, а не полный счёт.
+    all_starts = [t for d in trade_start.values() for t in d.values()]
+    events_since = min(all_starts) if all_starts else None
+    in_window = [o for o in before
+                 if events_since and o.created_at and _naive(o.created_at) >= events_since]
+
     unconfirmed.sort(key=lambda r: r["delivered_at"] or "", reverse=True)
     return {
         "service": settings.public_url,
@@ -552,6 +624,25 @@ async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: 
             "of_them_with_log_rows": sum(1 for o in before if o.id in logged_orders),
         },
         "purchases_without_price": no_price,
+        "rebuys_before_journal": {
+            "orders": est["orders"],
+            "extra_purchases": est["extra_purchases"],
+            "usd": round(est["usd"], 2),
+            "calibration_after_journal": {**cal,
+                                          "ratio": round(ratio, 3) if ratio is not None else None},
+            "usd_calibrated": est_usd_cal,
+            "estimate_used": "calibrated" if est_usd_cal is not None else "raw",
+            "canceled_with_estimate": round(canceled_total["usd"] + est_usd_used, 2),
+            "diff_vs_starpets_with_estimate": (
+                round(canceled_total["usd"] + est_usd_used - sp_canceled, 2)
+                if sp_canceled else None),
+            "coverage": {
+                "trades_recorded_since": events_since.isoformat() if events_since else None,
+                "orders_before_journal_since_then": len(in_window),
+                "of_them_with_trades": sum(1 for o in in_window if o.id in trade_start),
+            },
+            "orders_sample": est_rows[:limit],
+        },
         "suspects": {
             "delivered_without_finish_8": {"count": len(unconfirmed),
                                            "orders": unconfirmed[:limit]},
@@ -567,5 +658,12 @@ async def accounting_starpets_reconcile(sp_delivered: float = 0.0, sp_canceled: 
             "заказы без даты оплаты или суммы",
             "superseded_unlogged — покупка заказа, вытесненная следующей, без записи о "
             "возврате. Почти наверняка StarPets её отменил, но по журналу это не видно",
+            "rebuys_before_journal — ОЦЕНКА покупок, которых нет ни в журнале, ни в заказе: "
+            "по трейдам заказа (с 01.07), новая покупка — трейд позже часа от прошлой; цена — "
+            "текущая цена заказа. calibration_after_journal — та же оценка на заказах с "
+            "журналом против настоящего числа перевыкупов; usd_calibrated поправлен на "
+            "их отношение (estimate_used=raw — калибровать было не на чем). В canceled.usd "
+            "не входит. coverage — у скольких заказов того времени трейды вообще записаны: "
+            "заказы без трейдов оценка не видит, при плохом покрытии это нижняя граница",
         ],
     }
